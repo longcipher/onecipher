@@ -1,0 +1,283 @@
+[workspace]
+resolver = "3"
+members = [
+    "bin/oc-cli",
+    "crates/oc-conformance",
+    "crates/oc-core",
+    "crates/oc-crypto",
+    "crates/oc-intent",
+    "crates/oc-keyagent",
+    "crates/oc-netagent",
+    "crates/oc-pay",
+    "crates/oc-pay-http",
+    "crates/oc-policy",
+    "crates/oc-proto",
+    "crates/oc-secret",
+    "crates/oc-session-key",
+    "crates/oc-signer",
+    "crates/oc-signing-core",
+    "crates/oc-vault",
+    "crates/oc-wallet",
+    "crates/oc-walletconnect",
+]
+exclude = ["examples", "fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/longcipher/onecipher"
+publish = false
+
+[workspace.dependencies]
+# local crates
+oc-core = { path = "crates/oc-core" }
+oc-crypto = { path = "crates/oc-crypto" }
+oc-intent = { path = "crates/oc-intent" }
+oc-keyagent = { path = "crates/oc-keyagent" }
+oc-netagent = { path = "crates/oc-netagent" }
+oc-pay-http = { path = "crates/oc-pay-http" }
+oc-paymaster = { path = "crates/oc-paymaster" }
+oc-policy = { path = "crates/oc-policy" }
+oc-proto = { path = "crates/oc-proto" }
+oc-secret = { path = "crates/oc-secret" }
+oc-session-key = { path = "crates/oc-session-key" }
+oc-signer = { path = "crates/oc-signer" }
+oc-signing-core = { path = "crates/oc-signing-core" }
+oc-vault = { path = "crates/oc-vault" }
+oc-wallet = { path = "crates/oc-wallet", default-features = false }
+oc-walletconnect = { path = "crates/oc-walletconnect" }
+
+# external crates
+aes-gcm-siv = "0.11.0"
+age = "0.12.1"
+arboard = "3.6.1"
+argon2 = "0.5.3"
+async-trait = "0.1.91"
+backon = "1.6.0"
+base64 = "0.22.1"
+bech32 = "0.12.0"
+bitcoin = "0.32.102"
+blake2 = "0.11.0-rc.6"
+bs58 = "0.5.1"
+chacha20poly1305 = "0.11.0"
+clap = "4.6.4"
+coins-bip32 = "0.13.0"
+coins-bip39 = "0.13.0"
+criterion = "0.8.2"
+crossterm = "0.29.0"
+cucumber = "0.23.0"
+digest = "0.11.3"
+ed25519-dalek = "3.0.0"
+eyre = "0.6.12"
+futures = "0.3.33"
+getrandom = "0.4.3"
+git2 = "0.21.0"
+hex = "0.4.3"
+hkdf = "0.13.0"
+hmac = "0.13"
+hpx = { version = "2.5.10", default-features = false, features = ["boring-tls", "http1", "http2", "json"] }
+hpx-yawc = "2.5.10"
+jiff = { version = "0.2", default-features = false, features = ["serde", "std"] }
+k256 = "0.14.0"
+libc = "0.2.189"
+# ml-kem 0.3.x conflicts with age 0.12.1's ml-kem 0.2.x via kem crate version.
+# TODO: re-add ml-kem when age updates to ml-kem 0.3.x.
+ml-dsa = "0.1.1"
+p256 = "0.14.0"
+proptest = "1.11.0"
+prost = "0.14.4"
+prost-build = "0.14.4"
+rand = "0.10.2"
+ratatui = "0.30.2"
+ripemd = "0.2.0"
+rust_decimal = "1.42.1"
+secrecy = "0.10.3"
+serde = "1.0.229"
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+sha3 = "0.12.0"
+signal-hook = "0.4.4"
+tempfile = "3.27.0"
+thiserror = "2.0.19"
+tokio = "1.53.1"
+tonic = "0.14.6"
+tonic-prost = "0.14.6"
+totp-rs = { version = "5.7.2", default-features = false }
+tracing = "0.1.44"
+uuid = "1.24.0"
+windows-sys = "0.61.2"
+x25519-dalek = "3.0.0"
+xrpl-rust = { version = "1.2.0", default-features = false }
+zeroize = "1.9.0"
+
+[workspace.lints.clippy]
+# Pedantic baseline — strict code quality
+pedantic = { level = "warn", priority = -1 }
+
+# Common pedantic overrides (low signal / noisy)
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+doc_markdown = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+module_name_repetitions = "allow"
+struct_excessive_bools = "allow"
+fn_params_excessive_bools = "allow"
+items_after_statements = "allow"
+uninlined_format_args = "allow"
+return_self_not_must_use = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_possible_wrap = "allow"
+default_trait_access = "allow"
+unused_async = "allow"
+manual_let_else = "allow"
+used_underscore_binding = "allow"
+ref_option_ref = "allow"
+ref_option = "allow"
+format_push_string = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+unnecessary_wraps = "allow"
+needless_pass_by_value = "allow"
+trivially_copy_pass_by_ref = "allow"
+no_effect_underscore_binding = "allow"
+redundant_closure_for_method_calls = "allow"
+
+# Panic safety — `unwrap_used`/`expect_used`/`panic` are allowed because test
+# code legitimately uses them. Production code should still avoid them — code
+# review enforces this.
+unwrap_used = "allow"
+expect_used = "allow"
+panic = "allow"
+allow_attributes = "allow"
+result_large_err = "allow"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+# Libraries use tracing; CLI/bin crates use println/eprintln directly. Some
+# modules fully designed and implemented in accordance with the Open Wallet Standard (process_hardening, chain deprecation
+# warnings) use eprintln for user-facing diagnostics — allow globally.
+print_stdout = "allow"
+print_stderr = "allow"
+
+# Nursery lints (selective)
+borrow_as_ptr = "warn"
+branches_sharing_code = "allow"
+clear_with_drain = "warn"
+cloned_instead_of_copied = "warn"
+collection_is_never_read = "warn"
+derive_partial_eq_without_eq = "allow"
+empty_line_after_doc_comments = "warn"
+empty_line_after_outer_attr = "warn"
+enum_glob_use = "warn"
+equatable_if_let = "warn"
+explicit_into_iter_loop = "warn"
+explicit_iter_loop = "warn"
+flat_map_option = "warn"
+if_not_else = "warn"
+if_then_some_else_none = "warn"
+implicit_clone = "warn"
+imprecise_flops = "warn"
+iter_on_empty_collections = "warn"
+iter_on_single_items = "warn"
+iter_with_drain = "warn"
+iter_without_into_iter = "warn"
+large_stack_frames = "warn"
+manual_assert = "warn"
+manual_clamp = "warn"
+manual_is_variant_and = "warn"
+manual_string_new = "warn"
+missing_const_for_fn = "allow"
+mutex_integer = "warn"
+naive_bytecount = "warn"
+needless_bitwise_bool = "warn"
+needless_continue = "warn"
+needless_for_each = "warn"
+needless_pass_by_ref_mut = "allow"
+nonstandard_macro_braces = "warn"
+option_as_ref_cloned = "warn"
+or_fun_call = "warn"
+path_buf_push_overwrite = "warn"
+read_zero_byte_vec = "warn"
+redundant_clone = "warn"
+redundant_else = "warn"
+single_char_pattern = "warn"
+string_lit_as_bytes = "warn"
+string_lit_chars_any = "warn"
+suboptimal_flops = "warn"
+suspicious_operation_groupings = "warn"
+trailing_empty_array = "warn"
+trait_duplication_in_bounds = "warn"
+transmute_undefined_repr = "warn"
+trivial_regex = "allow"
+tuple_array_conversions = "warn"
+type_repetition_in_bounds = "warn"
+uninhabited_references = "warn"
+unnecessary_self_imports = "warn"
+unnecessary_struct_initialization = "warn"
+unnested_or_patterns = "warn"
+unused_peekable = "warn"
+unused_rounding = "warn"
+use_self = "warn"
+useless_let_if_seq = "warn"
+while_float = "warn"
+zero_sized_map_values = "warn"
+
+# Nursery allows (too noisy / not mature)
+as_ptr_cast_mut = "allow"
+cognitive_complexity = "allow"
+debug_assert_with_mut_call = "allow"
+fallible_impl_from = "allow"
+future_not_send = "allow"
+needless_collect = "allow"
+non_send_fields_in_send_ty = "allow"
+redundant_pub_crate = "allow"
+significant_drop_in_scrutinee = "allow"
+significant_drop_tightening = "allow"
+too_long_first_doc_paragraph = "allow"
+
+# Style allows (cosmetic, low signal)
+unreadable_literal = "allow"
+match_wildcard_for_single_variants = "allow"
+match_wild_err_arm = "allow"
+needless_return = "allow"
+match_same_arms = "allow"
+float_cmp = "allow"
+missing_fields_in_debug = "allow"
+unnecessary_map_or = "allow"
+assigning_clones = "allow"
+redundant_field_names = "allow"
+unnecessary_debug_formatting = "allow"
+collapsible_if = "allow"
+
+[workspace.lints.rust]
+missing_debug_implementations = "allow"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.rustdoc]
+all = "warn"
+
+[profile.bench]
+debug = true
+
+[profile.dev]
+codegen-units = 16
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[profile.release.build-override]
+opt-level = 3
+incremental = false
+codegen-units = 1
