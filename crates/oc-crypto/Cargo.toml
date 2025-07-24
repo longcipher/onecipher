@@ -1,0 +1,26 @@
+[package]
+name = "oc-crypto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Post-quantum crypto, memory hardening, and PQC primitives for OneCipher (R51/R52: zero I/O, zero network deps)"
+
+[dependencies]
+getrandom = { workspace = true }
+libc = { workspace = true }
+ml-dsa = { workspace = true }
+secrecy = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true, features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_System_Memory"] }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true
