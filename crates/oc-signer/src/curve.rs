@@ -1,0 +1,48 @@
+/// Elliptic curve type used by a chain signer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Curve {
+    Secp256k1,
+    Ed25519,
+}
+
+impl Curve {
+    /// Returns the expected private key length in bytes.
+    pub const fn private_key_len(&self) -> usize {
+        match self {
+            Self::Secp256k1 => 32,
+            Self::Ed25519 => 32,
+        }
+    }
+
+    /// Returns the expected public key length in bytes (compressed for secp256k1).
+    pub const fn public_key_len(&self) -> usize {
+        match self {
+            Self::Secp256k1 => 33, // compressed
+            Self::Ed25519 => 32,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_key_lengths_secp256k1() {
+        assert_eq!(Curve::Secp256k1.private_key_len(), 32);
+        assert_eq!(Curve::Secp256k1.public_key_len(), 33);
+    }
+
+    #[test]
+    fn test_key_lengths_ed25519() {
+        assert_eq!(Curve::Ed25519.private_key_len(), 32);
+        assert_eq!(Curve::Ed25519.public_key_len(), 32);
+    }
+
+    #[test]
+    fn test_equality() {
+        assert_eq!(Curve::Secp256k1, Curve::Secp256k1);
+        assert_eq!(Curve::Ed25519, Curve::Ed25519);
+        assert_ne!(Curve::Secp256k1, Curve::Ed25519);
+    }
+}

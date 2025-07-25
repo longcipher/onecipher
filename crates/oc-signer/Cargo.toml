@@ -1,0 +1,48 @@
+[package]
+name = "oc-signer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Cryptographic signing and key management for OneCipher"
+readme = "README.md"
+
+[features]
+default = []
+fast-kdf = []
+
+[dependencies]
+aes-gcm-siv = { workspace = true }
+argon2 = { workspace = true }
+base64 = { workspace = true }
+bech32 = { workspace = true }
+bitcoin = { workspace = true, features = ["base64"] }
+blake2 = { workspace = true }
+bs58 = { workspace = true, features = ["check"] }
+coins-bip32 = { workspace = true }
+coins-bip39 = { workspace = true }
+digest = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["hazmat"] }
+hex = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+k256 = { workspace = true, features = ["ecdsa", "arithmetic"] }
+libc = { workspace = true }
+oc-core = { workspace = true }
+oc-crypto = { workspace = true }
+rand = { workspace = true }
+ripemd = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+sha3 = { workspace = true }
+signal-hook = { workspace = true }
+thiserror = { workspace = true }
+xrpl-rust = { workspace = true, features = ["core"] }
+zeroize = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+
+[lints]
+workspace = true
