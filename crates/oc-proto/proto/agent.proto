@@ -1,0 +1,431 @@
+// onecipher/proto/agent.proto
+//
+// ConnectRPC AgentService for the Network-Agent (R15).
+//
+// Phase 1 scope: all RPCs EXCEPT ConnectDapp / DisconnectDapp (WalletConnect v2
+// deferred to Phase 2).
+//
+// Deviations from docs/design.md §5.3:
+//   - `google.protobuf.Empty` is replaced by a local `Empty` message to avoid
+//     vendoring well-known types (ponytail ladder — stdlib/minimum dep).
+//   - `Policy`, `PolicyRulesV2`, `BudgetAllocation` are mirrored as proto
+//     messages (wire-format types) rather than imported from `oc-policy`,
+//     since proto messages are a separate type system.
+//   - `deny_reason` is a proto string field (per design.md) for forward
+//     compatibility; the `DenyReason` enum is defined separately for
+//     type-safe use.
+
+syntax = "proto3";
+package onecipher.agent.v1;
+
+// ===========================================================================
+// AgentService — RPC interface exposed by the Network-Agent (R15).
+// ===========================================================================
+service AgentService {
+  // === Wallet management ===
+  rpc ListWallets(Empty) returns (ListWalletsResponse);
+  rpc GetBalance(GetBalanceRequest) returns (BalanceResponse);
+
+  // === Session Key management (requires PasskeyAuthorization) ===
+  rpc CreateSessionKey(CreateSessionKeyRequest) returns (CreateSessionKeyResponse);
+  rpc RevokeSessionKey(RevokeSessionKeyRequest) returns (RevokeSessionKeyResponse);
+  rpc ListSessionKeys(Empty) returns (ListSessionKeysResponse);
+
+  // === Signing ===
+  rpc SignTransaction(SignTransactionRequest) returns (SignTransactionResponse);
+  rpc SignUserOp(SignUserOpRequest) returns (SignUserOpResponse);  // EIP-4337 UserOp
+  rpc SignMessage(SignMessageRequest) returns (SignMessageResponse);
+  rpc SignTypedData(SignTypedDataRequest) returns (SignTypedDataResponse);
+
+  // === Passkey challenge issuance (P0-2) ===
+  // Issues a fresh 32-byte challenge nonce for a registered credential_id.
+  // Clients MUST call this before any Passkey-gated signing RPC so the
+  // Key-Agent can verify the challenge against its pending_challenges set.
+  rpc GenerateChallenge(GenerateChallengeRequest) returns (GenerateChallengeResponse);
+
+  // === Payments ===
+  rpc PayX402(PayX402Request) returns (PayX402Response);
+  rpc PayMPP(stream PayMPPChunk) returns (stream PayMPPReceipt);  // bidirectional stream
+  rpc GetPaymentHistory(GetPaymentHistoryRequest) returns (PaymentHistoryResponse);
+
+  // === Vault ===
+  rpc LockVault(Empty) returns (LockVaultResponse);
+  rpc UnlockVault(UnlockVaultRequest) returns (UnlockVaultResponse);  // Stage 0
+
+  // === Passkey registration (Stage 0) ===
+  rpc RegisterPasskey(RegisterPasskeyRequest) returns (RegisterPasskeyResponse);
+
+  // === DApp connection (Phase 1 STUB — WalletConnect v2 deferred) ===
+  // ConnectDapp / DisconnectDapp NOT implemented in Phase 1.
+
+  // === Secret vault (Phase 6) ===
+  // R56: Key-Agent cannot depend on oc-secret (age dependency chain).
+  // These RPCs are defined for forward compatibility — the Net-Agent
+  // (or CLI local path) handles the actual secret operations.
+  rpc GetSecret(GetSecretRequest) returns (GetSecretResponse);
+  rpc ListSecrets(ListSecretsRequest) returns (ListSecretsResponse);
+  rpc GenerateTotp(GenerateTotpRequest) returns (GenerateTotpResponse);
+}
+
+// ===========================================================================
+// Common
+// ===========================================================================
+
+// Local replacement for `google.protobuf.Empty` — avoids well-known-types
+// vendoring (ponytail ladder — minimum dep).
+message Empty {}
+
+// v0.2: High-risk operations must include Passkey challenge-response signature.
+message PasskeyAuthorization {
+  bytes  challenge = 1;       // Key-Agent-generated random nonce
+  bytes  signature = 2;       // UI process signs challenge with Passkey private key
+  string credential_id = 3;   // Passkey credential ID
+}
+
+// P0-2: Challenge issuance RPC. Clients call this before any Passkey-gated
+// signing RPC to obtain a fresh 32-byte nonce that the Key-Agent stores in
+// its pending_challenges set. The same nonce must be returned in the
+// subsequent PasskeyAuthorization.challenge field for verify() to accept it.
+message GenerateChallengeRequest {
+  string credential_id = 1;  // registered Passkey credential ID
+}
+
+message GenerateChallengeResponse {
+  bytes challenge = 1;  // 32-byte nonce — single-use, consumed on verify
+}
+
+// ===========================================================================
+// Policy (mirrors oc-policy::PolicyV2 / PolicyRulesV2 / BudgetAllocation — R28)
+// ===========================================================================
+
+message Policy {
+  uint32          version            = 1;
+  string          session_key_id     = 2;
+  string          device_id          = 3;
+  PolicyRulesV2   rules              = 4;
+  BudgetAllocation budget_allocation = 5;
+}
+
+message PolicyRulesV2 {
+  double max_single_amount_usd    = 1;
+  double max_daily_amount_usd     = 2;
+  double max_monthly_amount_usd   = 3;
+  uint64 expiry_unix              = 4;
+  uint32 rate_limit_per_minute    = 5;
+  uint32 rate_limit_per_hour      = 6;
+  uint64 cooldown_after_denial_sec = 7;
+  repeated string asset_whitelist   = 8;
+  repeated string chain_whitelist   = 9;
+  repeated string contract_whitelist = 10;
+  repeated string payment_protocols = 11;
+}
+
+message BudgetAllocation {
+  double allocated_usd       = 1;
+  uint64 allocated_at_unix   = 2;
+  double parent_total_usd    = 3;
+  string parent_session_id   = 4;
+}
+
+// ===========================================================================
+// Session Key management
+// ===========================================================================
+
+message CreateSessionKeyRequest {
+  string             label  = 1;
+  Policy             rules  = 2;
+  BudgetAllocation   budget = 3;
+  PasskeyAuthorization auth = 4;  // required: proof of human presence
+}
+
+message CreateSessionKeyResponse {
+  string session_key_id   = 1;
+  uint64 created_at_unix  = 2;
+  Policy policy           = 3;
+}
+
+message RevokeSessionKeyRequest {
+  string              session_key_id = 1;
+  PasskeyAuthorization auth          = 2;  // required: proof of human presence
+}
+
+message RevokeSessionKeyResponse {
+  uint64 revoked_at_unix = 1;
+}
+
+message ListSessionKeysResponse {
+  repeated SessionKeyInfo keys = 1;
+}
+
+message SessionKeyInfo {
+  string         session_key_id    = 1;
+  string         label             = 2;
+  uint64         created_at_unix   = 3;
+  uint64         expires_at_unix   = 4;
+  Policy         policy            = 5;
+  SessionKeyStatus status          = 6;
+}
+
+// ===========================================================================
+// Wallet management
+// ===========================================================================
+
+message ListWalletsResponse {
+  repeated WalletInfo wallets = 1;
+}
+
+message WalletInfo {
+  string   id           = 1;
+  string   name         = 2;
+  string   key_type     = 3;
+  uint64   created_at   = 4;
+  repeated WalletAccount accounts = 5;
+}
+
+message WalletAccount {
+  string account_id      = 1;
+  string address         = 2;
+  string chain_id        = 3;
+  string derivation_path = 4;
+}
+
+message GetBalanceRequest {
+  string wallet_id = 1;
+  string chain_id  = 2;
+}
+
+message BalanceResponse {
+  string wallet_id = 1;
+  string chain_id  = 2;
+  string balance   = 3;
+  uint32 decimals  = 4;
+  string symbol    = 5;
+}
+
+// ===========================================================================
+// Signing
+// ===========================================================================
+
+message SignTransactionRequest {
+  string session_key_id = 1;
+  string wallet_id      = 2;
+  string chain_id       = 3;
+  string raw_tx_hex     = 4;
+  PasskeyAuthorization auth = 5;  // P0-2: required Passkey gate before signing
+}
+
+message SignTransactionResponse {
+  bytes  signature     = 1;
+  string signed_tx_hex = 2;
+}
+
+message SignUserOpRequest {
+  string session_key_id = 1;
+  string wallet_id      = 2;
+  string chain_id       = 3;
+  string user_op_hex    = 4;
+  PasskeyAuthorization auth = 5;  // P0-2: required Passkey gate before signing
+}
+
+message SignUserOpResponse {
+  bytes  signature        = 1;
+  string signed_user_op_hex = 2;
+}
+
+message SignMessageRequest {
+  string session_key_id = 1;
+  string wallet_id      = 2;
+  bytes  message        = 3;
+  PasskeyAuthorization auth = 4;  // P0-2: required Passkey gate before signing
+}
+
+message SignMessageResponse {
+  bytes signature = 1;
+}
+
+message SignTypedDataRequest {
+  string session_key_id   = 1;
+  string wallet_id        = 2;
+  string typed_data_json  = 3;
+  PasskeyAuthorization auth = 4;  // P0-2: required Passkey gate before signing
+}
+
+message SignTypedDataResponse {
+  bytes signature = 1;
+}
+
+// ===========================================================================
+// Payments
+// ===========================================================================
+
+message PayX402Request {
+  string              session_key_id = 1;
+  string              url            = 2;
+  string              method         = 3;
+  bytes               body           = 4;
+  map<string, string> headers        = 5;
+  // Stage 0 additions — payment requirement fields.
+  double              amount_usd     = 6;
+  string              asset          = 7;   // CAIP-19
+  string              chain_id       = 8;   // CAIP-2
+  string              recipient      = 9;   // contract address or empty
+}
+
+message PayX402Response {
+  PaymentStatus status              = 1;
+  bytes         receipt             = 2;
+  string        retry_authorization = 3;
+  string        deny_reason         = 4;  // populated on DENY (RATE_LIMIT / BUDGET_EXCEEDED / WHITELIST / etc.)
+  string        error               = 5;
+}
+
+message PayMPPChunk {
+  string    session_key_id = 1;
+  uint32    chunk_id       = 2;
+  double    amount_usd     = 3;
+  string    asset          = 4;
+  string    chain_id       = 5;
+  MppAction action         = 6;
+}
+
+message PayMPPReceipt {
+  uint32        chunk_id     = 1;
+  PaymentStatus status       = 2;
+  bytes         receipt      = 3;
+  string        deny_reason  = 4;
+}
+
+message GetPaymentHistoryRequest {
+  string session_key_id = 1;
+  uint64 since_unix     = 2;
+  uint32 limit          = 3;
+}
+
+message PaymentHistoryResponse {
+  repeated PaymentRecord records = 1;
+}
+
+message PaymentRecord {
+  uint64         timestamp_unix   = 1;
+  string         session_key_id   = 2;
+  double         amount_usd       = 3;
+  string         asset            = 4;
+  string         chain_id         = 5;
+  string         recipient        = 6;
+  PaymentStatus  status           = 7;
+  bytes          receipt          = 8;
+  string         deny_reason      = 9;
+}
+
+// ===========================================================================
+// Enums
+// ===========================================================================
+
+enum PaymentStatus {
+  PAYMENT_STATUS_OK    = 0;
+  PAYMENT_STATUS_DENY  = 1;
+  PAYMENT_STATUS_ERROR = 2;
+}
+
+// Mirrors oc-policy::DenyReason per R80 — exactly 9 variants.
+enum DenyReason {
+  DENY_REASON_RATE_LIMIT_MINUTE = 0;
+  DENY_REASON_RATE_LIMIT_HOUR   = 1;
+  DENY_REASON_BUDGET_EXCEEDED   = 2;
+  DENY_REASON_WHITELIST         = 3;
+  DENY_REASON_EXPIRED           = 4;
+  DENY_REASON_PASSKEY_FORGED    = 5;
+  DENY_REASON_POLICY_MISSING    = 6;
+  DENY_REASON_COOLDOWN          = 7;
+  DENY_REASON_UNKNOWN           = 8;
+}
+
+enum MppAction {
+  MPP_ACTION_OPEN   = 0;
+  MPP_ACTION_STREAM = 1;
+  MPP_ACTION_CLOSE  = 2;
+}
+
+enum SessionKeyStatus {
+  SESSION_KEY_STATUS_ACTIVE  = 0;
+  SESSION_KEY_STATUS_REVOKED = 1;
+  SESSION_KEY_STATUS_EXPIRED = 2;
+}
+
+// ===========================================================================
+// Vault
+// ===========================================================================
+
+message LockVaultResponse {
+  bool locked = 1;
+}
+
+// Stage 0: Unlock vault via Passkey — returns an UnlockToken (32 bytes).
+message UnlockVaultRequest {
+  string               wallet_id = 1;
+  PasskeyAuthorization auth      = 2;
+}
+
+message UnlockVaultResponse {
+  bytes  unlock_token    = 1;  // 32-byte token
+  uint64 expires_at_unix = 2;  // token expiry timestamp
+}
+
+// ===========================================================================
+// Passkey registration (Stage 0)
+// ===========================================================================
+
+// Stage 0: Register a Passkey public key at wallet creation time.
+message RegisterPasskeyRequest {
+  string wallet_id     = 1;
+  string credential_id = 2;
+  string algorithm     = 3;  // "p256" or "ed25519"
+  bytes  public_key    = 4;  // raw public key bytes
+}
+
+message RegisterPasskeyResponse {
+  bool registered = 1;
+}
+
+// ===========================================================================
+// Secret vault (Phase 6)
+// ===========================================================================
+
+message GetSecretRequest {
+  string name       = 1;  // secret name (glob-checked against read_patterns)
+  string api_token  = 2;  // oc_key_... token for authorization
+}
+
+message GetSecretResponse {
+  string name          = 1;
+  string item_type     = 2;
+  string secret_value  = 3;
+  string metadata_json = 4;
+}
+
+message ListSecretsRequest {
+  string api_token = 1;
+}
+
+message ListSecretsResponse {
+  repeated SecretIndexEntry entries = 1;
+}
+
+message SecretIndexEntry {
+  string id            = 1;
+  string name          = 2;
+  string item_type     = 3;
+  string created_at    = 4;
+  string updated_at    = 5;
+  string metadata_json = 6;
+}
+
+message GenerateTotpRequest {
+  string name       = 1;  // name of the TOTP secret entry
+  string api_token  = 2;
+}
+
+message GenerateTotpResponse {
+  string code              = 1;
+  uint32 expires_in_seconds = 2;
+}

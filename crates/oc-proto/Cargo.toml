@@ -1,0 +1,23 @@
+[package]
+name = "oc-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "ConnectRPC AgentService proto definitions for OneCipher"
+
+[dependencies]
+prost = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+# cargo-fuzz target lives in fuzz/ (requires nightly + cargo-fuzz binary).
+# A proptest-based fallback in tests/fuzz_payx402_decode.rs runs on stable.
+
+[lints]
+workspace = true
