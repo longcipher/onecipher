@@ -1,0 +1,26 @@
+[package]
+name = "oc-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Policy Engine v2 for OneCipher"
+
+[dependencies]
+oc-core = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "policy_eval"
+harness = false
+
+[lints]
+workspace = true
