@@ -1,0 +1,28 @@
+[package]
+name = "oc-session-key"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Multi-chain SessionKeyProvider trait + EVM/Solana impls for OneCipher"
+
+[dependencies]
+async-trait = { workspace = true }
+bs58 = { workspace = true }
+hex = { workspace = true }
+oc-crypto = { workspace = true }
+oc-policy = { workspace = true }
+oc-signer = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# R56: NO tokio. `futures::executor::block_on` drives async tests so the crate
+# stays tokio-free even under `cargo tree -p oc-session-key --all-targets`.
+futures = { workspace = true }
+
+[lints]
+workspace = true
