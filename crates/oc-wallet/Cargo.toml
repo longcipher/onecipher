@@ -1,0 +1,46 @@
+[package]
+name = "oc-wallet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "High-level wallet API for the OneCipher project"
+
+[features]
+default = ["rpc", "sui-grpc"]
+fast-kdf = ["oc-signer/fast-kdf"]
+rpc = ["dep:hpx", "dep:tokio"]
+sui-grpc = ["dep:tonic", "dep:tonic-prost"]
+
+[dependencies]
+base64 = { workspace = true }
+getrandom = { workspace = true }
+hex = { workspace = true }
+hpx = { workspace = true, optional = true }
+jiff = { workspace = true }
+oc-core = { workspace = true }
+oc-signer = { workspace = true }
+oc-vault = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"], optional = true }
+tonic = { workspace = true, features = ["transport"], optional = true }
+tonic-prost = { workspace = true, optional = true }
+uuid = { workspace = true, features = ["v4"] }
+zeroize = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+bs58 = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["hazmat", "rand_core"] }
+k256 = { workspace = true, features = ["ecdsa"] }
+oc-signer = { workspace = true, features = ["fast-kdf"] }
+sha3 = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
