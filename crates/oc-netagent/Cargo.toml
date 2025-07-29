@@ -1,0 +1,35 @@
+[package]
+name = "oc-netagent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Network-Agent: WalletConnect v2 wallet-role server for OneCipher — relays to Key-Agent over UDS"
+
+[lib]
+name = "oc_netagent"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = { workspace = true }
+hex = { workspace = true }
+hpx = { workspace = true }
+oc-intent = { workspace = true }
+oc-keyagent = { workspace = true }
+oc-proto = { workspace = true }
+oc-walletconnect = { workspace = true }
+prost = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+oc-walletconnect = { workspace = true, features = ["test-utils"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true
