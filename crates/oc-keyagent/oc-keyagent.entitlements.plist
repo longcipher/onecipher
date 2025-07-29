@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  OneCipher Key-Agent — macOS App Sandbox entitlements (T12).
+
+  Per R12 / C-03: the Key-Agent has NO network access. Network-Agent
+  (closed-source, BSL 1.1) owns the network surface; Key-Agent talks only
+  to it over Unix Domain Sockets (UDS), which are implicitly allowed when
+  `network.client` / `network.server` are both `false`.
+
+  This file is consumed at packaging time by `codesign --entitlements`.
+  It is NOT read at runtime.
+-->
+<plist version="1.0">
+<dict>
+    <!-- Enable App Sandbox -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- Per R12: NO network client. Denies TCP/UDP connect(). -->
+    <key>com.apple.security.network.client</key>
+    <false/>
+
+    <!-- Per R12: NO network server. Denies TCP/UDP bind()/listen(). -->
+    <key>com.apple.security.network.server</key>
+    <false/>
+
+    <!-- Allow the user to select the wallet file via the file picker.
+         Key-Agent never opens files outside the sandbox container except
+         via this user-gated path. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>

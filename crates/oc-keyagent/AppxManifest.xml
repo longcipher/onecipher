@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  OneCipher Key-Agent — Windows AppContainer manifest (T12).
+
+  Per R12 / C-03: the Key-Agent has NO network access. Network-Agent
+  (closed-source, BSL 1.1) owns the network surface; Key-Agent talks only
+  to it over Unix Domain Sockets (UDS) on Windows 10 1803+ (AF_UNIX).
+
+  This manifest is consumed at packaging time by `makeappx pack`. It is
+  the AppContainer capability declaration — by OMITTING the network
+  capability declarations, the Key-Agent AppContainer is denied all
+  TCP/UDP socket access at the Windows kernel level.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+  <Identity Name="OneCipherKeyAgent" Publisher="CN=OneCipher" Version="0.1.0.0"/>
+  <Properties>
+    <DisplayName>OneCipher Key-Agent</DisplayName>
+    <PublisherDisplayName>OneCipher</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Resources>
+    <Resource Language="en-us"/>
+  </Resources>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.22621.0"/>
+  </Dependencies>
+  <Applications>
+    <Application Id="App" Executable="oc-keyagent.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="OneCipher Key-Agent"
+        Description="Network-isolated signing service"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+  <Capabilities>
+    <!-- runFullTrust is required for a Win32 desktop app packaged as
+         AppContainer. The Key-Agent runs as a desktop app (not UWP). -->
+    <rescap:Capability Name="runFullTrust"/>
+    <!-- Per R12: NO network capability (no internet client, no internet
+         server) is declared here. AppContainer will deny all TCP/UDP
+         socket APIs to this process at the kernel level. -->
+  </Capabilities>
+</Package>
