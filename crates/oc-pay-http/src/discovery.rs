@@ -1,0 +1,565 @@
+use crate::{
+    error::{OcPayHttpError, OcPayHttpErrorCode},
+    types::{DiscoverResult, DiscoveryResponse, Protocol, Service},
+};
+
+const CDP_DISCOVERY_URL: &str = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources";
+
+const TESTNETS: &[&str] = &["base-sepolia", "eip155:84532", "eip155:11155111", "solana-devnet"];
+
+// ===========================================================================
+// Unified discovery (public API)
+// ===========================================================================
+
+/// Discover payable services.
+///
+/// Fetches the x402 directory with the given pagination parameters,
+/// filters testnets, and returns services with pagination metadata.
+///
+/// When a query is provided the upstream API does not support server-side
+/// filtering, so we paginate through pages internally until we have
+/// collected enough matching results (up to `limit`).
+pub(crate) async fn discover_all(
+    query: Option<&str>,
+    limit: Option<u64>,
+    offset: Option<u64>,
+) -> Result<DiscoverResult, OcPayHttpError> {
+    let limit = limit.unwrap_or(100);
+    let offset = offset.unwrap_or(0);
+
+    if let Some(q) = query {
+        // Client-side search: page through the full directory to find matches.
+        return discover_with_query(q, limit, offset).await;
+    }
+
+    // No query — single page fetch.
+    let resp = fetch_x402(limit, offset).await?;
+    let total = resp.total;
+
+    let services = filter_services(resp.items, None);
+
+    Ok(DiscoverResult { services, total, limit, offset })
+}
+
+/// Paginate through the upstream directory collecting services that match
+/// `query` until we have `limit` results (after skipping `offset` matches).
+async fn discover_with_query(
+    query: &str,
+    limit: u64,
+    offset: u64,
+) -> Result<DiscoverResult, OcPayHttpError> {
+    const PAGE_SIZE: u64 = 500;
+    const MAX_PAGES: u64 = 30; // safety cap: don't fetch more than 15 000 items
+
+    let mut collected: Vec<Service> = Vec::new();
+    let mut skipped: u64 = 0;
+    let mut api_offset: u64 = 0;
+    let mut total: u64 = 0;
+
+    for _ in 0..MAX_PAGES {
+        let resp = fetch_x402(PAGE_SIZE, api_offset).await?;
+        total = resp.total;
+        let page_len = resp.items.len() as u64;
+
+        let matches = filter_services(resp.items, Some(query));
+        for svc in matches {
+            if skipped < offset {
+                skipped += 1;
+                continue;
+            }
+            collected.push(svc);
+            if collected.len() as u64 >= limit {
+                break;
+            }
+        }
+
+        if collected.len() as u64 >= limit {
+            break;
+        }
+
+        api_offset += page_len;
+        if api_offset >= total {
+            break;
+        }
+    }
+
+    Ok(DiscoverResult { services: collected, total, limit, offset })
+}
+
+/// Filter and convert raw discovered services, optionally matching against a
+/// query string (case-insensitive, checked against URL and descriptions).
+fn filter_services(
+    items: Vec<crate::types::DiscoveredService>,
+    query: Option<&str>,
+) -> Vec<Service> {
+    let q = query.map(|q| q.to_lowercase());
+    let mut services = Vec::new();
+
+    for svc in items {
+        let accept = match svc.accepts.first() {
+            Some(a) => a,
+            None => continue,
+        };
+
+        let is_testnet = TESTNETS.iter().any(|t| accept.network.contains(t));
+        if is_testnet {
+            continue;
+        }
+
+        if let Some(ref q) = q {
+            let url_match = svc.resource.to_lowercase().contains(q);
+            let accepts_desc =
+                accept.description.as_ref().is_some_and(|d| d.to_lowercase().contains(q));
+            let meta_desc = svc
+                .metadata
+                .as_ref()
+                .and_then(|m| m.description.as_ref())
+                .is_some_and(|d| d.to_lowercase().contains(q));
+            if !url_match && !accepts_desc && !meta_desc {
+                continue;
+            }
+        }
+
+        let desc = accept
+            .description
+            .as_deref()
+            .or_else(|| svc.metadata.as_ref().and_then(|m| m.description.as_deref()))
+            .unwrap_or("");
+
+        services.push(Service {
+            protocol: Protocol::X402,
+            name: svc.resource.clone(),
+            url: svc.resource,
+            description: truncate(desc, 80),
+            price: format_price(&accept.amount, &accept.network),
+            network: accept.network.clone(),
+            tags: vec![],
+        });
+    }
+
+    services
+}
+
+// ===========================================================================
+// x402 fetching (internal)
+// ===========================================================================
+
+struct FetchResult {
+    items: Vec<crate::types::DiscoveredService>,
+    total: u64,
+}
+
+async fn fetch_x402(limit: u64, offset: u64) -> Result<FetchResult, OcPayHttpError> {
+    let client = hpx::Client::new();
+    let url = format!("{CDP_DISCOVERY_URL}?limit={limit}&offset={offset}");
+    let resp = client.get(&url).send().await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(OcPayHttpError::new(
+            OcPayHttpErrorCode::DiscoveryFailed,
+            format!("x402 discovery returned {status}: {body}"),
+        ));
+    }
+
+    let body: DiscoveryResponse = resp.json().await.map_err(|e| {
+        OcPayHttpError::new(
+            OcPayHttpErrorCode::DiscoveryFailed,
+            format!("failed to parse x402 discovery: {e}"),
+        )
+    })?;
+
+    let total = body.pagination.map_or(0, |p| p.total);
+
+    Ok(FetchResult { items: body.items, total })
+}
+
+// ===========================================================================
+// Formatting helpers
+// ===========================================================================
+
+pub(crate) fn format_price(amount_str: &str, network: &str) -> String {
+    let chain_type = crate::chains::resolve_chain_type(network);
+    match chain_type {
+        Some(oc_core::ChainType::Nano) => format_nano(amount_str),
+        Some(oc_core::ChainType::Near) => format_near(amount_str),
+        _ => format_usdc(amount_str),
+    }
+}
+
+pub(crate) fn format_usdc(amount_str: &str) -> String {
+    let amount: u128 = amount_str.parse().unwrap_or(0);
+    let whole = amount / 1_000_000;
+    let frac = amount % 1_000_000;
+    let frac_str = format!("{frac:06}");
+    let trimmed = frac_str.trim_end_matches('0');
+    let trimmed = if trimmed.is_empty() { "00" } else { trimmed };
+    format!("${whole}.{trimmed}")
+}
+
+pub(crate) fn format_nano(amount_str: &str) -> String {
+    let amount: u128 = amount_str.parse().unwrap_or(0);
+    let divisor = 1_000_000_000_000_000_000_000_000_000_000u128;
+    let whole = amount / divisor;
+    let frac = amount % divisor;
+    if frac == 0 {
+        format!("{whole} XNO")
+    } else {
+        let frac_str = format!("{frac:030}");
+        let trimmed = frac_str.trim_end_matches('0');
+        format!("{whole}.{trimmed} XNO")
+    }
+}
+
+/// Format a NEAR amount expressed in yoctoNEAR (10^24 yoctoNEAR per NEAR).
+pub(crate) fn format_near(amount_str: &str) -> String {
+    let amount: u128 = amount_str.parse().unwrap_or(0);
+    let divisor = 1_000_000_000_000_000_000_000_000u128; // 10^24
+    let whole = amount / divisor;
+    let frac = amount % divisor;
+    if frac == 0 {
+        format!("{whole} NEAR")
+    } else {
+        let frac_str = format!("{frac:024}");
+        let trimmed = frac_str.trim_end_matches('0');
+        format!("{whole}.{trimmed} NEAR")
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let first_line = s.lines().next().unwrap_or("");
+    if first_line.len() > max {
+        let cutoff = first_line
+            .char_indices()
+            .map(|(idx, _)| idx)
+            .chain(std::iter::once(first_line.len()))
+            .take_while(|&idx| idx <= max.saturating_sub(3))
+            .last()
+            .unwrap_or(0);
+
+        format!("{}...", &first_line[..cutoff])
+    } else {
+        first_line.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // format_usdc
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_usdc_zero() {
+        assert_eq!(format_usdc("0"), "$0.00");
+    }
+
+    #[test]
+    fn format_usdc_one_cent() {
+        assert_eq!(format_usdc("10000"), "$0.01");
+    }
+
+    #[test]
+    fn format_usdc_one_dollar() {
+        assert_eq!(format_usdc("1000000"), "$1.00");
+    }
+
+    #[test]
+    fn format_usdc_fractional() {
+        assert_eq!(format_usdc("1500000"), "$1.5");
+    }
+
+    #[test]
+    fn format_usdc_large() {
+        assert_eq!(format_usdc("100000000"), "$100.00");
+    }
+
+    #[test]
+    fn format_usdc_sub_cent() {
+        assert_eq!(format_usdc("1"), "$0.000001");
+    }
+
+    #[test]
+    fn format_usdc_non_numeric() {
+        assert_eq!(format_usdc("abc"), "$0.00");
+    }
+
+    #[test]
+    fn format_usdc_empty() {
+        assert_eq!(format_usdc(""), "$0.00");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_nano
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_nano_whole() {
+        assert_eq!(format_nano("1000000000000000000000000000000"), "1 XNO");
+    }
+
+    #[test]
+    fn format_nano_fractional() {
+        assert_eq!(format_nano("1500000000000000000000000000000"), "1.5 XNO");
+    }
+
+    #[test]
+    fn format_nano_very_small() {
+        assert_eq!(format_nano("1"), "0.000000000000000000000000000001 XNO");
+    }
+
+    #[test]
+    fn format_price_dispatches() {
+        assert_eq!(format_price("10000", "eip155:8453"), "$0.01");
+        assert_eq!(format_price("1000000000000000000000000000000", "nano:mainnet"), "1 XNO");
+        assert_eq!(format_price("1000000000000000000000000", "near:mainnet"), "1 NEAR");
+        assert_eq!(format_price("1000000000000000000000000", "near"), "1 NEAR");
+    }
+
+    // -----------------------------------------------------------------------
+    // format_near
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn format_near_whole() {
+        // 1 NEAR = 10^24 yoctoNEAR
+        assert_eq!(format_near("1000000000000000000000000"), "1 NEAR");
+    }
+
+    #[test]
+    fn format_near_fractional() {
+        assert_eq!(format_near("1500000000000000000000000"), "1.5 NEAR");
+    }
+
+    #[test]
+    fn format_near_zero() {
+        assert_eq!(format_near("0"), "0 NEAR");
+    }
+
+    #[test]
+    fn format_near_one_yocto() {
+        // Smallest unit: 1 yoctoNEAR (10^-24 NEAR).
+        assert_eq!(format_near("1"), "0.000000000000000000000001 NEAR");
+    }
+
+    #[test]
+    fn format_near_storage_deposit() {
+        // 0.00125 NEAR (typical NEP-141 storage deposit).
+        assert_eq!(format_near("1250000000000000000000"), "0.00125 NEAR");
+    }
+
+    #[test]
+    fn format_near_non_numeric() {
+        assert_eq!(format_near("abc"), "0 NEAR");
+    }
+
+    // -----------------------------------------------------------------------
+    // truncate
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn truncate_short_string() {
+        assert_eq!(truncate("hello", 80), "hello");
+    }
+
+    #[test]
+    fn truncate_long_string() {
+        let long = "a".repeat(100);
+        let result = truncate(&long, 20);
+        assert!(result.len() <= 20);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_long_utf8_string_respects_char_boundaries() {
+        let prefix = "a".repeat(76);
+        let input = format!("{prefix}“🙂 rest");
+        let result = truncate(&input, 80);
+
+        assert_eq!(result, format!("{prefix}..."));
+    }
+
+    #[test]
+    fn truncate_multiline_uses_first_line() {
+        assert_eq!(truncate("first\nsecond\nthird", 80), "first");
+    }
+
+    #[test]
+    fn truncate_empty() {
+        assert_eq!(truncate("", 80), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // testnet filtering (unit-level, no network)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn testnet_list_contains_expected_entries() {
+        assert!(TESTNETS.contains(&"base-sepolia"));
+        assert!(TESTNETS.contains(&"eip155:84532"));
+        assert!(TESTNETS.contains(&"eip155:11155111"));
+        assert!(TESTNETS.contains(&"solana-devnet"));
+    }
+
+    #[test]
+    fn testnet_check_matches() {
+        let network = "base-sepolia";
+        assert!(TESTNETS.iter().any(|t| network.contains(t)));
+    }
+
+    #[test]
+    fn mainnet_check_does_not_match() {
+        let network = "base";
+        assert!(!TESTNETS.iter().any(|t| network.contains(t)));
+    }
+
+    // -----------------------------------------------------------------------
+    // filter_services (unit-level, no network)
+    // -----------------------------------------------------------------------
+
+    fn make_service(
+        resource: &str,
+        network: &str,
+        desc: Option<&str>,
+    ) -> crate::types::DiscoveredService {
+        crate::types::DiscoveredService {
+            resource: resource.to_string(),
+            r#type: Some("x402".to_string()),
+            x402_version: Some(1),
+            accepts: vec![crate::types::PaymentRequirements {
+                scheme: "exact".into(),
+                network: network.to_string(),
+                amount: "10000".into(),
+                asset: "0xusdc".into(),
+                pay_to: "0xpay".into(),
+                max_timeout_seconds: 30,
+                extra: serde_json::Value::Null,
+                description: desc.map(|d| d.to_string()),
+                resource: None,
+            }],
+            metadata: None,
+        }
+    }
+
+    #[test]
+    fn filter_empty_input() {
+        let result = filter_services(vec![], None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_testnet_excluded() {
+        let items = vec![
+            make_service("https://mainnet.example.com", "eip155:8453", None),
+            make_service("https://sepolia.example.com", "eip155:11155111", None),
+        ];
+        let result = filter_services(items, None);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].url, "https://mainnet.example.com");
+    }
+
+    #[test]
+    fn filter_no_accepts_skipped() {
+        let mut svc = make_service("https://example.com", "base", None);
+        svc.accepts.clear();
+        let result = filter_services(vec![svc], None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_query_matches_url() {
+        let items = vec![
+            make_service("https://heurist.example.com", "base", None),
+            make_service("https://other.example.com", "base", None),
+        ];
+        let result = filter_services(items, Some("heurist"));
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].url, "https://heurist.example.com");
+    }
+
+    #[test]
+    fn filter_query_matches_description() {
+        let items = vec![
+            make_service("https://a.example.com", "base", Some("AI inference service")),
+            make_service("https://b.example.com", "base", Some("storage provider")),
+        ];
+        let result = filter_services(items, Some("inference"));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn filter_query_case_insensitive() {
+        let items = vec![make_service("https://Heurist.example.com", "base", None)];
+        let result = filter_services(items, Some("heurist"));
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn filter_no_query_returns_all_mainnet() {
+        let items = vec![
+            make_service("https://a.example.com", "base", None),
+            make_service("https://b.example.com", "eip155:1", None),
+            make_service("https://test.example.com", "base-sepolia", None),
+        ];
+        let result = filter_services(items, None);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn filter_base_sepolia_excluded() {
+        let items = vec![make_service("https://test.example.com", "base-sepolia", None)];
+        let result = filter_services(items, None);
+        assert!(result.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // discover_all (live, ignored by default)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    #[ignore = "requires network access"]
+    async fn live_discover_returns_services() {
+        let result = discover_all(None, Some(10), Some(0)).await.unwrap();
+        assert!(result.total > 0);
+        assert!(!result.services.is_empty());
+        assert_eq!(result.limit, 10);
+        assert_eq!(result.offset, 0);
+
+        // No testnets should appear.
+        for svc in &result.services {
+            assert!(
+                !TESTNETS.iter().any(|t| svc.network.contains(t)),
+                "testnet {} leaked through",
+                svc.network
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to x402 discovery API"]
+    async fn live_discover_pagination() {
+        let page1 = discover_all(None, Some(5), Some(0)).await.unwrap();
+        let page2 = discover_all(None, Some(5), Some(5)).await.unwrap();
+
+        // Pages should have same total.
+        assert_eq!(page1.total, page2.total);
+
+        // Pages should have different services (unless one is empty due to testnet filtering).
+        if !page1.services.is_empty() && !page2.services.is_empty() {
+            assert_ne!(page1.services[0].url, page2.services[0].url);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to x402 discovery API"]
+    async fn live_discover_query_filters() {
+        let result = discover_all(Some("heurist"), Some(50), Some(0)).await.unwrap();
+        for svc in &result.services {
+            let combined = format!("{} {}", svc.url, svc.description).to_lowercase();
+            assert!(combined.contains("heurist"), "service should match query: {}", svc.url);
+        }
+    }
+}
