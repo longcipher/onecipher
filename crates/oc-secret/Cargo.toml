@@ -1,0 +1,39 @@
+[package]
+name = "oc-secret"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Unified secret vault with age encryption for OneCipher"
+readme = "README.md"
+
+[features]
+default = []
+# Enable git sync support (`oc_secret::git` module). Requires libgit2 (via git2)
+# which transitively pulls in libssh2 + OpenSSL. Disabled by default so the
+# release binary can build without a working libssh2 toolchain.
+git = ["dep:git2"]
+
+[dependencies]
+age = { workspace = true }
+base64 = { workspace = true }
+git2 = { workspace = true, optional = true }
+hex = { workspace = true }
+jiff = { workspace = true }
+oc-core = { workspace = true }
+oc-crypto = { workspace = true }
+oc-signer = { workspace = true }
+oc-vault = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+totp-rs = { workspace = true, features = ["otpauth"] }
+uuid = { workspace = true }
+zeroize = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
