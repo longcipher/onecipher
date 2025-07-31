@@ -1,0 +1,60 @@
+[package]
+name = "oc-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "CLI for OneCipher"
+readme = "README.md"
+
+[[bin]]
+name = "onecipher"
+path = "src/main.rs"
+
+[features]
+default = ["git"]
+# Enable git sync support (`onecipher git` subcommand). Requires libgit2
+# (via git2 → libssh2 → OpenSSL). Disabled by default would remove the
+# `git` subcommand entirely; enable explicitly when libssh2 is available.
+git = ["oc-secret/git"]
+
+[dependencies]
+arboard = { workspace = true }
+clap = { workspace = true, features = ["derive", "env"] }
+crossterm = { workspace = true }
+dirs = "6"
+eyre = { workspace = true }
+hex = { workspace = true }
+hpx = { workspace = true }
+jiff = { workspace = true }
+oc-core = { workspace = true }
+oc-intent = { workspace = true }
+oc-keyagent = { workspace = true }
+oc-netagent = { workspace = true }
+oc-pay-http = { workspace = true }
+oc-paymaster = { workspace = true }
+oc-proto = { workspace = true }
+oc-secret = { workspace = true }
+oc-signer = { workspace = true }
+oc-signing-core = { workspace = true }
+oc-vault = { workspace = true }
+oc-wallet = { workspace = true, features = ["rpc", "sui-grpc"] }
+oc-walletconnect = { workspace = true, features = ["test-utils"] }
+prost = { workspace = true }
+rand = { workspace = true }
+ratatui = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
+zeroize = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+oc-signer = { workspace = true, features = ["fast-kdf"] }
+proptest = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+
+[lints]
+workspace = true
