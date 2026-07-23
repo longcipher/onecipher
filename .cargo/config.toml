@@ -1,0 +1,23 @@
+# Cargo project-local configuration.
+#
+# This file is checked into the repo and applies to every cargo invocation
+# inside the workspace. User-level settings (sccache / kache wrappers, etc.)
+# belong in `~/.cargo/config.toml`, NOT here.
+
+[build]
+# Enable pipelined compilation (cargo 1.40+). Cargo passes the rmeta files
+# to downstream crates before the upstream crate finishes codegen, so large
+# dependency graphs compile faster.
+pipelining = true
+
+# Parallel jobs. Overridable via `--jobs` / `CARGO_BUILD_JOBS`.
+# Default to the number of logical CPUs.
+# jobs = 8
+
+[net]
+# Retry failed network fetches a few times before giving up.
+retry = 3
+
+[registries.crates-io]
+# Use the sparse protocol (default in 1.68+) for faster index fetches.
+protocol = "sparse"
