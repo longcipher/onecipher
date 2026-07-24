@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use oc_proto::{PayX402Request, PaymentStatus};
+use oc_keyagent::proto::{PayX402Request, PaymentStatus};
 
 use crate::{CliError, netagent::NetAgentClient};
 

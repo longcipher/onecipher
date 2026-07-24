@@ -1,34 +1,33 @@
-//! ConnectRPC client abstraction for the Network-Agent.
+//! Network-Agent client abstraction for the CLI.
 //!
-//! In Phase 1, the actual ConnectRPC transport (tonic/connect-rs) is deferred
-//! to Phase D (T17-T21). The trait abstraction lets tests inject a mock client
-//! to verify RPC construction without a real Net-Agent.
-//!
-//! Per ponytail YAGNI, tonic/connect-rs are NOT added as dev-deps yet — the
-//! mock is hand-written and doesn't need them.
+//! The daemon (`onecipher daemon`) hosts the Network-Agent (WalletConnect v2
+//! wallet-role server) which forwards inbound requests to the Key-Agent over
+//! UDS. This trait abstracts that path so unit tests can inject a mock client
+//! to verify RPC construction without a real daemon.
 
 use std::os::unix::net::UnixStream;
 
 use oc_keyagent::{
     frame::FrameClient,
+    proto::{
+        CreateSessionKeyRequest, CreateSessionKeyResponse, ListSessionKeysResponse, PayX402Request,
+        PayX402Response, RevokeSessionKeyRequest, RevokeSessionKeyResponse,
+    },
     request::{KeyAgentRequest, KeyAgentRequestKind},
     response::{KeyAgentResponse, KeyAgentResponseKind},
-};
-use oc_proto::{
-    CreateSessionKeyRequest, CreateSessionKeyResponse, ListSessionKeysResponse, PayX402Request,
-    PayX402Response, RevokeSessionKeyRequest, RevokeSessionKeyResponse,
 };
 use prost::Message;
 
 use crate::CliError;
 
-/// Abstracts the Network-Agent ConnectRPC client.
+/// Abstracts the Network-Agent client surface (WalletConnect v2 method calls
+/// translated to Key-Agent UDS frames by the daemon).
 ///
-/// Each method maps 1:1 to an `AgentService` RPC from `proto/agent.proto`.
-/// Phase D (T17-T21) will provide a real ConnectRPC-backed implementation;
-/// until then, `UnimplementedClient` is wired in by `main()` so the CLI's
-/// arg-parsing and RPC-construction paths can be exercised end-to-end via
-/// the mock in tests.
+/// Each method maps 1:1 to a Key-Agent request variant. The production
+/// implementation [`UdsKeyAgentClient`] talks to the Key-Agent UDS socket
+/// directly; [`UnimplementedClient`] is used by `main()` when the daemon is
+/// not reachable so the CLI's arg-parsing and RPC-construction paths can still
+/// be exercised via the mock in tests.
 pub(crate) trait NetAgentClient: Send + Sync {
     /// RPC: `CreateSessionKey(CreateSessionKeyRequest) → CreateSessionKeyResponse`
     fn create_session_key(
@@ -51,8 +50,8 @@ pub(crate) trait NetAgentClient: Send + Sync {
 
 /// Production stub — returns `CliError::NetAgentUnavailable` for all RPCs.
 ///
-/// Phase D (T17-T21) will replace this with a real ConnectRPC client over the
-/// UDS between the UI process and the Network-Agent (R15).
+/// Used by `main()` when the Key-Agent daemon is not reachable. The real
+/// daemon path goes through [`UdsKeyAgentClient`] below.
 pub(crate) struct UnimplementedClient;
 
 impl NetAgentClient for UnimplementedClient {

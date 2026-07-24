@@ -6,7 +6,7 @@ Feature: Session Key Lifecycle
   Background:
     Given the OneCipher daemon is running with Key-Agent and Network-Agent
     And the main wallet is unlocked and its Owner key is in Key-Agent memory only
-    And an AI Agent has been provisioned with a ConnectRPC client
+    And an AI Agent has been provisioned with a WalletConnect v2 client
     And the human Owner has a registered Passkey credential
 
   Scenario: CreateSessionKey with Passkey authorization
@@ -33,9 +33,9 @@ Feature: Session Key Lifecycle
     And the response has status DENY and deny_reason "EXPIRED"
     And an audit entry is appended with status DENIED and reason EXPIRED
 
-  Scenario: ConnectRPC method surface never exposes Owner key
+  Scenario: WalletConnect v2 method surface never exposes Owner key
     Given an Agent has been issued a Session Key
-    When the Agent lists available ConnectRPC methods
+    When the Agent lists available WalletConnect v2 methods
     Then no method returns the Owner key, BIP-32 root, or mnemonic
     And all signing operations performed by the Agent use only the Session Key
     And the audit log shows every Owner-key signature is co-signed by a PasskeyAuthorization

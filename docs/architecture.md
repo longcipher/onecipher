@@ -78,7 +78,7 @@ onecipher/
 │   ├── oc-netagent/            # Network-Agent (WC v2 server logic)
 │   ├── oc-pay/                 # Payment primitives (x402 + MPP settlers)
 │   ├── oc-policy/              # Policy Engine v2/v3 (11-step + Cedar DSL)
-│   ├── oc-proto/               # Prost proto definitions
+│   ├── oc-secret/              # Secret vault (age-encrypted secrets + TOTP)
 │   ├── oc-session-key/         # Multi-chain SessionKeyProvider (EVM/Solana)
 │   ├── oc-signer/              # Multi-chain signing
 │   ├── oc-vault/               # Wallet vault (filesystem 700/600, .ocbk backup)
@@ -108,8 +108,7 @@ oc-signing crates (R56 leaf — zero async/network deps)
 ├── oc-crypto      (HardenedBytes, KeyCache, page guards)
 ├── oc-signer      (multi-chain signing, HD derivation)
 ├── oc-vault       (encrypted wallet storage, filesystem perms)
-├── oc-wallet      (wallet CRUD, policy store, migration)
-└── oc-proto       (prost IPC definitions)
+└── oc-wallet      (wallet CRUD, policy store, migration)
 
 oc-netagent (async — tokio runtime)
 ├── oc-walletconnect  (WC v2 protocol)

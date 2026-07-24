@@ -2,9 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use cucumber::World;
 use ed25519_dalek::SigningKey;
-use oc_keyagent::{AuditLog, EventType, PasskeyVerifier};
+use oc_keyagent::{AuditLog, EventType, PasskeyVerifier, proto::PasskeyAuthorization};
 use oc_policy::{Decision, DenyReason, PolicyState, PolicyV2};
-use oc_proto::PasskeyAuthorization;
 use oc_session_key::{
     GrantReceipt, MockRpcClient, MockRpcCounters, OwnerKey, PublicKey, SessionPrivateKey,
 };
@@ -90,10 +89,10 @@ pub struct ConformanceWorld {
     /// call, used by Scenario 3 to attempt a replay.
     pub captured_auth: Option<PasskeyAuthorization>,
 
-    // --- T22 scenario 4: ConnectRPC method surface ---
-    /// ConnectRPC methods the Agent can call. Asserted to never expose
-    /// Owner key / BIP-32 root / mnemonic.
-    pub connectrpc_methods: Vec<&'static str>,
+    // --- T22 scenario 4: Agent method surface (WalletConnect v2 JSON-RPC) ---
+    /// WalletConnect v2 JSON-RPC methods the Agent can call. Asserted to never
+    /// expose Owner key / BIP-32 root / mnemonic.
+    pub agent_method_surface: Vec<&'static str>,
 
     // --- T31: Policy Alert state ---
     /// Alerts captured by the RecordingAlertSink during the current scenario.
@@ -127,7 +126,7 @@ impl std::fmt::Debug for ConformanceWorld {
             .field("last_error", &self.last_error)
             .field("challenges_count", &self.challenges.len())
             .field("captured_auth_present", &self.captured_auth.is_some())
-            .field("connectrpc_methods", &self.connectrpc_methods)
+            .field("agent_method_surface", &self.agent_method_surface)
             .field("captured_alerts_present", &self.captured_alerts.is_some())
             .finish()
     }
@@ -158,7 +157,7 @@ impl ConformanceWorld {
             last_error: None,
             challenges: Vec::new(),
             captured_auth: None,
-            connectrpc_methods: vec![
+            agent_method_surface: vec![
                 "ListWallets",
                 "GetBalance",
                 "CreateSessionKey",

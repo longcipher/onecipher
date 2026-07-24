@@ -68,7 +68,7 @@ so a TOTP read and a signing operation are governed by one consistent ruleset.
 │   ├── oc-netagent/        # Network-Agent lib (tokio + WalletConnect v2)
 │   ├── oc-pay/             # Payment primitives (x402 + MPP settlers)
 │   ├── oc-policy/          # Policy Engine v2/v3 (11-step evaluation)
-│   ├── oc-proto/           # prost proto definitions (AgentService IPC)
+│   ├── oc-secret/          # Secret vault (age-encrypted secrets + TOTP)
 │   ├── oc-session-key/     # Multi-chain SessionKeyProvider (EVM/Solana)
 │   ├── oc-signer/          # Multi-chain signing
 │   ├── oc-vault/           # Wallet vault (filesystem 700/600, .ocbk backup)

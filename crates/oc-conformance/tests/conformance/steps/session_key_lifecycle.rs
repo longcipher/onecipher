@@ -17,12 +17,13 @@
 use cucumber::{given, then, when};
 use ed25519_dalek::{Signer, SigningKey};
 use oc_crypto::HardenedBytes;
-use oc_keyagent::{AuditLog, EventType, PasskeyPubkey, PasskeyVerifier};
+use oc_keyagent::{
+    AuditLog, EventType, PasskeyPubkey, PasskeyVerifier, proto::PasskeyAuthorization,
+};
 use oc_policy::{
     BudgetAllocation, Decision, DenyReason, PayRequest, PolicyRulesV2, PolicyState, PolicyV2,
     evaluate_11_step,
 };
-use oc_proto::PasskeyAuthorization;
 use oc_session_key::{
     EvmSessionKeyProvider, GrantReceipt, KeyScheme, MockRpcClient, OwnerKey, PublicKey,
     SessionKeyProvider, SessionPrivateKey, SignPayload, Signature, SolanaSessionKeyProvider,
@@ -67,10 +68,10 @@ async fn wallet_unlocked(world: &mut ConformanceWorld) {
     world.passkey_signing_key = Some(owner_signing);
 }
 
-#[given("an AI Agent has been provisioned with a ConnectRPC client")]
+#[given("an AI Agent has been provisioned with a WalletConnect v2 client")]
 async fn agent_provisioned(_world: &mut ConformanceWorld) {
-    // No-op for component-level tests. The ConnectRPC method surface is
-    // populated in `ConformanceWorld::new()`.
+    // No-op for component-level tests. The Agent method surface
+    // (WalletConnect v2 JSON-RPC) is populated in `ConformanceWorld::new()`.
 }
 
 // ---------------------------------------------------------------------------
@@ -487,18 +488,19 @@ async fn agent_issued_session_key(world: &mut ConformanceWorld) {
     agent_calls_create_session_key(world).await;
 }
 
-#[when("the Agent lists available ConnectRPC methods")]
+#[when("the Agent lists available WalletConnect v2 methods")]
 async fn agent_lists_methods(world: &mut ConformanceWorld) {
     // The list is populated in `ConformanceWorld::new()`. Assert non-empty
     // here so a regression in init is caught at this step.
-    assert!(!world.connectrpc_methods.is_empty(), "ConnectRPC method list must not be empty");
+    assert!(!world.agent_method_surface.is_empty(), "Agent method surface must not be empty");
 }
 
 #[then("no method returns the Owner key, BIP-32 root, or mnemonic")]
 async fn then_no_owner_key_exposed(world: &mut ConformanceWorld) {
-    // Behavioral: the AgentService proto has no ExportOwnerKey / ExportMnemonic
-    // RPC. We assert no method name suggests exposing owner key material.
-    for method in &world.connectrpc_methods {
+    // Behavioral: the WalletConnect v2 method router has no ExportOwnerKey /
+    // ExportMnemonic JSON-RPC method. We assert no method name suggests
+    // exposing owner key material.
+    for method in &world.agent_method_surface {
         let lower = method.to_lowercase();
         assert!(!lower.contains("owner"), "method `{method}` exposes owner key");
         assert!(!lower.contains("mnemonic"), "method `{method}` exposes mnemonic");

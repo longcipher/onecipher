@@ -5,7 +5,7 @@
 //! string). The caller knows the expected response type from the request
 //! variant and decodes the `Ok` payload accordingly.
 
-use oc_proto::DenyReason;
+use crate::proto::DenyReason;
 
 /// A response from the Key-Agent to the Network-Agent over UDS.
 #[derive(Clone, PartialEq, prost::Message)]

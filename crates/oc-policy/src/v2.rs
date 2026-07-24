@@ -20,8 +20,8 @@ use crate::OcPolicyError;
 
 /// A payment request evaluated by the 11-step Policy Engine.
 ///
-/// Defined locally in `oc-policy`; T8 (`oc-proto`) will define `PayX402Request`
-/// for the wire format.
+/// Defined locally in `oc-policy`; the wire-format `PayX402Request` lives in
+/// `oc_keyagent::proto` (UDS IPC codec).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayRequest {
     pub session_key_id: String,

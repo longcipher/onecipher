@@ -1,9 +1,9 @@
 //! Domain types for `oc-session-key`.
 //!
 //! Per the design (§5.1), these are Rust-specific wire/domain types — they live
-//! here rather than in `oc-proto` because they wrap `HardenedBytes` (R51/R52)
-//! and reference `oc-policy` types. The proto layer (`oc-proto`) defines the
-//! cross-language wire format separately.
+//! here rather than in `oc-keyagent::proto` because they wrap `HardenedBytes`
+//! (R51/R52) and reference `oc-policy` types. The prost wire-format layer in
+//! `oc_keyagent::proto` defines the UDS IPC codec separately.
 
 use oc_crypto::HardenedBytes;
 use serde::{Deserialize, Serialize};

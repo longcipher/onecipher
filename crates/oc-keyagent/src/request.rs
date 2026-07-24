@@ -1,16 +1,15 @@
 //! `KeyAgentRequest` — the request enum for Key-Agent IPC.
 //!
-//! Each variant wraps an oc-proto RPC request message. The on-wire frame
-//! format is: 4-byte big-endian length prefix + prost-encoded
-//! `KeyAgentRequest`. `KeyAgentRequest` itself is a prost `oneof` (encoded
-//! as tag + nested message).
+//! Each variant wraps a prost wire-type message defined in [`crate::proto`].
+//! The on-wire frame format is: 4-byte big-endian length prefix +
+//! prost-encoded `KeyAgentRequest`. `KeyAgentRequest` itself is a prost
+//! `oneof` (encoded as tag + nested message).
 //!
-//! The set of variants mirrors `AgentService` in `proto/agent.proto`, minus
-//! `PayMPP` (a bidirectional stream, handled separately) and
-//! `ListSessionKeys` (uses `Empty` and is folded into the `ListWallets`
-//! slot — see `ListSessionKeysRequest` is just `Empty` in the proto).
+//! The set of variants covers every Key-Agent operation; the former
+//! `PayMPP` (bidirectional stream, never implemented) and `ListSessionKeys`
+//! (folded into `ListWallets` since both use `Empty`) RPCs are omitted.
 
-use oc_proto::{
+use crate::proto::{
     CreateSessionKeyRequest, GenerateChallengeRequest, GenerateTotpRequest, GetBalanceRequest,
     GetPaymentHistoryRequest, GetSecretRequest, ListSecretsRequest, PayX402Request,
     RegisterPasskeyRequest, RevokeSessionKeyRequest, SignMessageRequest, SignTransactionRequest,
@@ -79,10 +78,10 @@ pub enum KeyAgentRequestKind {
     GetBalance(GetBalanceRequest),
     /// `AgentService.ListWallets` — read-only (T18). Uses `Empty`.
     #[prost(message, tag = "10")]
-    ListWallets(oc_proto::Empty),
+    ListWallets(crate::proto::Empty),
     /// `AgentService.LockVault` — clears key cache, audit LOCK_VAULT.
     #[prost(message, tag = "11")]
-    LockVault(oc_proto::Empty),
+    LockVault(crate::proto::Empty),
     /// `AgentService.UnlockVault` — verify Passkey, issue UnlockToken (Stage 0).
     #[prost(message, tag = "12")]
     UnlockVault(UnlockVaultRequest),
@@ -129,8 +128,9 @@ mod tests {
 
     #[test]
     fn test_list_wallets_round_trip() {
-        let req =
-            KeyAgentRequest { kind: Some(KeyAgentRequestKind::ListWallets(oc_proto::Empty {})) };
+        let req = KeyAgentRequest {
+            kind: Some(KeyAgentRequestKind::ListWallets(crate::proto::Empty {})),
+        };
         let bytes = req.encode_to_vec();
         let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();
         assert_eq!(req, decoded);
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn test_get_secret_round_trip() {
         let req = KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::GetSecret(oc_proto::GetSecretRequest {
+            kind: Some(KeyAgentRequestKind::GetSecret(crate::proto::GetSecretRequest {
                 name: "github/token".to_string(),
                 api_token: "oc_key_abc123".to_string(),
             })),
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn test_list_secrets_round_trip() {
         let req = KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::ListSecrets(oc_proto::ListSecretsRequest {
+            kind: Some(KeyAgentRequestKind::ListSecrets(crate::proto::ListSecretsRequest {
                 api_token: "oc_key_xyz".to_string(),
             })),
         };
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn test_generate_totp_round_trip() {
         let req = KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::GenerateTotp(oc_proto::GenerateTotpRequest {
+            kind: Some(KeyAgentRequestKind::GenerateTotp(crate::proto::GenerateTotpRequest {
                 name: "totp/github".to_string(),
                 api_token: "oc_key_def".to_string(),
             })),

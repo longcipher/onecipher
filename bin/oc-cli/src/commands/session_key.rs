@@ -4,7 +4,7 @@
 //! `NetAgentClient` trait, and prints the response. Hex-decoding of Passkey
 //! challenge/signature happens here (UI-process concern), not in the proto layer.
 
-use oc_proto::{CreateSessionKeyRequest, PasskeyAuthorization, RevokeSessionKeyRequest};
+use oc_keyagent::proto::{CreateSessionKeyRequest, PasskeyAuthorization, RevokeSessionKeyRequest};
 
 use crate::{CliError, netagent::NetAgentClient};
 

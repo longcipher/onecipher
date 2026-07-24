@@ -19,7 +19,7 @@ pub enum NetAgentError {
     KeyAgentError(String),
     /// Key-Agent returned a policy `Deny` response carrying the deny reason.
     #[error("Key-Agent policy DENY: {0:?}")]
-    KeyAgentDeny(oc_proto::DenyReason),
+    KeyAgentDeny(oc_keyagent::proto::DenyReason),
     /// Invalid request from the client (could not be translated to a
     /// `KeyAgentRequest` variant).
     #[error("invalid request: {0}")]

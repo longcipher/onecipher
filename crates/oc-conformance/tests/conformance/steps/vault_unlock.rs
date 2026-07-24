@@ -52,8 +52,7 @@ use cucumber::{given, then, when};
 use ed25519_dalek::{Signer, SigningKey};
 use oc_core::{EncryptedWallet, KeyType};
 use oc_crypto::HardenedBytes;
-use oc_keyagent::{PasskeyPubkey, PasskeyVerifier};
-use oc_proto::PasskeyAuthorization;
+use oc_keyagent::{PasskeyPubkey, PasskeyVerifier, proto::PasskeyAuthorization};
 use oc_signer::encrypt as signer_encrypt;
 use oc_vault::{Vault, save_encrypted_wallet};
 use tempfile::tempdir;
@@ -689,6 +688,6 @@ async fn then_no_copy_escapes(world: &mut ConformanceWorld) {
         "HardenedBytes must have been dropped — no copy should remain in Key-Agent memory"
     );
     // Structural guarantee: HardenedBytes is never returned over RPC.
-    // (Verified by the connectrpc_methods list in main.rs — none of the
+    // (Verified by the agent_method_surface list in main.rs — none of the
     // methods return raw key material.)
 }
