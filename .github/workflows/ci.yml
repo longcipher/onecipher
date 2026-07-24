@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: ""
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - run: cargo +nightly fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: RUSTC_WRAPPER= cargo +nightly clippy --all --all-targets -- -D warnings
+
+  sort:
+    name: Cargo Sort
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install cargo-sort
+      - run: cargo sort -w -g -c
+
+  shear:
+    name: Unused Deps
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-shear
+      - run: cargo shear
+
+  hard-gates:
+    name: Hard Gates (R56)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: R56 — no forbidden deps in isolated crates
+        run: |
+          cargo tree -p oc-crypto -e features
+          cargo tree -p oc-policy -e features
+          cargo tree -p oc-keyagent -e features
+          cargo tree -p oc-session-key -e features
+      - name: Verify no tokio in oc-crypto
+        run: |
+          if cargo tree -p oc-crypto -e features 2>/dev/null | grep -q tokio; then
+            echo "R56 VIOLATION: tokio found in oc-crypto dependency tree"
+            exit 1
+          fi
+      - name: Verify no tokio in oc-policy
+        run: |
+          if cargo tree -p oc-policy -e features 2>/dev/null | grep -q tokio; then
+            echo "R56 VIOLATION: tokio found in oc-policy dependency tree"
+            exit 1
+          fi
+      - name: Verify no tokio in oc-keyagent
+        run: |
+          if cargo tree -p oc-keyagent -e features 2>/dev/null | grep -q tokio; then
+            echo "R56 VIOLATION: tokio found in oc-keyagent dependency tree"
+            exit 1
+          fi
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features --exclude oc-conformance
+
+  bdd:
+    name: Conformance BDD
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p oc-conformance --test conformance
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace
+
+  release:
+    name: Release Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin onecipher
+      - name: R12 — no TCP symbols in release binary
+        run: |
+          if nm target/release/onecipher 2>/dev/null | grep -i 'TcpListener\|TcpStream\|AF_INET'; then
+            echo "R12 VIOLATION: TCP symbols found in release binary"
+            exit 1
+          fi
+          echo "R12 PASS: no TCP symbols found"
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit
+      - run: cargo audit

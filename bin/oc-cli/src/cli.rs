@@ -13,6 +13,10 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) daemon: bool,
 
+    /// Enable experimental commands (Intent, TUI secret creation).
+    #[arg(long, global = true)]
+    pub(crate) experimental: bool,
+
     #[command(subcommand)]
     pub(crate) command: Option<Commands>,
 }
@@ -267,6 +271,12 @@ pub(crate) enum SbomCommands {
         /// Path to the CycloneDX SBOM JSON file
         #[arg(long)]
         file: String,
+    },
+    /// Generate a CycloneDX SBOM for the workspace
+    Generate {
+        /// Output file path (default: sbom.cdx.json)
+        #[arg(long, default_value = "sbom.cdx.json")]
+        output: String,
     },
 }
 

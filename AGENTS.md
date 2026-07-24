@@ -22,12 +22,10 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 │   ├── oc-keyagent/        # Key-Agent lib (sync std, NO tokio — R56)
 │   ├── oc-netagent/        # Network-Agent lib (tokio + WalletConnect v2)
 │   ├── oc-pay/             # Payment primitives (x402 + MPP settlers)
-│   ├── oc-pay-http/        # HTTP payment client (x402 discovery/fund/pay)
 │   ├── oc-policy/          # Policy Engine v2/v3 (11-step evaluation)
 │   ├── oc-proto/           # prost proto definitions (AgentService IPC)
 │   ├── oc-session-key/     # Multi-chain SessionKeyProvider (EVM/Solana)
 │   ├── oc-signer/          # Multi-chain signing
-│   ├── oc-signing-core/    # Signing engine core (orchestrates oc-signer)
 │   ├── oc-vault/           # Wallet vault (filesystem 700/600, .ocbk backup)
 │   ├── oc-wallet/          # Wallet operations (key store, policy, migration)
 │   └── oc-walletconnect/   # WalletConnect v2 protocol wrapper (relay, crypto)
@@ -79,7 +77,7 @@ These are non-negotiable invariants verified by `cargo tree` inspection
 (R56) and binary symbol analysis (R12), supplemented by conformance tests:
 
 - **R56 (dependency isolation):** `oc-crypto`, `oc-policy`, `oc-keyagent`,
-  `oc-session-key`, `oc-signing-core` MUST NOT depend on `tokio`,
+  `oc-session-key` MUST NOT depend on `tokio`,
   `reqwest`, `tungstenite`, `hyper`, `async-std`, or `smol` — even as
   dev-deps. Verified via `cargo tree -p <crate>` inspection.
 - **R12 (no TCP in Key-Agent binary):** The `oc-keyagent` release binary

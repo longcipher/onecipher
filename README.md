@@ -67,12 +67,10 @@ so a TOTP read and a signing operation are governed by one consistent ruleset.
 │   ├── oc-keyagent/        # Key-Agent lib (sync std, NO tokio — R56)
 │   ├── oc-netagent/        # Network-Agent lib (tokio + WalletConnect v2)
 │   ├── oc-pay/             # Payment primitives (x402 + MPP settlers)
-│   ├── oc-pay-http/        # HTTP payment client (x402 discovery/fund/pay)
 │   ├── oc-policy/          # Policy Engine v2/v3 (11-step evaluation)
 │   ├── oc-proto/           # prost proto definitions (AgentService IPC)
 │   ├── oc-session-key/     # Multi-chain SessionKeyProvider (EVM/Solana)
 │   ├── oc-signer/          # Multi-chain signing
-│   ├── oc-signing-core/    # Signing facade (bridges sync Key-Agent + async Network-Agent)
 │   ├── oc-vault/           # Wallet vault (filesystem 700/600, .ocbk backup)
 │   ├── oc-wallet/          # Wallet operations (key store, policy, migration)
 │   └── oc-walletconnect/   # WalletConnect v2 protocol wrapper (relay, crypto)
@@ -129,7 +127,7 @@ The OneCipher API **never** returns raw private keys.
 ### Two-layer architecture
 
 The Network-Agent and Key-Agent are **separate internal layers** within the
-single `onecipher` binary, bridged by `oc-signing-core`:
+single `onecipher` binary:
 
 - **Network-Agent** uses tokio + WalletConnect v2 (WSS relay) to receive
   signing requests from dApps and external agents. It translates each
@@ -141,11 +139,10 @@ single `onecipher` binary, bridged by `oc-signing-core`:
   seccomp + prctl sandboxing blocks all network syscalls at runtime.
 
 This separation is enforced by the **R56 hard gate**: the Key-Agent crate
-tree (`oc-keyagent`, `oc-crypto`, `oc-policy`, `oc-session-key`,
-`oc-signing-core`) MUST NOT depend on `tokio`, `reqwest`, `tungstenite`,
-`hyper`, `async-std`, or `smol` — even as dev-deps. Pulling
-async/network libraries into the signing layer would violate the security
-boundary.
+tree (`oc-keyagent`, `oc-crypto`, `oc-policy`, `oc-session-key`) MUST NOT
+depend on `tokio`, `reqwest`, `tungstenite`, `hyper`, `async-std`, or `smol`
+— even as dev-deps. Pulling async/network libraries into the signing layer
+would violate the security boundary.
 
 ### Unified vault architecture
 
@@ -176,7 +173,7 @@ These are non-negotiable invariants verified by `cargo tree` inspection
 (R56) and binary symbol analysis (R12), supplemented by conformance tests:
 
 - **R56 (dependency isolation):** `oc-crypto`, `oc-policy`, `oc-keyagent`,
-  `oc-session-key`, `oc-signing-core` MUST NOT depend on `tokio`, `reqwest`,
+  `oc-session-key` MUST NOT depend on `tokio`, `reqwest`,
   `tungstenite`, `hyper`, `async-std`, or `smol` — even as dev-deps. Verified
   via `cargo tree -p <crate>` inspection.
 - **R12 (no TCP in Key-Agent binary):** The `onecipher` release binary
@@ -211,7 +208,7 @@ already enforces:
   limits, rate limits, expiry, and passkey authorization apply to vault
   reads as well as transactions.
 - **R56 hard gate.** `oc-crypto`, `oc-policy`, `oc-keyagent`,
-  `oc-session-key`, and `oc-signing-core` MUST NOT depend on `tokio`,
+  and `oc-session-key` MUST NOT depend on `tokio`,
   `reqwest`, `tungstenite`, `hyper`, `async-std`, or `smol` — keeping the
   crypto/policy/audit core free of any async runtime or network stack.
 

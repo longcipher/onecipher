@@ -74,6 +74,8 @@ pub(crate) struct App {
     /// time. When `None`, copy and TOTP features display a guidance
     /// message instead of failing.
     identity: Option<AgeIdentity>,
+    /// Whether experimental features (e.g. new secret creation) are enabled.
+    pub(crate) experimental: bool,
 }
 
 impl App {
@@ -81,7 +83,7 @@ impl App {
     ///
     /// Attempts to load an age identity from `ONECIPHER_AGE_IDENTITY` so
     /// that copy / TOTP features work out of the box.
-    pub(crate) fn new(store: SecretStore) -> Self {
+    pub(crate) fn new(store: SecretStore, experimental: bool) -> Self {
         let identity =
             std::env::var("ONECIPHER_AGE_IDENTITY").ok().and_then(|s| AgeIdentity::parse(&s).ok());
 
@@ -99,6 +101,7 @@ impl App {
             input_buffer: String::new(),
             should_quit: false,
             identity,
+            experimental,
         }
     }
 

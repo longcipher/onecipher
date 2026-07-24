@@ -94,3 +94,7 @@ setup:
     cargo install cargo-sort
     cargo install cargo-shear
     rustup toolchain install nightly --component rustfmt clippy
+
+# Run cargo audit to check for known vulnerabilities.
+audit:
+    cargo audit

@@ -45,6 +45,7 @@ ratatui = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+toml = "0.8"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
 zeroize = { workspace = true, features = ["derive"] }

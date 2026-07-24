@@ -25,10 +25,10 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 │  └──────────────────────────┼────────────────────────────────────┘    │
 │                             │ spawn_blocking                          │
 │  ┌──────────────────────────▼────────────────────────────────────┐    │
-│  │  oc-signing-core (sync-only, R56-enforced crate)               │    │
+│  │  Signing Core (sync-only, R56-enforced crates)                │    │
 │  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐   │    │
 │  │  │ Policy v3   │  │ Vault Decrypt │  │ Multi-chain Signer │   │    │
-│  │  │ (11-step +  │  │ (Passkey      │  │ (EVM/Solana/BTC/   │   │    │
+│  │  │ (oc-policy) │  │ (oc-vault)   │  │ (oc-signer)        │   │    │
 │  │  │  Cedar DSL) │  │  unlock)      │  │  Cosmos/...)       │   │    │
 │  │  └─────────────┘  └──────────────┘  └────────────────────┘   │    │
 │  │  ┌─────────────────────────────────────────────────────────┐ │    │
@@ -55,7 +55,7 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 ### Key Design Decisions
 
 - **Single binary**: `onecipher` embeds both the async runtime (tokio) and the sync signing core. No dual daemons, no UDS IPC between them.
-- **Compile-time isolation**: `oc-signing-core` is a facade crate aggregating `oc-policy` + `oc-crypto` + `oc-signer` + `oc-vault`. CI enforces zero async/network dependencies (R56).
+- **Compile-time isolation**: The signing crates (`oc-policy`, `oc-crypto`, `oc-signer`, `oc-vault`) have zero async/network dependencies. CI enforces this via R56.
 - **`spawn_blocking` bridge**: async layer calls signing-core via `tokio::task::spawn_blocking`, avoiding reactor blockage.
 - **Local First**: All signing and policy evaluation happen locally. The server never touches plaintext private keys.
 
@@ -73,12 +73,10 @@ onecipher/
 │   ├── oc-keyagent/            # Key-Agent handler logic (sync)
 │   ├── oc-netagent/            # Network-Agent (WC v2 server logic)
 │   ├── oc-pay/                 # Payment primitives (x402 + MPP settlers)
-│   ├── oc-pay-http/            # HTTP payment client (x402 discovery/fund/pay)
 │   ├── oc-policy/              # Policy Engine v2/v3 (11-step + Cedar DSL)
 │   ├── oc-proto/               # Prost proto definitions
 │   ├── oc-session-key/         # Multi-chain SessionKeyProvider (EVM/Solana)
 │   ├── oc-signer/              # Multi-chain signing
-│   ├── oc-signing-core/        # Facade: policy + crypto + signer + vault (R56 leaf)
 │   ├── oc-vault/               # Wallet vault (filesystem 700/600, .ocbk backup)
 │   ├── oc-wallet/              # Wallet operations (key store, policy, migration)
 │   └── oc-walletconnect/       # WalletConnect v2 protocol wrapper
@@ -92,16 +90,16 @@ These are non-negotiable invariants enforced by CI:
 
 | Gate | Rule | Scope | Enforcement |
 |------|------|-------|-------------|
-| **R56** | No `tokio`, `reqwest`, `tungstenite`, `hyper`, `async-std`, `smol` | `oc-crypto`, `oc-policy`, `oc-signing-core`, `oc-session-key` (even as dev-deps) | `cargo tree -p <crate> -e features` |
+| **R56** | No `tokio`, `reqwest`, `tungstenite`, `hyper`, `async-std`, `smol` | `oc-crypto`, `oc-policy`, `oc-session-key` (even as dev-deps) | `cargo tree -p <crate> -e features` |
 | **R12** | No TCP symbols (`TcpListener`, `TcpStream`, `AF_INET`) | `onecipher` binary's signing-core code paths | `nm` symbol inspection |
 | **R51/R52** | Zero I/O, zero network dependencies | `oc-crypto` | Architecture + review |
-| **R55** | Signing core uses sync `std::thread` only | `oc-signing-core` crate | `cargo tree -p <crate> -e features` |
+| **R55** | Signing core uses sync `std::thread` only | `oc-keyagent` crate | `cargo tree -p <crate> -e features` |
 | **R53** | Drop all capabilities except `CAP_IPC_LOCK` | `onecipher` binary (Linux, when enclave enabled) | `sandbox.rs` |
 
 ## Crate Dependency Tree
 
 ```
-oc-signing-core (R56 leaf — zero async/network deps)
+oc-signing crates (R56 leaf — zero async/network deps)
 ├── oc-policy      (declarative + executable policy evaluation)
 ├── oc-crypto      (HardenedBytes, KeyCache, page guards)
 ├── oc-signer      (multi-chain signing, HD derivation)
@@ -111,11 +109,11 @@ oc-signing-core (R56 leaf — zero async/network deps)
 
 oc-netagent (async — tokio runtime)
 ├── oc-walletconnect  (WC v2 protocol)
-└── oc-signing-core   (called via spawn_blocking)
+└── oc-signer         (called via spawn_blocking)
 
 bin/oc-cli (single binary)
 ├── tokio runtime (WC server, x402, JSON-RPC)
-├── oc-signing-core (sync signing engine)
+├── oc-keyagent (sync signing engine)
 └── clap (CLI parsing)
 ```
 
