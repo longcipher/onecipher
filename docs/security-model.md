@@ -27,7 +27,7 @@ All sensitive material (mnemonics, private keys, passphrases) flows through `Har
 | Page locking | `mlock()` prevents swapping to disk |
 | Dump protection | `MADV_DONTDUMP` excludes from core dumps |
 | Zeroize on drop | Cryptographic zeroing when value goes out of scope |
-| Scope | Used in `oc-crypto`, `oc-signer`, `oc-signing-core` |
+| Scope | Used in `oc-crypto`, `oc-signer` |
 
 The `oc-crypto` crate has zero I/O and zero network dependencies (R51/R52). It is the security foundation of the entire stack.
 

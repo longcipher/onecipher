@@ -207,6 +207,7 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         },
         Commands::Sbom { subcommand } => match subcommand {
             cli::SbomCommands::Verify { file } => commands::sbom::verify(&file),
+            cli::SbomCommands::Generate { output } => commands::sbom::generate(&output),
         },
         Commands::Wc { subcommand } => match subcommand {
             cli::WcCommands::Pair { ttl } => commands::wc::pair(ttl),
@@ -214,30 +215,37 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             cli::WcCommands::Sessions => commands::wc::sessions(),
             cli::WcCommands::Disconnect { topic } => commands::wc::disconnect(&topic),
         },
-        Commands::Intent { subcommand } => match subcommand {
-            cli::IntentCommands::Submit { json, chain, session_key, sponsor, yes, rpc_url } => {
-                commands::intent::run_submit(
-                    &json,
-                    &chain,
-                    &session_key,
-                    &sponsor,
-                    yes,
-                    rpc_url.as_deref(),
-                )
+        Commands::Intent { subcommand } => {
+            if !cli.experimental {
+                return Err(CliError::InvalidArgs(
+                    "Intent is experimental. Use --experimental to enable.".into(),
+                ));
             }
-            cli::IntentCommands::Simulate { json, chain, session_key, rpc_url } => {
-                commands::intent::run_simulate(&json, &chain, &session_key, rpc_url.as_deref())
+            match subcommand {
+                cli::IntentCommands::Submit { json, chain, session_key, sponsor, yes, rpc_url } => {
+                    commands::intent::run_submit(
+                        &json,
+                        &chain,
+                        &session_key,
+                        &sponsor,
+                        yes,
+                        rpc_url.as_deref(),
+                    )
+                }
+                cli::IntentCommands::Simulate { json, chain, session_key, rpc_url } => {
+                    commands::intent::run_simulate(&json, &chain, &session_key, rpc_url.as_deref())
+                }
+                cli::IntentCommands::Execute { json, chain, session_key, sponsor, rpc_url } => {
+                    commands::intent::run_execute(
+                        &json,
+                        &chain,
+                        &session_key,
+                        &sponsor,
+                        rpc_url.as_deref(),
+                    )
+                }
             }
-            cli::IntentCommands::Execute { json, chain, session_key, sponsor, rpc_url } => {
-                commands::intent::run_execute(
-                    &json,
-                    &chain,
-                    &session_key,
-                    &sponsor,
-                    rpc_url.as_deref(),
-                )
-            }
-        },
+        }
         Commands::Secret { subcommand } => match subcommand {
             cli::SecretCommands::List { r#type, json } => {
                 let item_type = r#type.as_deref().map(commands::parse_item_type).transpose()?;
@@ -295,7 +303,7 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         Commands::Migrate { dry_run, rollback } => commands::migrate::run(dry_run, rollback),
         Commands::Tui => {
             let store = commands::open_secret_store()?;
-            tui::run(store).map_err(|e| CliError::InvalidArgs(e.to_string()))
+            tui::run(store, cli.experimental).map_err(|e| CliError::InvalidArgs(e.to_string()))
         }
         Commands::AgentSecret { subcommand } => match subcommand {
             cli::AgentSecretCommands::Get { name, json } => {

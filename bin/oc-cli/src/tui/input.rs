@@ -94,7 +94,11 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Char('n') => {
-            app.set_message("New secret creation not yet implemented");
+            if app.experimental {
+                app.set_message("New secret creation not yet implemented");
+            } else {
+                app.set_message("New secret creation is experimental. Restart with --experimental to enable.");
+            }
             false
         }
         _ => false,

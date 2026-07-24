@@ -1,17 +1,21 @@
-//! SBOM CLI (T41). Verifies CycloneDX SBOM files.
+//! SBOM CLI (T41). Generates and verifies CycloneDX SBOM files.
 //!
-//! `onecipher sbom verify --file <path>`
+//! - `onecipher sbom generate --output <path>` — generate a CycloneDX SBOM
+//! - `onecipher sbom verify --file <path>` — verify a CycloneDX SBOM
 //!
-//! Performs basic structural validation of a CycloneDX SBOM JSON file:
+//! Generation tries `cargo cyclonedx` first; falls back to a minimal SBOM
+//! built from workspace crate names/versions in Cargo.toml.
+//!
+//! Verification performs basic structural validation of a CycloneDX SBOM JSON file:
 //! - File exists and parses as JSON
 //! - Top-level `bomFormat` field equals `"CycloneDX"`
 //! - Top-level `components` field is an array (may be empty)
 //! - Each component has `name`, `version`, and a source identifier (`purl` or `cpe`). The CycloneDX
 //!   spec allows either; we accept both.
 
-use std::{fs, path::Path};
+use std::{fs, path::Path, process::Command};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::CliError;
 
@@ -72,5 +76,79 @@ pub(crate) fn verify(file: &str) -> Result<(), CliError> {
         value.get("specVersion").and_then(|v| v.as_str()).unwrap_or("?"),
         components.len()
     );
+    Ok(())
+}
+
+/// Entry point for `onecipher sbom generate --output <path>`.
+///
+/// Tries `cargo cyclonedx` first. If the tool is not installed, generates a
+/// minimal CycloneDX SBOM from workspace crate names and versions read from
+/// `Cargo.toml`.
+pub(crate) fn generate(output: &str) -> Result<(), CliError> {
+    // Try cargo cyclonedx first.
+    if Command::new("cargo")
+        .args(["cyclonedx", "--help"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+    {
+        let status = Command::new("cargo")
+            .args(["cyclonedx", "--output-file", output])
+            .status()?;
+        if status.success() {
+            println!("SBOM generated via cargo-cyclonedx: {output}");
+            return Ok(());
+        }
+        eprintln!("cargo cyclonedx failed, falling back to minimal SBOM generation");
+    }
+
+    // Fallback: build a minimal CycloneDX SBOM from workspace members.
+    let manifest = fs::read_to_string("Cargo.toml")?;
+    let doc: toml::Value =
+        toml::from_str(&manifest).map_err(|e| CliError::InvalidArgs(format!("Cargo.toml: {e}")))?;
+
+    let workspace_version = doc
+        .get("workspace")
+        .and_then(|w| w.get("package"))
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.0.0");
+
+    let mut components = Vec::new();
+    if let Some(members) = doc
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(|m| m.as_array())
+    {
+        for member in members {
+            let name = member.as_str().unwrap_or_default();
+            // Derive crate name from path (last segment, hyphens → underscores for crate name).
+            let crate_name = name.rsplit('/').next().unwrap_or(name);
+            components.push(json!({
+                "type": "library",
+                "name": crate_name,
+                "version": workspace_version,
+                "purl": format!("pkg:cargo/{crate_name}@{workspace_version}")
+            }));
+        }
+    }
+
+    let sbom = json!({
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "application",
+                "name": "onecipher",
+                "version": workspace_version
+            }
+        },
+        "components": components
+    });
+
+    fs::write(output, serde_json::to_string_pretty(&sbom)?)?;
+    println!("Minimal SBOM generated: {output} ({} components)", components.len());
     Ok(())
 }
