@@ -8,9 +8,8 @@
 //! The full X25519 + HKDF key derivation is wired in Task 3; this module uses
 //! the derived symKey directly.
 
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
-use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use rand::RngExt;
 use serde::Deserialize;
@@ -31,20 +30,17 @@ use crate::{
 
 const WC_AAD: &[u8] = b"wc-2.0";
 
+pub type HandlerResult<'a> =
+    Pin<Box<dyn Future<Output = Result<Value, (JsonRpcErrorCode, String)>> + Send + 'a>>;
+
 /// Trait implemented by the Net-Agent's WC method router.
 ///
 /// `method` is the JSON-RPC method name (e.g. `"personal_sign"`,
 /// `"onecipher_listWallets"`). `params` is the parsed JSON-RPC params object.
 /// `session_topic` identifies the WC session the request came in on, so the
 /// handler can look up the bound `SessionKeyInfo` and PolicyRulesV2.
-#[async_trait]
 pub trait WalletMethodHandler: Send + Sync {
-    async fn handle(
-        &self,
-        method: &str,
-        params: Value,
-        session_topic: &str,
-    ) -> Result<Value, (JsonRpcErrorCode, String)>;
+    fn handle<'a>(&'a self, method: &str, params: Value, session_topic: &str) -> HandlerResult<'a>;
 }
 
 #[derive(Debug, Clone)]

@@ -14,7 +14,8 @@
 //! live in `oc-netagent` (T19). Signing is stubbed locally with a deterministic
 //! mock signature; real Key-Agent signing is T19's job.
 
-use async_trait::async_trait;
+use std::{future::Future, pin::Pin};
+
 use rust_decimal::Decimal;
 
 use crate::{
@@ -27,16 +28,21 @@ use crate::{
 ///
 /// Real impls (`solana-rpc-client`) live in `oc-netagent`. Phase 1 ships only
 /// test mocks.
-#[async_trait]
 pub trait SolanaRpcClient: Send + Sync {
     /// Submit a signed Solana transaction (raw bytes) and return the base58
     /// transaction signature.
-    async fn send_transaction(&self, tx: &[u8]) -> Result<String, PayError>;
+    fn send_transaction(
+        &self,
+        tx: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, PayError>> + Send + '_>>;
 
     /// Fetch a Solana account's data (returns `None` if the account does not
     /// exist). Used by channel-state introspection; Phase 1 settlers do not
     /// call this.
-    async fn get_account(&self, address: &str) -> Result<Option<Vec<u8>>, PayError>;
+    fn get_account(
+        &self,
+        address: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, PayError>> + Send + '_>>;
 }
 
 /// Solana payment settler — submits Solana txs directly to RPC (no Paymaster).
@@ -107,7 +113,6 @@ impl SolanaSettler {
     }
 }
 
-#[async_trait]
 impl PaymentSettler for SolanaSettler {
     fn chain_id(&self) -> &str {
         &self.chain_id
@@ -117,39 +122,45 @@ impl PaymentSettler for SolanaSettler {
         &self.supported
     }
 
-    async fn pay_exact(
+    fn pay_exact(
         &self,
         payer: &SessionKey,
         recipient: &str,
         amount: Decimal,
         asset: Caip19Asset,
-    ) -> Result<PaymentReceipt, PayError> {
-        self.validate(payer, recipient, amount)?;
-
+    ) -> Pin<Box<dyn Future<Output = Result<PaymentReceipt, PayError>> + Send + '_>> {
+        if let Err(e) = self.validate(payer, recipient, amount) {
+            return Box::pin(async { Err(e) });
+        }
         let mut tx = Self::build_tx(recipient, amount);
-        Self::sign_tx(&mut tx, payer)?;
-        let signature = self.rpc.send_transaction(&tx).await?;
-
-        Ok(PaymentReceipt::new(
-            self.chain_id.clone(),
-            PaymentScheme::Exact,
-            signature,
-            amount,
-            asset,
-            recipient,
-        ))
+        if let Err(e) = Self::sign_tx(&mut tx, payer) {
+            return Box::pin(async { Err(e) });
+        }
+        let recipient = recipient.to_string();
+        let rpc = &self.rpc;
+        let chain_id = self.chain_id.clone();
+        Box::pin(async move {
+            let signature = rpc.send_transaction(&tx).await?;
+            Ok(PaymentReceipt::new(
+                chain_id,
+                PaymentScheme::Exact,
+                signature,
+                amount,
+                asset,
+                &recipient,
+            ))
+        })
     }
 
-    async fn open_channel(
+    fn open_channel(
         &self,
         payer: &SessionKey,
         recipient: &str,
         max_amount: Decimal,
-    ) -> Result<ChannelId, PayError> {
-        // Phase 1 stub: Solana MPP channels route through TempoSettler. We
-        // still implement open_channel so the trait is satisfied for the
-        // Solana-only test path; the returned ChannelId is deterministic.
-        self.validate(payer, recipient, max_amount)?;
+    ) -> Pin<Box<dyn Future<Output = Result<ChannelId, PayError>> + Send + '_>> {
+        if let Err(e) = self.validate(payer, recipient, max_amount) {
+            return Box::pin(async { Err(e) });
+        }
         let mut bytes = [0u8; 32];
         let id_bytes = payer.key_id.as_bytes();
         let n = id_bytes.len().min(16);
@@ -157,13 +168,18 @@ impl PaymentSettler for SolanaSettler {
         let r_bytes = recipient.as_bytes();
         let m = r_bytes.len().min(16);
         bytes[16..16 + m].copy_from_slice(&r_bytes[..m]);
-        Ok(ChannelId::from_bytes(bytes))
+        Box::pin(async move { Ok(ChannelId::from_bytes(bytes)) })
     }
 
-    async fn close_channel(&self, _channel_id: &ChannelId) -> Result<PaymentReceipt, PayError> {
-        Err(PayError::TempoError(
-            "SolanaSettler does not implement close_channel — use TempoSettler for MPP".into(),
-        ))
+    fn close_channel(
+        &self,
+        _channel_id: &ChannelId,
+    ) -> Pin<Box<dyn Future<Output = Result<PaymentReceipt, PayError>> + Send + '_>> {
+        Box::pin(async {
+            Err(PayError::TempoError(
+                "SolanaSettler does not implement close_channel — use TempoSettler for MPP".into(),
+            ))
+        })
     }
 }
 
@@ -175,14 +191,19 @@ mod tests {
         signature: String,
     }
 
-    #[async_trait]
     impl SolanaRpcClient for MockSolanaRpc {
-        async fn send_transaction(&self, _tx: &[u8]) -> Result<String, PayError> {
-            Ok(self.signature.clone())
+        fn send_transaction(
+            &self,
+            _tx: &[u8],
+        ) -> Pin<Box<dyn Future<Output = Result<String, PayError>> + Send + '_>> {
+            Box::pin(async { Ok(self.signature.clone()) })
         }
 
-        async fn get_account(&self, _address: &str) -> Result<Option<Vec<u8>>, PayError> {
-            Ok(Some(vec![0x01]))
+        fn get_account(
+            &self,
+            _address: &str,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, PayError>> + Send + '_>> {
+            Box::pin(async { Ok(Some(vec![0x01])) })
         }
     }
 

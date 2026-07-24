@@ -1,4 +1,4 @@
-use crate::{
+use super::{
     error::{OcPayHttpError, OcPayHttpErrorCode},
     types::{
         FundResult, MoonPayBalanceRequest, MoonPayBalanceResponse, MoonPayDepositRequest,

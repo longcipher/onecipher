@@ -3,8 +3,9 @@
 //! Per R21, defines the `SessionKeyProvider` trait unifying multi-chain
 //! session-key grant/verify/revoke/sign. Per R56, this crate MUST NOT depend on
 //! tokio / reqwest / tungstenite / hyper / async-std / smol — it uses
-//! `async-trait` only, producing runtime-agnostic futures. The Net-Agent
-//! supplies the runtime; the Key-Agent calls these via the Net-Agent relay.
+//! native async trait support (edition 2024), producing runtime-agnostic
+//! futures. The Net-Agent supplies the runtime; the Key-Agent calls these via
+//! the Net-Agent relay.
 //!
 //! Phase 1 ships `EvmSessionKeyProvider` (ERC-7715 on ERC-7579 SCA) and
 //! `SolanaSessionKeyProvider` (Session Tokens program) backed by a unified
@@ -19,6 +20,8 @@
 
 #![deny(unsafe_code)]
 
+use std::{future::Future, pin::Pin};
+
 pub mod abi;
 pub mod error;
 pub mod evm;
@@ -27,7 +30,6 @@ pub mod rpc;
 pub mod solana;
 pub mod types;
 
-pub use async_trait::async_trait;
 pub use error::SessionKeyError;
 pub use evm::EvmSessionKeyProvider;
 pub use oc_policy::PolicyV2;
@@ -45,39 +47,41 @@ pub use types::{
 /// implementations: [`EvmSessionKeyProvider`] (ERC-7715 on ERC-7579 SCA),
 /// [`SolanaSessionKeyProvider`] (Session Tokens program).
 ///
-/// The trait is `#[async_trait]` but the futures are runtime-agnostic — the
-/// caller supplies the executor (e.g. `futures::executor::block_on` in tests,
-/// the Net-Agent's tokio runtime in production).
-#[async_trait]
+/// The trait uses native async fn (edition 2024) with runtime-agnostic
+/// futures — the caller supplies the executor (e.g. `futures::executor::block_on`
+/// in tests, the Net-Agent's tokio runtime in production).
 pub trait SessionKeyProvider: Send + Sync {
     /// CAIP-2 chain id, e.g. `"eip155:8453"` or `"solana:mainnet"`.
     fn chain_id(&self) -> &str;
 
     /// Register the session key on-chain and return a receipt (R24).
-    async fn grant(
+    fn grant(
         &self,
         owner_key: &OwnerKey,
         session_pubkey: &PublicKey,
         policy: &PolicyV2,
-    ) -> Result<GrantReceipt, SessionKeyError>;
+    ) -> Pin<Box<dyn Future<Output = Result<GrantReceipt, SessionKeyError>> + Send + '_>>;
 
     /// Verify the session key is still active on-chain (not revoked / expired).
-    async fn verify_active(&self, session_key_id: &str) -> Result<bool, SessionKeyError>;
+    fn verify_active(
+        &self,
+        session_key_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SessionKeyError>> + Send + '_>>;
 
     /// Revoke the session key on-chain (signed by the owner key).
-    async fn revoke(
+    fn revoke(
         &self,
         owner_key: &OwnerKey,
         session_key_id: &str,
-    ) -> Result<(), SessionKeyError>;
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionKeyError>> + Send + '_>>;
 
     /// Sign a payload with the session private key. Signing is local (no RPC);
     /// the SCA / on-chain program validates the signature.
-    async fn sign_with(
+    fn sign_with(
         &self,
         session_priv: &SessionPrivateKey,
         payload: &SignPayload,
-    ) -> Result<Signature, SessionKeyError>;
+    ) -> Pin<Box<dyn Future<Output = Result<Signature, SessionKeyError>> + Send + '_>>;
 }
 
 #[cfg(test)]

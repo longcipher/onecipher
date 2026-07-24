@@ -23,7 +23,6 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 │   ├── oc-netagent/        # Network-Agent lib (tokio + WalletConnect v2)
 │   ├── oc-pay/             # Payment primitives (x402 + MPP settlers)
 │   ├── oc-pay-http/        # HTTP payment client (x402 discovery/fund/pay)
-│   ├── oc-paymaster/       # ERC-4337 Paymaster client (gas sponsorship)
 │   ├── oc-policy/          # Policy Engine v2/v3 (11-step evaluation)
 │   ├── oc-proto/           # prost proto definitions (AgentService IPC)
 │   ├── oc-session-key/     # Multi-chain SessionKeyProvider (EVM/Solana)

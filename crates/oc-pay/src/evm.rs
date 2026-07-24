@@ -18,7 +18,8 @@
 //! UserOps locally with a deterministic mock signature (sufficient for
 //! round-trip tests). Real Key-Agent integration is T19's job.
 
-use async_trait::async_trait;
+use std::{future::Future, pin::Pin};
+
 use rust_decimal::Decimal;
 
 use crate::{
@@ -31,22 +32,26 @@ use crate::{
 ///
 /// Real impls (alloy / ethers-rs) live in `oc-netagent`. Phase 1 ships only
 /// test mocks.
-#[async_trait]
 pub trait BundlerClient: Send + Sync {
     /// Submit a signed UserOp (RLP-encoded bytes) and return the bundle tx
     /// hash (`0x`-prefixed).
-    async fn submit_user_op(&self, user_op: &[u8]) -> Result<String, PayError>;
+    fn submit_user_op(
+        &self,
+        user_op: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, PayError>> + Send + '_>>;
 }
 
 /// Paymaster client trait — abstracts the Paymaster's `sponsor` RPC that
 /// attaches paymasterAndData to a UserOp.
 ///
 /// Real impls live in `oc-netagent`. Phase 1 ships only test mocks.
-#[async_trait]
 pub trait PaymasterClient: Send + Sync {
     /// Mutate the UserOp in-place to attach paymasterAndData. Returns
     /// `Ok(())` on success.
-    async fn sponsor(&self, user_op: &mut Vec<u8>) -> Result<(), PayError>;
+    fn sponsor<'a>(
+        &'a self,
+        user_op: &'a mut Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PayError>> + Send + 'a>>;
 }
 
 /// EVM payment settler — submits EIP-4337 UserOps via a Bundler with
@@ -148,7 +153,6 @@ impl EvmSettler {
     }
 }
 
-#[async_trait]
 impl PaymentSettler for EvmSettler {
     fn chain_id(&self) -> &str {
         &self.chain_id
@@ -158,41 +162,47 @@ impl PaymentSettler for EvmSettler {
         &self.supported
     }
 
-    async fn pay_exact(
+    fn pay_exact(
         &self,
         payer: &SessionKey,
         recipient: &str,
         amount: Decimal,
         asset: Caip19Asset,
-    ) -> Result<PaymentReceipt, PayError> {
-        self.validate(payer, recipient, amount)?;
-
-        // Build, sign, sponsor, submit.
+    ) -> Pin<Box<dyn Future<Output = Result<PaymentReceipt, PayError>> + Send + '_>> {
+        if let Err(e) = self.validate(payer, recipient, amount) {
+            return Box::pin(async { Err(e) });
+        }
         let mut user_op = Self::build_user_op(recipient, amount);
-        Self::sign_user_op(&mut user_op, payer)?;
-        self.paymaster.sponsor(&mut user_op).await?;
-        let tx_hash = self.bundler.submit_user_op(&user_op).await?;
-
-        Ok(PaymentReceipt::new(
-            self.chain_id.clone(),
-            PaymentScheme::ExactPlusUserOp,
-            tx_hash,
-            amount,
-            asset,
-            recipient,
-        ))
+        if let Err(e) = Self::sign_user_op(&mut user_op, payer) {
+            return Box::pin(async { Err(e) });
+        }
+        let recipient = recipient.to_string();
+        let paymaster = &self.paymaster;
+        let bundler = &self.bundler;
+        let chain_id = self.chain_id.clone();
+        Box::pin(async move {
+            paymaster.sponsor(&mut user_op).await?;
+            let tx_hash = bundler.submit_user_op(&user_op).await?;
+            Ok(PaymentReceipt::new(
+                chain_id,
+                PaymentScheme::ExactPlusUserOp,
+                tx_hash,
+                amount,
+                asset,
+                &recipient,
+            ))
+        })
     }
 
-    async fn open_channel(
+    fn open_channel(
         &self,
         payer: &SessionKey,
         recipient: &str,
         max_amount: Decimal,
-    ) -> Result<ChannelId, PayError> {
-        // EVM channels are ERC-7579 modules; Phase 1 stubs this to a
-        // deterministic id derived from the payer + recipient. Real Tempo
-        // channels over EVM go through the TempoSettler.
-        self.validate(payer, recipient, max_amount)?;
+    ) -> Pin<Box<dyn Future<Output = Result<ChannelId, PayError>> + Send + '_>> {
+        if let Err(e) = self.validate(payer, recipient, max_amount) {
+            return Box::pin(async { Err(e) });
+        }
         let mut bytes = [0u8; 32];
         let id_bytes = payer.key_id.as_bytes();
         let n = id_bytes.len().min(16);
@@ -200,17 +210,19 @@ impl PaymentSettler for EvmSettler {
         let r_bytes = recipient.as_bytes();
         let m = r_bytes.len().min(16);
         bytes[16..16 + m].copy_from_slice(&r_bytes[..m]);
-        Ok(ChannelId::from_bytes(bytes))
+        Box::pin(async move { Ok(ChannelId::from_bytes(bytes)) })
     }
 
-    async fn close_channel(&self, channel_id: &ChannelId) -> Result<PaymentReceipt, PayError> {
-        // Phase 1 stub: real EVM channel close is the TempoSettler's job.
-        // EvmSettler.close_channel exists so the trait is fully implemented
-        // for the EVM-only test path.
+    fn close_channel(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Pin<Box<dyn Future<Output = Result<PaymentReceipt, PayError>> + Send + '_>> {
         let _ = channel_id;
-        Err(PayError::TempoError(
-            "EvmSettler does not implement close_channel — use TempoSettler for MPP".into(),
-        ))
+        Box::pin(async {
+            Err(PayError::TempoError(
+                "EvmSettler does not implement close_channel — use TempoSettler for MPP".into(),
+            ))
+        })
     }
 }
 
@@ -222,22 +234,27 @@ mod tests {
         tx_hash: String,
     }
 
-    #[async_trait]
     impl BundlerClient for MockBundler {
-        async fn submit_user_op(&self, _user_op: &[u8]) -> Result<String, PayError> {
-            Ok(self.tx_hash.clone())
+        fn submit_user_op(
+            &self,
+            _user_op: &[u8],
+        ) -> Pin<Box<dyn Future<Output = Result<String, PayError>> + Send + '_>> {
+            let hash = self.tx_hash.clone();
+            Box::pin(async move { Ok(hash) })
         }
     }
 
     struct MockPaymaster;
 
-    #[async_trait]
     impl PaymasterClient for MockPaymaster {
-        async fn sponsor(&self, _user_op: &mut Vec<u8>) -> Result<(), PayError> {
-            // Append a 52-byte paymasterAndData tag so we can observe the
-            // call in tests.
-            _user_op.extend_from_slice(&[0u8; 52]);
-            Ok(())
+        fn sponsor<'a>(
+            &'a self,
+            _user_op: &'a mut Vec<u8>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), PayError>> + Send + 'a>> {
+            Box::pin(async move {
+                _user_op.extend_from_slice(&[0u8; 52]);
+                Ok(())
+            })
         }
     }
 

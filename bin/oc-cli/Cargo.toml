@@ -32,12 +32,10 @@ oc-core = { workspace = true }
 oc-intent = { workspace = true }
 oc-keyagent = { workspace = true }
 oc-netagent = { workspace = true }
-oc-pay-http = { workspace = true }
-oc-paymaster = { workspace = true }
+oc-pay = { workspace = true, features = ["http"] }
 oc-proto = { workspace = true }
 oc-secret = { workspace = true }
 oc-signer = { workspace = true }
-oc-signing-core = { workspace = true }
 oc-vault = { workspace = true }
 oc-wallet = { workspace = true, features = ["rpc", "sui-grpc"] }
 oc-walletconnect = { workspace = true, features = ["test-utils"] }

@@ -8,7 +8,7 @@ struct CliWallet {
     passphrase: String,
 }
 
-impl oc_pay_http::WalletAccess for CliWallet {
+impl oc_pay::http::WalletAccess for CliWallet {
     fn supported_chains(&self) -> Vec<ChainType> {
         if let Ok(info) = oc_wallet::get_wallet(&self.wallet_name, None) {
             let mut chains = Vec::new();
@@ -26,10 +26,13 @@ impl oc_pay_http::WalletAccess for CliWallet {
         }
     }
 
-    fn account(&self, network: &str) -> Result<oc_pay_http::Account, oc_pay_http::OcPayHttpError> {
+    fn account(
+        &self,
+        network: &str,
+    ) -> Result<oc_pay::http::Account, oc_pay::http::OcPayHttpError> {
         let info = oc_wallet::get_wallet(&self.wallet_name, None).map_err(|e| {
-            oc_pay_http::OcPayHttpError::new(
-                oc_pay_http::OcPayHttpErrorCode::WalletNotFound,
+            oc_pay::http::OcPayHttpError::new(
+                oc_pay::http::OcPayHttpErrorCode::WalletNotFound,
                 e.to_string(),
             )
         })?;
@@ -37,13 +40,13 @@ impl oc_pay_http::WalletAccess for CliWallet {
         let acct =
             info.accounts.iter().find(|a| a.chain_id.starts_with(&format!("{ns}:"))).ok_or_else(
                 || {
-                    oc_pay_http::OcPayHttpError::new(
-                        oc_pay_http::OcPayHttpErrorCode::WalletNotFound,
+                    oc_pay::http::OcPayHttpError::new(
+                        oc_pay::http::OcPayHttpErrorCode::WalletNotFound,
                         format!("no {ns} account in wallet"),
                     )
                 },
             )?;
-        Ok(oc_pay_http::Account { address: acct.address.clone() })
+        Ok(oc_pay::http::Account { address: acct.address.clone() })
     }
 
     fn sign_payload(
@@ -51,7 +54,7 @@ impl oc_pay_http::WalletAccess for CliWallet {
         scheme: &str,
         network: &str,
         payload: &str,
-    ) -> Result<String, oc_pay_http::OcPayHttpError> {
+    ) -> Result<String, oc_pay::http::OcPayHttpError> {
         match scheme {
             "exact" => {
                 // EIP-712 typed data signing.
@@ -65,15 +68,15 @@ impl oc_pay_http::WalletAccess for CliWallet {
                     None,
                 )
                 .map_err(|e| {
-                    oc_pay_http::OcPayHttpError::new(
-                        oc_pay_http::OcPayHttpErrorCode::SigningFailed,
+                    oc_pay::http::OcPayHttpError::new(
+                        oc_pay::http::OcPayHttpErrorCode::SigningFailed,
                         e.to_string(),
                     )
                 })?;
                 Ok(format!("0x{}", result.signature))
             }
-            other => Err(oc_pay_http::OcPayHttpError::new(
-                oc_pay_http::OcPayHttpErrorCode::ProtocolUnknown,
+            other => Err(oc_pay::http::OcPayHttpError::new(
+                oc_pay::http::OcPayHttpErrorCode::ProtocolUnknown,
                 format!("unsupported payment scheme: {other}"),
             )),
         }
@@ -95,7 +98,7 @@ pub(crate) fn run(
     let rt =
         tokio::runtime::Runtime::new().map_err(|e| CliError::InvalidArgs(format!("tokio: {e}")))?;
 
-    let result = rt.block_on(oc_pay_http::pay(&wallet, url, method, body))?;
+    let result = rt.block_on(oc_pay::http::pay(&wallet, url, method, body))?;
 
     if result.status < 400 {
         if let Some(ref payment) = result.payment {
@@ -124,7 +127,7 @@ pub(crate) fn discover(
     let rt =
         tokio::runtime::Runtime::new().map_err(|e| CliError::InvalidArgs(format!("tokio: {e}")))?;
 
-    let result = rt.block_on(oc_pay_http::discover(query, limit, offset))?;
+    let result = rt.block_on(oc_pay::http::discover(query, limit, offset))?;
 
     if result.services.is_empty() {
         eprintln!("No services found.");

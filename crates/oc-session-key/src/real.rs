@@ -18,15 +18,18 @@
 //!
 //! # R56 compliance
 //! This crate still MUST NOT depend on tokio / reqwest / tungstenite / hyper /
-//! async-std / smol. The traits here are `#[async_trait]` but produce
-//! runtime-agnostic futures; the Net-Agent supplies the executor.
+//! async-std / smol. The traits here use native async fn (edition 2024) but
+//! produce runtime-agnostic futures; the Net-Agent supplies the executor.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
-use async_trait::async_trait;
 use oc_policy::PolicyV2;
 use oc_signer::{
     chains::{EvmSigner, SolanaSigner},
@@ -85,26 +88,42 @@ pub fn derive_session_key_id(session_pubkey: &[u8], chain_id: &str) -> String {
 /// ERC-4337 bundler client abstraction.
 ///
 /// Real implementations (alloy / ethers-rs against Pimlico / Stackup) live in
-/// `oc-netagent`. The trait is `#[async_trait]` but runtime-agnostic (R56).
-#[async_trait]
+/// `oc-netagent`. The trait uses native async fn (edition 2024) and is
+/// runtime-agnostic (R56).
 pub trait EvmBundlerClient: Send + Sync {
     /// Submit a serialized ERC-4337 UserOp and return its hash.
-    async fn send_user_operation(&self, user_op: &[u8]) -> Result<String, SessionKeyError>;
+    fn send_user_operation(
+        &self,
+        user_op: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionKeyError>> + Send + '_>>;
     /// Fetch the receipt for a previously submitted UserOp hash.
-    async fn get_user_operation_receipt(&self, hash: &str) -> Result<Value, SessionKeyError>;
+    fn get_user_operation_receipt(
+        &self,
+        hash: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, SessionKeyError>> + Send + '_>>;
 }
 
 /// EVM RPC client abstraction (eth_call / send_raw_transaction / estimateGas).
 ///
 /// Real implementations live in `oc-netagent`.
-#[async_trait]
 pub trait EvmRpcClient: Send + Sync {
     /// `eth_call` to `to` with `data`; returns the raw return bytes.
-    async fn eth_call(&self, to: &str, data: &[u8]) -> Result<Vec<u8>, SessionKeyError>;
+    fn eth_call(
+        &self,
+        to: &str,
+        data: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, SessionKeyError>> + Send + '_>>;
     /// `eth_sendRawTransaction` with a pre-signed transaction; returns the tx hash.
-    async fn send_transaction(&self, tx: &[u8]) -> Result<String, SessionKeyError>;
+    fn send_transaction(
+        &self,
+        tx: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionKeyError>> + Send + '_>>;
     /// `eth_estimateGas` for `to` + `data`; returns the gas estimate.
-    async fn estimate_gas(&self, to: &str, data: &[u8]) -> Result<u64, SessionKeyError>;
+    fn estimate_gas(
+        &self,
+        to: &str,
+        data: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<u64, SessionKeyError>> + Send + '_>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,17 +134,19 @@ pub trait EvmRpcClient: Send + Sync {
 ///
 /// Real implementations (solana-client / solana-rpc-client) live in
 /// `oc-netagent`. Runtime-agnostic per R56.
-#[async_trait]
 pub trait SolanaRpcClient: Send + Sync {
     /// Send a transaction containing `instructions` and return the signature.
-    async fn send_transaction(
+    fn send_transaction(
         &self,
         instructions: Vec<SolanaInstruction>,
-    ) -> Result<String, SessionKeyError>;
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionKeyError>> + Send + '_>>;
     /// Fetch an account's data (returns `None` if the account does not exist).
-    async fn get_account(&self, address: &str) -> Result<Option<Vec<u8>>, SessionKeyError>;
+    fn get_account(
+        &self,
+        address: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, SessionKeyError>> + Send + '_>>;
     /// Fetch the current slot (used for receipt slot in `grant`).
-    async fn get_slot(&self) -> Result<u64, SessionKeyError>;
+    fn get_slot(&self) -> Pin<Box<dyn Future<Output = Result<u64, SessionKeyError>> + Send + '_>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,41 +265,46 @@ impl EvmSessionKeyProvider {
     }
 }
 
-#[async_trait]
 impl SessionKeyProvider for EvmSessionKeyProvider {
     fn chain_id(&self) -> &str {
         &self.chain_id
     }
 
-    async fn grant(
+    fn grant(
         &self,
         owner_key: &OwnerKey,
         session_pubkey: &PublicKey,
         policy: &PolicyV2,
-    ) -> Result<GrantReceipt, SessionKeyError> {
+    ) -> Pin<Box<dyn Future<Output = Result<GrantReceipt, SessionKeyError>> + Send + '_>> {
         if owner_key.chain_id != self.chain_id {
-            return Err(SessionKeyError::ChainMismatch {
-                expected: self.chain_id.clone(),
-                actual: owner_key.chain_id.clone(),
-            });
+            let (expected, actual) = (self.chain_id.clone(), owner_key.chain_id.clone());
+            return Box::pin(async { Err(SessionKeyError::ChainMismatch { expected, actual }) });
         }
-        let sca = self.resolve_sca(owner_key)?;
-        let merkle_root = Self::compute_merkle_root(policy)?;
+        let sca = match self.resolve_sca(owner_key) {
+            Ok(s) => s,
+            Err(e) => return Box::pin(async { Err(e) }),
+        };
+        let merkle_root = match Self::compute_merkle_root(policy) {
+            Ok(r) => r,
+            Err(e) => return Box::pin(async { Err(e) }),
+        };
         let calldata = Self::encode_install_session_key(
             session_pubkey.bytes.as_slice(),
             &merkle_root,
             policy.rules.expiry_unix,
         );
         let user_op = Self::build_user_op(&sca, &calldata);
-        let tx_hash = self.bundler.send_user_operation(&user_op).await?;
-        Ok(GrantReceipt::Evm { tx_hash, merkle_root, sca_address: sca })
+        let bundler = &self.bundler;
+        Box::pin(async move {
+            let tx_hash = bundler.send_user_operation(&user_op).await?;
+            Ok(GrantReceipt::Evm { tx_hash, merkle_root, sca_address: sca })
+        })
     }
 
-    async fn verify_active(&self, session_key_id: &str) -> Result<bool, SessionKeyError> {
-        // verify_active has no owner_key, so derive the SCA target from the
-        // session_key_id when sca_address is unset. This is a mock derivation;
-        // real verify_active requires the SCA address (set via with_sca_address
-        // in production).
+    fn verify_active(
+        &self,
+        session_key_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SessionKeyError>> + Send + '_>> {
         let sca = if self.sca_address.is_empty() {
             let hash = Sha256::digest(session_key_id.as_bytes());
             format!("0x{}", hex::encode(&hash[..20]))
@@ -286,67 +312,72 @@ impl SessionKeyProvider for EvmSessionKeyProvider {
             self.sca_address.clone()
         };
         let calldata = Self::encode_is_session_key_active(session_key_id);
-        let result = self.rpc.eth_call(&sca, &calldata).await?;
-        Ok(Self::decode_bool_return(&result))
+        let rpc = &self.rpc;
+        Box::pin(async move {
+            let result = rpc.eth_call(&sca, &calldata).await?;
+            Ok(Self::decode_bool_return(&result))
+        })
     }
 
-    async fn revoke(
+    fn revoke(
         &self,
         owner_key: &OwnerKey,
         session_key_id: &str,
-    ) -> Result<(), SessionKeyError> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionKeyError>> + Send + '_>> {
         if owner_key.chain_id != self.chain_id {
-            return Err(SessionKeyError::ChainMismatch {
-                expected: self.chain_id.clone(),
-                actual: owner_key.chain_id.clone(),
-            });
+            let (expected, actual) = (self.chain_id.clone(), owner_key.chain_id.clone());
+            return Box::pin(async { Err(SessionKeyError::ChainMismatch { expected, actual }) });
         }
-        let sca = self.resolve_sca(owner_key)?;
+        let sca = match self.resolve_sca(owner_key) {
+            Ok(s) => s,
+            Err(e) => return Box::pin(async { Err(e) }),
+        };
         let calldata = Self::encode_revoke_session_key(session_key_id);
-        // Owner-signed revoke: in production the tx is signed by the owner key
-        // and submitted via send_transaction. Here we pass the calldata envelope
-        // to the RPC client; real signing lives in oc-netagent.
         let mut tx = Vec::with_capacity(2 + sca.len() + 4 + calldata.len());
         tx.extend_from_slice(&(sca.len() as u16).to_be_bytes());
         tx.extend_from_slice(sca.as_bytes());
         tx.extend_from_slice(&(calldata.len() as u32).to_be_bytes());
         tx.extend_from_slice(&calldata);
-        let _ = self.rpc.send_transaction(&tx).await?;
-        Ok(())
+        let rpc = &self.rpc;
+        Box::pin(async move {
+            let _ = rpc.send_transaction(&tx).await?;
+            Ok(())
+        })
     }
 
-    async fn sign_with(
+    fn sign_with(
         &self,
         session_priv: &SessionPrivateKey,
         payload: &SignPayload,
-    ) -> Result<Signature, SessionKeyError> {
-        // Signing is local (no RPC); the SCA validates the signature on-chain.
-        // Delegate to oc-signer's EvmSigner (reuse, don't re-roll).
+    ) -> Pin<Box<dyn Future<Output = Result<Signature, SessionKeyError>> + Send + '_>> {
         let signer = EvmSigner;
-        let priv_bytes = session_priv.raw.expose();
-        let sig_bytes = match payload {
-            SignPayload::Transaction { raw_hex, .. } => {
-                let raw = hex::decode(raw_hex.trim_start_matches("0x"))
-                    .map_err(|e| SessionKeyError::InvalidPayload(e.to_string()))?;
-                signer
-                    .sign_transaction(priv_bytes, &raw)
-                    .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?
-            }
-            SignPayload::UserOp { user_op_hex, .. } => {
-                let raw = hex::decode(user_op_hex.trim_start_matches("0x"))
-                    .map_err(|e| SessionKeyError::InvalidPayload(e.to_string()))?;
-                signer
-                    .sign_transaction(priv_bytes, &raw)
-                    .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?
-            }
-            SignPayload::Message { bytes } => signer
-                .sign_message(priv_bytes, bytes)
-                .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?,
-            SignPayload::TypedData { json } => signer
-                .sign_typed_data(priv_bytes, json)
-                .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?,
-        };
-        Ok(Signature::Evm { hex: format!("0x{}", hex::encode(&sig_bytes.signature)) })
+        let priv_bytes = session_priv.raw.expose().to_vec();
+        let result = (|| -> Result<Signature, SessionKeyError> {
+            let sig_bytes = match payload {
+                SignPayload::Transaction { raw_hex, .. } => {
+                    let raw = hex::decode(raw_hex.trim_start_matches("0x"))
+                        .map_err(|e| SessionKeyError::InvalidPayload(e.to_string()))?;
+                    signer
+                        .sign_transaction(&priv_bytes, &raw)
+                        .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?
+                }
+                SignPayload::UserOp { user_op_hex, .. } => {
+                    let raw = hex::decode(user_op_hex.trim_start_matches("0x"))
+                        .map_err(|e| SessionKeyError::InvalidPayload(e.to_string()))?;
+                    signer
+                        .sign_transaction(&priv_bytes, &raw)
+                        .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?
+                }
+                SignPayload::Message { bytes } => signer
+                    .sign_message(&priv_bytes, bytes)
+                    .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?,
+                SignPayload::TypedData { json } => signer
+                    .sign_typed_data(&priv_bytes, json)
+                    .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?,
+            };
+            Ok(Signature::Evm { hex: format!("0x{}", hex::encode(&sig_bytes.signature)) })
+        })();
+        Box::pin(async { result })
     }
 }
 
@@ -407,73 +438,83 @@ impl SolanaSessionKeyProvider {
     }
 }
 
-#[async_trait]
 impl SessionKeyProvider for SolanaSessionKeyProvider {
     fn chain_id(&self) -> &str {
         &self.chain_id
     }
 
-    async fn grant(
+    fn grant(
         &self,
         owner_key: &OwnerKey,
         session_pubkey: &PublicKey,
         policy: &PolicyV2,
-    ) -> Result<GrantReceipt, SessionKeyError> {
+    ) -> Pin<Box<dyn Future<Output = Result<GrantReceipt, SessionKeyError>> + Send + '_>> {
         if owner_key.chain_id != self.chain_id {
-            return Err(SessionKeyError::ChainMismatch {
-                expected: self.chain_id.clone(),
-                actual: owner_key.chain_id.clone(),
-            });
+            let (expected, actual) = (self.chain_id.clone(), owner_key.chain_id.clone());
+            return Box::pin(async { Err(SessionKeyError::ChainMismatch { expected, actual }) });
         }
         let ix =
             Self::encode_create_session_token_ix(&self.program_id, &session_pubkey.bytes, policy);
-        let sig = self.rpc.send_transaction(vec![ix]).await?;
-        let slot = self.rpc.get_slot().await.unwrap_or(0);
-        Ok(GrantReceipt::Solana {
-            session_tokens_account: sig,
-            program_id: self.program_id.clone(),
-            slot,
+        let rpc = &self.rpc;
+        let program_id = self.program_id.clone();
+        Box::pin(async move {
+            let sig = rpc.send_transaction(vec![ix]).await?;
+            let slot = rpc.get_slot().await.unwrap_or(0);
+            Ok(GrantReceipt::Solana { session_tokens_account: sig, program_id, slot })
         })
     }
 
-    async fn verify_active(&self, session_key_id: &str) -> Result<bool, SessionKeyError> {
-        let account = self.rpc.get_account(session_key_id).await?;
-        Ok(account.is_some())
+    fn verify_active(
+        &self,
+        session_key_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SessionKeyError>> + Send + '_>> {
+        let rpc = &self.rpc;
+        let id = session_key_id.to_string();
+        Box::pin(async move {
+            let account = rpc.get_account(&id).await?;
+            Ok(account.is_some())
+        })
     }
 
-    async fn revoke(
+    fn revoke(
         &self,
         owner_key: &OwnerKey,
         session_key_id: &str,
-    ) -> Result<(), SessionKeyError> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionKeyError>> + Send + '_>> {
         if owner_key.chain_id != self.chain_id {
-            return Err(SessionKeyError::ChainMismatch {
-                expected: self.chain_id.clone(),
-                actual: owner_key.chain_id.clone(),
-            });
+            let (expected, actual) = (self.chain_id.clone(), owner_key.chain_id.clone());
+            return Box::pin(async { Err(SessionKeyError::ChainMismatch { expected, actual }) });
         }
         let ix = Self::encode_revoke_session_token_ix(&self.program_id, session_key_id);
-        let _ = self.rpc.send_transaction(vec![ix]).await?;
-        Ok(())
+        let rpc = &self.rpc;
+        Box::pin(async move {
+            let _ = rpc.send_transaction(vec![ix]).await?;
+            Ok(())
+        })
     }
 
-    async fn sign_with(
+    fn sign_with(
         &self,
         session_priv: &SessionPrivateKey,
         payload: &SignPayload,
-    ) -> Result<Signature, SessionKeyError> {
-        // Solana uses ed25519 signing. Delegate to oc-signer's SolanaSigner.
+    ) -> Pin<Box<dyn Future<Output = Result<Signature, SessionKeyError>> + Send + '_>> {
         match payload {
             SignPayload::Message { bytes } => {
                 let signer = SolanaSigner;
-                let sig = signer
-                    .sign_message(session_priv.raw.expose(), bytes)
-                    .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?;
-                Ok(Signature::Solana { base58: bs58::encode(&sig.signature).into_string() })
+                let priv_bytes = session_priv.raw.expose().to_vec();
+                let bytes = bytes.clone();
+                Box::pin(async move {
+                    let sig = signer
+                        .sign_message(&priv_bytes, &bytes)
+                        .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?;
+                    Ok(Signature::Solana { base58: bs58::encode(&sig.signature).into_string() })
+                })
             }
-            _ => Err(SessionKeyError::InvalidPayload(
-                "Solana supports only Message payload in Phase 2".to_string(),
-            )),
+            _ => Box::pin(async {
+                Err(SessionKeyError::InvalidPayload(
+                    "Solana supports only Message payload in Phase 2".to_string(),
+                ))
+            }),
         }
     }
 }
@@ -541,21 +582,31 @@ impl MockEvmRpcClient {
     }
 }
 
-#[async_trait]
 impl EvmRpcClient for MockEvmRpcClient {
-    async fn eth_call(&self, _to: &str, _data: &[u8]) -> Result<Vec<u8>, SessionKeyError> {
+    fn eth_call(
+        &self,
+        _to: &str,
+        _data: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, SessionKeyError>> + Send + '_>> {
         self.counters.eth_call_calls.fetch_add(1, Ordering::Relaxed);
-        self.eth_call_response.clone()
+        Box::pin(async { self.eth_call_response.clone() })
     }
 
-    async fn send_transaction(&self, _tx: &[u8]) -> Result<String, SessionKeyError> {
+    fn send_transaction(
+        &self,
+        _tx: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionKeyError>> + Send + '_>> {
         self.counters.send_transaction_calls.fetch_add(1, Ordering::Relaxed);
-        self.send_transaction_response.clone()
+        Box::pin(async { self.send_transaction_response.clone() })
     }
 
-    async fn estimate_gas(&self, _to: &str, _data: &[u8]) -> Result<u64, SessionKeyError> {
+    fn estimate_gas(
+        &self,
+        _to: &str,
+        _data: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<u64, SessionKeyError>> + Send + '_>> {
         self.counters.estimate_gas_calls.fetch_add(1, Ordering::Relaxed);
-        self.estimate_gas_response.clone()
+        Box::pin(async { self.estimate_gas_response.clone() })
     }
 }
 
@@ -589,16 +640,21 @@ impl MockEvmBundlerClient {
     }
 }
 
-#[async_trait]
 impl EvmBundlerClient for MockEvmBundlerClient {
-    async fn send_user_operation(&self, _user_op: &[u8]) -> Result<String, SessionKeyError> {
+    fn send_user_operation(
+        &self,
+        _user_op: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionKeyError>> + Send + '_>> {
         self.counters.send_user_op_calls.fetch_add(1, Ordering::Relaxed);
-        self.send_user_op_response.clone()
+        Box::pin(async { self.send_user_op_response.clone() })
     }
 
-    async fn get_user_operation_receipt(&self, _hash: &str) -> Result<Value, SessionKeyError> {
+    fn get_user_operation_receipt(
+        &self,
+        _hash: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, SessionKeyError>> + Send + '_>> {
         self.counters.get_user_op_receipt_calls.fetch_add(1, Ordering::Relaxed);
-        self.get_user_op_receipt_response.clone()
+        Box::pin(async { self.get_user_op_receipt_response.clone() })
     }
 }
 
@@ -657,23 +713,25 @@ impl MockSolanaRpcClient {
     }
 }
 
-#[async_trait]
 impl SolanaRpcClient for MockSolanaRpcClient {
-    async fn send_transaction(
+    fn send_transaction(
         &self,
         _instructions: Vec<SolanaInstruction>,
-    ) -> Result<String, SessionKeyError> {
+    ) -> Pin<Box<dyn Future<Output = Result<String, SessionKeyError>> + Send + '_>> {
         self.counters.send_transaction_calls.fetch_add(1, Ordering::Relaxed);
-        self.send_transaction_response.clone()
+        Box::pin(async { self.send_transaction_response.clone() })
     }
 
-    async fn get_account(&self, _address: &str) -> Result<Option<Vec<u8>>, SessionKeyError> {
+    fn get_account(
+        &self,
+        _address: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, SessionKeyError>> + Send + '_>> {
         self.counters.get_account_calls.fetch_add(1, Ordering::Relaxed);
-        self.get_account_response.clone()
+        Box::pin(async { self.get_account_response.clone() })
     }
 
-    async fn get_slot(&self) -> Result<u64, SessionKeyError> {
+    fn get_slot(&self) -> Pin<Box<dyn Future<Output = Result<u64, SessionKeyError>> + Send + '_>> {
         self.counters.get_slot_calls.fetch_add(1, Ordering::Relaxed);
-        self.get_slot_response.clone()
+        Box::pin(async { self.get_slot_response.clone() })
     }
 }

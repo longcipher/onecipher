@@ -1,16 +1,16 @@
-//! `oc-pay-http` — OneCipher HTTP payment client.
+//! HTTP payment client — x402 payment discovery, funding, and HTTP-based settlement.
 //!
 //! Chain-agnostic: works with any chain the wallet supports. Payment
 //! scheme dispatch (e.g. EVM "exact" / EIP-3009) is handled internally
 //! based on the x402 `scheme` field.
 //!
 //! ```ignore
-//! let result = oc_pay_http::pay(&wallet, "https://api.example.com/data", "GET", None).await?;
-//! let services = oc_pay_http::discover(None, None, None).await?;
+//! let result = oc_pay::http::pay(&wallet, "https://api.example.com/data", "GET", None).await?;
+//! let services = oc_pay::http::discover(None, None, None).await?;
 //! ```
 
-pub(crate) mod chains;
-pub(crate) mod discovery;
+mod chains;
+mod discovery;
 pub mod error;
 pub mod fund;
 pub mod types;

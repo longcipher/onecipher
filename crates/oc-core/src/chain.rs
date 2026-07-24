@@ -59,7 +59,7 @@ impl Chain {
         }
 
         let chain_id = self.chain_id.parse::<ChainId>().map_err(|e| e.to_string())?;
-        if chain_id.namespace != "eip155" {
+        if chain_id.namespace() != "eip155" {
             return Err(format!("EVM chain '{}' is missing an eip155 reference", self.chain_id));
         }
 

@@ -12,9 +12,8 @@
 //! live in `oc-netagent` (T19). On-chain settlement is stubbed (the mock
 //! returns a deterministic tx hash).
 
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Mutex};
 
-use async_trait::async_trait;
 use rust_decimal::Decimal;
 
 use crate::{
@@ -28,28 +27,37 @@ use crate::{
 ///
 /// Real impls (HTTP client against the Tempo node) live in `oc-netagent`.
 /// Phase 1 ships only test mocks.
-#[async_trait]
 pub trait TempoChannelClient: Send + Sync {
     /// Open a new Tempo channel capped at `max_amount` (smallest on-chain
     /// unit) and return the new channel id.
-    async fn open(
+    fn open(
         &self,
         payer: &SessionKey,
         recipient: &str,
         max_amount: Decimal,
-    ) -> Result<ChannelId, PayError>;
+    ) -> Pin<Box<dyn Future<Output = Result<ChannelId, PayError>> + Send + '_>>;
 
     /// Stream a single chunk payment of `amount` through an open channel.
     /// Returns the cumulative amount streamed so far.
-    async fn stream(&self, channel_id: &ChannelId, amount: Decimal) -> Result<Decimal, PayError>;
+    fn stream(
+        &self,
+        channel_id: &ChannelId,
+        amount: Decimal,
+    ) -> Pin<Box<dyn Future<Output = Result<Decimal, PayError>> + Send + '_>>;
 
     /// Close a channel and settle on-chain. Returns the final settlement tx
     /// hash and the total streamed amount.
-    async fn close(&self, channel_id: &ChannelId) -> Result<(String, Decimal), PayError>;
+    fn close(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Pin<Box<dyn Future<Output = Result<(String, Decimal), PayError>> + Send + '_>>;
 
     /// Look up a channel's current state. Used by `close_channel` to return
     /// [`PayError::ChannelClosed`] for already-closed channels.
-    async fn state(&self, channel_id: &ChannelId) -> Result<ChannelState, PayError>;
+    fn state(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Pin<Box<dyn Future<Output = Result<ChannelState, PayError>> + Send + '_>>;
 }
 
 /// Tempo payment settler — owns the MPP channel lifecycle.
@@ -105,7 +113,6 @@ impl TempoSettler {
     }
 }
 
-#[async_trait]
 impl PaymentSettler for TempoSettler {
     fn chain_id(&self) -> &str {
         &self.chain_id
@@ -115,73 +122,77 @@ impl PaymentSettler for TempoSettler {
         &self.supported
     }
 
-    async fn pay_exact(
+    fn pay_exact(
         &self,
         _payer: &SessionKey,
         _recipient: &str,
         _amount: Decimal,
         _asset: Caip19Asset,
-    ) -> Result<PaymentReceipt, PayError> {
-        // TempoSettler is MPP-only — pay_exact is the EVM/Solana settlers'
-        // job. Returning a clear error keeps the trait fully implemented
-        // without committing to an "open → stream → close" shortcut that
-        // would conflict with explicit channel lifecycles.
-        Err(PayError::TempoError(
-            "TempoSettler is MPP-only — use EvmSettler / SolanaSettler for pay_exact".into(),
-        ))
+    ) -> Pin<Box<dyn Future<Output = Result<PaymentReceipt, PayError>> + Send + '_>> {
+        Box::pin(async {
+            Err(PayError::TempoError(
+                "TempoSettler is MPP-only — use EvmSettler / SolanaSettler for pay_exact".into(),
+            ))
+        })
     }
 
-    async fn open_channel(
+    fn open_channel(
         &self,
         payer: &SessionKey,
         recipient: &str,
         max_amount: Decimal,
-    ) -> Result<ChannelId, PayError> {
-        self.validate(payer, recipient, max_amount)?;
-        let id = self.client.open(payer, recipient, max_amount).await?;
-        // We don't have an asset context here (open_channel doesn't take one
-        // in the trait); record a placeholder asset so close_channel can find
-        // the channel. Real asset tracking happens on-chain.
-        self.opened
-            .lock()
-            .expect("opened mutex poisoned")
-            .insert(id.clone(), Caip19Asset::unchecked("eip155:8453/slip44:60"));
-        Ok(id)
+    ) -> Pin<Box<dyn Future<Output = Result<ChannelId, PayError>> + Send + '_>> {
+        if let Err(e) = self.validate(payer, recipient, max_amount) {
+            return Box::pin(async { Err(e) });
+        }
+        let payer = payer.clone();
+        let recipient = recipient.to_string();
+        let client = &self.client;
+        let opened = &self.opened;
+        Box::pin(async move {
+            let id = client.open(&payer, &recipient, max_amount).await?;
+            opened
+                .lock()
+                .expect("opened mutex poisoned")
+                .insert(id.clone(), Caip19Asset::unchecked("eip155:8453/slip44:60"));
+            Ok(id)
+        })
     }
 
-    async fn close_channel(&self, channel_id: &ChannelId) -> Result<PaymentReceipt, PayError> {
-        // Check the channel is known and not already closed.
-        let state = self.client.state(channel_id).await?;
-        match state {
-            ChannelState::Closed => {
-                return Err(PayError::ChannelClosed(channel_id.hex.clone()));
+    fn close_channel(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Pin<Box<dyn Future<Output = Result<PaymentReceipt, PayError>> + Send + '_>> {
+        let client = &self.client;
+        let opened = &self.opened;
+        let chain_id = self.chain_id.clone();
+        let channel_id = channel_id.clone();
+        Box::pin(async move {
+            let state = client.state(&channel_id).await?;
+            match state {
+                ChannelState::Closed => {
+                    return Err(PayError::ChannelClosed(channel_id.hex.clone()));
+                }
+                ChannelState::Open => {}
             }
-            ChannelState::Open => {}
-        }
 
-        let (tx_hash, total_amount) = self.client.close(channel_id).await?;
+            let (tx_hash, total_amount) = client.close(&channel_id).await?;
 
-        // Remove from the in-memory opened map (if present).
-        let asset = self
-            .opened
-            .lock()
-            .expect("opened mutex poisoned")
-            .remove(channel_id)
-            .unwrap_or_else(|| Caip19Asset::unchecked("eip155:8453/slip44:60"));
+            let asset = opened
+                .lock()
+                .expect("opened mutex poisoned")
+                .remove(&channel_id)
+                .unwrap_or_else(|| Caip19Asset::unchecked("eip155:8453/slip44:60"));
 
-        Ok(PaymentReceipt::new(
-            self.chain_id.clone(),
-            // MPP close doesn't carry an x402 scheme — use Exact as the
-            // closest semantic match (single-shot settlement of the channel
-            // balance).
-            PaymentScheme::Exact,
-            tx_hash,
-            total_amount,
-            asset,
-            // Recipient is not known at close time in Phase 1 — real Tempo
-            // returns it from the channel record.
-            "tempo:peer",
-        ))
+            Ok(PaymentReceipt::new(
+                chain_id,
+                PaymentScheme::Exact,
+                tx_hash,
+                total_amount,
+                asset,
+                "tempo:peer",
+            ))
+        })
     }
 }
 
@@ -206,41 +217,50 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl TempoChannelClient for MockTempo {
-        async fn open(
+        fn open(
             &self,
             _payer: &SessionKey,
             _recipient: &str,
             _max_amount: Decimal,
-        ) -> Result<ChannelId, PayError> {
+        ) -> Pin<Box<dyn Future<Output = Result<ChannelId, PayError>> + Send + '_>> {
             let mut next = self.next_id.lock().expect("next_id poisoned");
             let id = ChannelId::for_test(*next);
             *next += 1;
             self.states.lock().expect("states poisoned").insert(id.clone(), ChannelState::Open);
             self.streamed.lock().expect("streamed poisoned").insert(id.clone(), Decimal::ZERO);
-            Ok(id)
+            Box::pin(async { Ok(id) })
         }
 
-        async fn stream(
+        fn stream(
             &self,
             channel_id: &ChannelId,
             amount: Decimal,
-        ) -> Result<Decimal, PayError> {
+        ) -> Pin<Box<dyn Future<Output = Result<Decimal, PayError>> + Send + '_>> {
             let mut streamed = self.streamed.lock().expect("streamed poisoned");
             let entry = streamed.entry(channel_id.clone()).or_insert(Decimal::ZERO);
             *entry += amount;
-            Ok(*entry)
+            let result = *entry;
+            Box::pin(async move { Ok(result) })
         }
 
-        async fn close(&self, channel_id: &ChannelId) -> Result<(String, Decimal), PayError> {
+        fn close(
+            &self,
+            channel_id: &ChannelId,
+        ) -> Pin<Box<dyn Future<Output = Result<(String, Decimal), PayError>> + Send + '_>>
+        {
             let mut states = self.states.lock().expect("states poisoned");
             let state = states
                 .get(channel_id)
                 .copied()
-                .ok_or_else(|| PayError::ChannelNotFound(channel_id.hex.clone()))?;
-            if state == ChannelState::Closed {
-                return Err(PayError::ChannelClosed(channel_id.hex.clone()));
+                .ok_or_else(|| PayError::ChannelNotFound(channel_id.hex.clone()));
+            let hex = channel_id.hex.clone();
+            match state {
+                Ok(ChannelState::Closed) => {
+                    return Box::pin(async move { Err(PayError::ChannelClosed(hex)) });
+                }
+                Err(e) => return Box::pin(async { Err(e) }),
+                _ => {}
             }
             states.insert(channel_id.clone(), ChannelState::Closed);
             let total = self
@@ -250,15 +270,19 @@ mod tests {
                 .get(channel_id)
                 .copied()
                 .unwrap_or(Decimal::ZERO);
-            Ok((format!("0xclose_{}", channel_id.hex), total))
+            Box::pin(async move { Ok((format!("0xclose_{hex}"), total)) })
         }
 
-        async fn state(&self, channel_id: &ChannelId) -> Result<ChannelState, PayError> {
+        fn state(
+            &self,
+            channel_id: &ChannelId,
+        ) -> Pin<Box<dyn Future<Output = Result<ChannelState, PayError>> + Send + '_>> {
             let states = self.states.lock().expect("states poisoned");
-            states
+            let result = states
                 .get(channel_id)
                 .copied()
-                .ok_or_else(|| PayError::ChannelNotFound(channel_id.hex.clone()))
+                .ok_or_else(|| PayError::ChannelNotFound(channel_id.hex.clone()));
+            Box::pin(async move { result })
         }
     }
 

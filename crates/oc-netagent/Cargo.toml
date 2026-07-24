@@ -12,7 +12,6 @@ name = "oc_netagent"
 path = "src/lib.rs"
 
 [dependencies]
-async-trait = { workspace = true }
 hex = { workspace = true }
 hpx = { workspace = true }
 oc-intent = { workspace = true }

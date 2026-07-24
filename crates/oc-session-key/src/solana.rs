@@ -5,7 +5,8 @@
 //! instruction encoding; real borsh encoding + Solana RPC lives in
 //! `oc-netagent` (Phase D, R74 YAGNI). The program id is a config value (A3).
 
-use async_trait::async_trait;
+use std::{future::Future, pin::Pin};
+
 use oc_policy::PolicyV2;
 use oc_signer::{chains::SolanaSigner, traits::ChainSigner};
 
@@ -60,80 +61,86 @@ impl SolanaSessionKeyProvider {
     }
 }
 
-#[async_trait]
 impl SessionKeyProvider for SolanaSessionKeyProvider {
     fn chain_id(&self) -> &str {
         &self.chain_id
     }
 
-    async fn grant(
+    fn grant(
         &self,
         owner_key: &OwnerKey,
         session_pubkey: &PublicKey,
         policy: &PolicyV2,
-    ) -> Result<GrantReceipt, SessionKeyError> {
+    ) -> Pin<Box<dyn Future<Output = Result<GrantReceipt, SessionKeyError>> + Send + '_>> {
         if owner_key.chain_id != self.chain_id {
-            return Err(SessionKeyError::ChainMismatch {
-                expected: self.chain_id.clone(),
-                actual: owner_key.chain_id.clone(),
-            });
+            let (expected, actual) = (self.chain_id.clone(), owner_key.chain_id.clone());
+            return Box::pin(async { Err(SessionKeyError::ChainMismatch { expected, actual }) });
         }
         let ix =
             Self::encode_create_session_token_ix(&self.program_id, &session_pubkey.bytes, policy);
-        let sig = self.rpc.send_solana_tx(vec![ix]).await?;
-        // Mock: derive a session_tokens_account from the returned signature.
-        // Real derivation (PDA) lives in oc-netagent.
-        Ok(GrantReceipt::Solana {
-            session_tokens_account: sig,
-            program_id: self.program_id.clone(),
-            slot: 0,
+        let rpc = &self.rpc;
+        let program_id = self.program_id.clone();
+        Box::pin(async move {
+            let sig = rpc.send_solana_tx(vec![ix]).await?;
+            Ok(GrantReceipt::Solana { session_tokens_account: sig, program_id, slot: 0 })
         })
     }
 
-    async fn verify_active(&self, session_key_id: &str) -> Result<bool, SessionKeyError> {
-        let account = self.rpc.get_solana_account(session_key_id).await?;
-        Ok(account.is_some())
+    fn verify_active(
+        &self,
+        session_key_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SessionKeyError>> + Send + '_>> {
+        let rpc = &self.rpc;
+        let id = session_key_id.to_string();
+        Box::pin(async move {
+            let account = rpc.get_solana_account(&id).await?;
+            Ok(account.is_some())
+        })
     }
 
-    async fn revoke(
+    fn revoke(
         &self,
         owner_key: &OwnerKey,
         session_key_id: &str,
-    ) -> Result<(), SessionKeyError> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionKeyError>> + Send + '_>> {
         if owner_key.chain_id != self.chain_id {
-            return Err(SessionKeyError::ChainMismatch {
-                expected: self.chain_id.clone(),
-                actual: owner_key.chain_id.clone(),
-            });
+            let (expected, actual) = (self.chain_id.clone(), owner_key.chain_id.clone());
+            return Box::pin(async { Err(SessionKeyError::ChainMismatch { expected, actual }) });
         }
         let ix = SolanaInstruction {
             program_id: self.program_id.clone(),
             accounts: vec![session_key_id.to_string()],
-            // Instruction discriminator: RevokeSessionToken = 2.
             data: vec![2],
         };
-        let _ = self.rpc.send_solana_tx(vec![ix]).await?;
-        Ok(())
+        let rpc = &self.rpc;
+        Box::pin(async move {
+            let _ = rpc.send_solana_tx(vec![ix]).await?;
+            Ok(())
+        })
     }
 
-    async fn sign_with(
+    fn sign_with(
         &self,
         session_priv: &SessionPrivateKey,
         payload: &SignPayload,
-    ) -> Result<Signature, SessionKeyError> {
-        // Solana uses ed25519 signing. Delegate to oc-signer's SolanaSigner
-        // (ponytail ladder — reuse, don't re-roll).
+    ) -> Pin<Box<dyn Future<Output = Result<Signature, SessionKeyError>> + Send + '_>> {
         match payload {
             SignPayload::Message { bytes } => {
                 let signer = SolanaSigner;
-                let sig = signer
-                    .sign_message(session_priv.raw.expose(), bytes)
-                    .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?;
-                Ok(Signature::Solana { base58: bs58::encode(&sig.signature).into_string() })
+                let priv_bytes = session_priv.raw.expose().to_vec();
+                let bytes = bytes.clone();
+                Box::pin(async move {
+                    let sig = signer
+                        .sign_message(&priv_bytes, &bytes)
+                        .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?;
+                    Ok(Signature::Solana { base58: bs58::encode(&sig.signature).into_string() })
+                })
             }
-            _ => Err(SessionKeyError::InvalidPayload(
-                "Solana supports only Message payload in Phase 1".to_string(),
-            )),
+            _ => Box::pin(async {
+                Err(SessionKeyError::InvalidPayload(
+                    "Solana supports only Message payload in Phase 1".to_string(),
+                ))
+            }),
         }
     }
 }

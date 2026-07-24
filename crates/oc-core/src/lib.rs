@@ -9,7 +9,7 @@ pub mod types;
 pub mod wallet_file;
 
 pub use api_key::{ApiKeyFile, SecretPermissions};
-pub use caip::ChainId;
+pub use caip::{AccountId, AssetId, ChainId, ChainIdExt};
 pub use chain::{
     ALL_CHAIN_TYPES, Chain, ChainType, KNOWN_CHAINS, default_chain_for_type, parse_chain,
 };

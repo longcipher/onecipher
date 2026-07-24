@@ -6,7 +6,7 @@ use std::{
 use oc_walletconnect::{
     jsonrpc::{JsonRpcErrorCode, JsonRpcRequest, JsonRpcResponse},
     mock_relay::MockRelay,
-    wallet_server::{WalletMethodHandler, WcWalletConfig, WcWalletServer},
+    wallet_server::{HandlerResult, WalletMethodHandler, WcWalletConfig, WcWalletServer},
 };
 use serde_json::{Value, json};
 
@@ -15,16 +15,19 @@ struct CountingHandler {
     calls: Arc<Mutex<Vec<(String, Value)>>>,
 }
 
-#[async_trait::async_trait]
 impl WalletMethodHandler for CountingHandler {
-    async fn handle(
-        &self,
+    fn handle<'a>(
+        &'a self,
         method: &str,
         params: Value,
         _session_topic: &str,
-    ) -> Result<Value, (JsonRpcErrorCode, String)> {
-        self.calls.lock().unwrap().push((method.into(), params.clone()));
-        Ok(json!({"echoed": params}))
+    ) -> HandlerResult<'a> {
+        let method = method.to_string();
+        let params = params.clone();
+        Box::pin(async move {
+            self.calls.lock().unwrap().push((method, params.clone()));
+            Ok(json!({"echoed": params}))
+        })
     }
 }
 
@@ -84,15 +87,9 @@ async fn server_returns_method_error_when_handler_fails() {
     };
 
     struct FailHandler;
-    #[async_trait::async_trait]
     impl WalletMethodHandler for FailHandler {
-        async fn handle(
-            &self,
-            _: &str,
-            _: Value,
-            _: &str,
-        ) -> Result<Value, (JsonRpcErrorCode, String)> {
-            Err((JsonRpcErrorCode::UserRejected, "no".into()))
+        fn handle<'a>(&'a self, _: &str, _: Value, _: &str) -> HandlerResult<'a> {
+            Box::pin(async { Err((JsonRpcErrorCode::UserRejected, "no".into())) })
         }
     }
 

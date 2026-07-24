@@ -11,9 +11,15 @@ description = "OneCipher payment primitives — PaymentSettler trait + EVM/Solan
 name = "oc_pay"
 path = "src/lib.rs"
 
+[features]
+http = ["dep:hpx", "dep:base64", "dep:getrandom", "dep:oc-core"]
+
 [dependencies]
-async-trait = { workspace = true }
+base64 = { workspace = true, optional = true }
+getrandom = { workspace = true, optional = true }
 hex = { workspace = true }
+hpx = { workspace = true, optional = true }
+oc-core = { workspace = true, optional = true }
 oc-session-key = { workspace = true }
 rust_decimal = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }

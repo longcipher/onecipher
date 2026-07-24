@@ -4,25 +4,21 @@
 
 use std::{sync::Arc, time::Duration};
 
-use async_trait::async_trait;
 use oc_walletconnect::{
-    WalletMethodHandler, WcDappClient, WcSession, WcWalletServer, jsonrpc::JsonRpcErrorCode,
-    mock_relay::MockRelay, wallet_server::WcWalletConfig,
+    WalletMethodHandler, WcDappClient, WcSession, WcWalletServer,
+    jsonrpc::JsonRpcErrorCode,
+    mock_relay::MockRelay,
+    wallet_server::{HandlerResult, WcWalletConfig},
 };
 use serde_json::{Value, json};
 
 #[derive(Clone)]
 struct EchoHandler;
 
-#[async_trait]
 impl WalletMethodHandler for EchoHandler {
-    async fn handle(
-        &self,
-        method: &str,
-        params: Value,
-        _topic: &str,
-    ) -> Result<Value, (JsonRpcErrorCode, String)> {
-        Ok(json!({"method": method, "params": params}))
+    fn handle<'a>(&'a self, method: &str, params: Value, _topic: &str) -> HandlerResult<'a> {
+        let method = method.to_string();
+        Box::pin(async move { Ok(json!({"method": method, "params": params})) })
     }
 }
 

@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use oc_keyagent::{KeyAgentRequest, KeyAgentResponse, handler};
-
-use crate::error::SigningCoreError;
+use crate::{KeyAgentRequest, KeyAgentResponse, handler, signing_core_error::SigningCoreError};
 
 /// The signing engine — a sync-only facade over the Key-Agent handler logic.
 ///
@@ -28,7 +26,7 @@ impl SigningEngine {
 
     /// Handle a [`KeyAgentRequest`] synchronously.
     ///
-    /// Delegates to the existing `oc_keyagent::handler::dispatch()`. Returns
+    /// Delegates to the existing `crate::handler::dispatch()`. Returns
     /// `Ok(response)` for any successfully-processed request, and
     /// `Err(SigningCoreError)` only for unrecoverable dispatcher-level
     /// failures. Handler-internal errors are encoded inside the
@@ -109,11 +107,6 @@ mod tests {
 
     #[test]
     fn open_default_returns_error_when_home_not_set() {
-        // We can't safely mutate env in deny(unsafe_code) crate,
-        // but we can verify open_default uses HOME by checking the error path
-        // when called with an obviously-wrong override. Instead, just verify
-        // the function exists and compiles by calling it — it may succeed
-        // (if HOME is set) or fail (if not). Either is fine.
         let _ = SigningEngine::open_default();
     }
 }

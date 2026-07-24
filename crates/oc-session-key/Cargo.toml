@@ -8,7 +8,6 @@ publish.workspace = true
 description = "Multi-chain SessionKeyProvider trait + EVM/Solana impls for OneCipher"
 
 [dependencies]
-async-trait = { workspace = true }
 bs58 = { workspace = true }
 hex = { workspace = true }
 oc-crypto = { workspace = true }

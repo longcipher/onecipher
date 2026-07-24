@@ -8,7 +8,6 @@ publish.workspace = true
 description = "AI Agent Native Intent layer — declarative payment/signing intents"
 
 [dependencies]
-async-trait = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
