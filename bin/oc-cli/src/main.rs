@@ -11,6 +11,23 @@ use clap::Parser;
 use cli::{Cli, Commands};
 pub(crate) use cli::{CliError, SignVia, parse_chain};
 
+/// Shared tokio runtime — avoids per-command `Runtime::new()` overhead.
+///
+/// Lazily initialized on first use via `OnceLock`. All CLI commands and the
+/// daemon share this single multi-threaded runtime. Commands should call
+/// `crate::shared_runtime().block_on(...)` instead of constructing a fresh
+/// `Runtime::new()`.
+pub(crate) fn shared_runtime() -> &'static tokio::runtime::Runtime {
+    use std::sync::OnceLock;
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("failed to create tokio runtime")
+    })
+}
+
 fn main() {
     oc_signer::process_hardening::harden_process();
 
@@ -338,11 +355,12 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
 ///   via UDS.
 /// - **Control socket** (tokio task): accepts `CONNECT <uri>` and `PAIR` commands from `onecipher
 ///   wc connect/pair` CLI calls. Injects pairing URIs into the WC server via a tokio mpsc channel.
-fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
+fn run_daemon() -> Result<(), CliError> {
     use std::os::unix::fs::PermissionsExt;
 
     eprintln!("onecipher daemon starting...");
-    let engine = oc_keyagent::SigningEngine::open_default()?;
+    let engine = oc_keyagent::SigningEngine::open_default()
+        .map_err(|e| CliError::DaemonInit(format!("key engine: {e}")))?;
     let state_dir = engine.state_dir().to_path_buf();
     eprintln!("signing engine opened at {}", state_dir.display());
 
@@ -350,20 +368,22 @@ fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     let key_agent_sock = oc_keyagent::server::default_socket_path();
     eprintln!("key-agent socket: {}", key_agent_sock);
     let ka_sock_clone = key_agent_sock.clone();
+
+    // Channel: Key-Agent thread → tokio select! loop (lifecycle monitoring).
+    // The thread sends a message only on error; if it exits without sending,
+    // the receiver's `recv()` returns `Err` → `.ok()` yields `None`.
+    let (ka_err_tx, ka_err_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
         if let Err(e) = oc_keyagent::server::run(Some(&ka_sock_clone)) {
-            eprintln!("key-agent server error: {e}");
+            let _ = ka_err_tx.send(format!("{e}"));
         }
     });
-    // Give the Key-Agent a moment to bind before the WC server tries to
-    // connect via KeyAgentClient.
-    std::thread::sleep(std::time::Duration::from_millis(50));
 
     // --- Control socket path ---
     let ctrl_sock_path = commands::wc::control_socket_path();
 
-    // --- Tokio runtime for async WC server + control loop ---
-    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    // --- Shared tokio runtime for async WC server + control loop ---
+    let rt = shared_runtime();
 
     let relay_url =
         std::env::var("OC_WC_RELAY_URL").unwrap_or_else(|_| "wss://relay.walletconnect.com".into());
@@ -380,8 +400,9 @@ fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
             let _ = std::fs::create_dir_all(parent);
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
         }
-        let ctrl_listener =
-            tokio::net::UnixListener::bind(&ctrl_sock_path).expect("bind control socket");
+        let ctrl_listener = tokio::net::UnixListener::bind(&ctrl_sock_path).map_err(|e| {
+            CliError::DaemonInit(format!("bind control socket {ctrl_sock_path}: {e}"))
+        })?;
         let _ = std::fs::set_permissions(&ctrl_sock_path, std::fs::Permissions::from_mode(0o600));
         eprintln!("control socket: {}", ctrl_sock_path);
 
@@ -405,23 +426,46 @@ fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
 
         eprintln!("daemon running (Ctrl+C to stop)");
 
-        tokio::select! {
+        // Monitor the Key-Agent thread: bridge the sync mpsc receiver into the
+        // tokio select! loop via `spawn_blocking`. `.recv().ok()` yields
+        // `Some(msg)` if the thread reported an error, or `None` if the thread
+        // exited without sending (sender dropped).
+        let ka_monitor = tokio::task::spawn_blocking(move || ka_err_rx.recv().ok());
+
+        let result: Result<(), CliError> = tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("daemon shutting down");
+                Ok(())
             }
             _ = ctrl_task => {
                 eprintln!("control socket task exited");
+                Ok(())
             }
             _ = wc_task => {
                 eprintln!("WC server exited");
+                Ok(())
             }
-        }
+            ka_err = ka_monitor => {
+                match ka_err {
+                    Ok(Some(msg)) => {
+                        eprintln!("key-agent thread exited: {msg}");
+                        Err(CliError::KeyAgent(format!("key-agent died: {msg}")))
+                    }
+                    Ok(None) => {
+                        eprintln!("key-agent thread exited without error");
+                        Err(CliError::KeyAgent("key-agent thread exited".into()))
+                    }
+                    Err(_) => {
+                        Err(CliError::KeyAgent("key-agent monitor task failed".into()))
+                    }
+                }
+            }
+        };
 
         // Cleanup control socket
         let _ = std::fs::remove_file(&ctrl_sock_path);
-    });
-
-    Ok(())
+        result
+    })
 }
 
 /// Control socket accept loop — handles `CONNECT <uri>` and `PAIR [ttl]`

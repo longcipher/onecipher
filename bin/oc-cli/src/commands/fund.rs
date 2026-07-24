@@ -36,11 +36,11 @@ pub(crate) fn run(
     eprintln!("Creating deposit for wallet \"{wallet_name}\" ({address})");
     eprintln!("Target: {token_name} on {chain_name}");
 
-    let rt =
-        tokio::runtime::Runtime::new().map_err(|e| CliError::InvalidArgs(format!("tokio: {e}")))?;
-
-    let result =
-        rt.block_on(oc_pay::http::fund::fund(address, Some(chain_name), Some(token_name)))?;
+    let result = crate::shared_runtime().block_on(oc_pay::http::fund::fund(
+        address,
+        Some(chain_name),
+        Some(token_name),
+    ))?;
 
     eprintln!();
     eprintln!("Deposit created (ID: {})", result.deposit_id);
@@ -84,10 +84,8 @@ pub(crate) fn balance(wallet_name: &str, chain: Option<&str>) -> Result<(), CliE
     let account = find_account_for_chain(&wallet.accounts, chain_name)?;
     let address = &account.address;
 
-    let rt =
-        tokio::runtime::Runtime::new().map_err(|e| CliError::InvalidArgs(format!("tokio: {e}")))?;
-
-    let balances = rt.block_on(oc_pay::http::fund::get_balances(address, Some(chain_name)))?;
+    let balances = crate::shared_runtime()
+        .block_on(oc_pay::http::fund::get_balances(address, Some(chain_name)))?;
 
     if balances.is_empty() {
         eprintln!("No tokens found for {address} on {chain_name}");

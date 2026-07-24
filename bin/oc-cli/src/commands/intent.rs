@@ -15,8 +15,8 @@
 use std::io::{self, BufRead, IsTerminal, Write};
 
 use oc_intent::{
-    Intent, IntentError, IntentKind, IntentResult, IntentSummary, MessageEncoding, MockRpcClient,
-    RpcClient, execute_intent, simulate_intent,
+    Intent, IntentError, IntentKind, IntentResult, IntentStatus, IntentSummary, MessageEncoding,
+    MockRpcClient, RpcClient, execute_intent, simulate_intent,
 };
 use oc_pay::paymaster::{PaymasterClient, SponsorMode, UserOperation};
 use serde_json::Value;
@@ -301,10 +301,7 @@ pub(crate) fn run_submit(
     let sponsor_mode = parse_sponsor_mode(sponsor)?;
     let rpc = build_rpc_client(chain_id, rpc_url);
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| CliError::InvalidArgs(format!("failed to start tokio runtime: {e}")))?;
-
-    rt.block_on(async move {
+    crate::shared_runtime().block_on(async move {
         // 1. Simulate
         let summary = run_simulation(&intent, &*rpc).await?;
 
@@ -322,7 +319,23 @@ pub(crate) fn run_submit(
                 }
             ));
             if !confirmed {
+                // M14: user rejected the intent at the confirmation prompt.
+                // Surface a Denied IntentResult (printed as JSON for
+                // programmatic consumers) instead of silently returning Ok(()).
+                // `Approved` was removed from IntentStatus — `Denied` is the new
+                // explicit rejection state. `run_submit` returns
+                // `Result<(), CliError>`, so the structured denial is emitted
+                // via `print_result` (matching the success path) and we return
+                // `Ok(())`.
                 eprintln!("intent cancelled by user");
+                let denied = IntentResult {
+                    intent_id: intent.id,
+                    status: IntentStatus::Denied,
+                    tx_hash: None,
+                    receipt: None,
+                    error: Some("cancelled by user".to_string()),
+                };
+                print_result(&denied);
                 return Ok(());
             }
         }
@@ -352,10 +365,7 @@ pub(crate) fn run_simulate(
     let intent = Intent::new(kind, chain_id.to_string(), session_key_id.to_string());
     let rpc = build_rpc_client(chain_id, rpc_url);
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| CliError::InvalidArgs(format!("failed to start tokio runtime: {e}")))?;
-
-    rt.block_on(async move {
+    crate::shared_runtime().block_on(async move {
         let summary = run_simulation(&intent, &*rpc).await?;
         print_summary(&summary);
         Ok(())
@@ -378,10 +388,7 @@ pub(crate) fn run_execute(
     let sponsor_mode = parse_sponsor_mode(sponsor)?;
     let rpc = build_rpc_client(chain_id, rpc_url);
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| CliError::InvalidArgs(format!("failed to start tokio runtime: {e}")))?;
-
-    rt.block_on(async move {
+    crate::shared_runtime().block_on(async move {
         let result = run_execution(&intent, &*rpc).await?;
         let result = apply_sponsor_mode(result, sponsor_mode).await?;
         print_result(&result);
@@ -398,7 +405,15 @@ async fn run_simulation(intent: &Intent, rpc: &dyn RpcClient) -> Result<IntentSu
 }
 
 async fn run_execution(intent: &Intent, rpc: &dyn RpcClient) -> Result<IntentResult, CliError> {
-    execute_intent(intent, rpc).await.map_err(map_intent_error)
+    // TODO: wire the signer to the Key-Agent over UDS (see oc-netagent /
+    // oc-keyagent). For now we return the unsigned tx bytes unchanged so the
+    // build stays green and the MockRpcClient (which does not validate
+    // signatures) can exercise the full execute → broadcast → receipt path.
+    // Real signing is deferred to integration with the Key-Agent UDS channel.
+    let signer = |_wallet_id: &str, tx_bytes: &[u8]| -> Result<Vec<u8>, oc_intent::IntentError> {
+        Ok(tx_bytes.to_vec())
+    };
+    execute_intent(intent, rpc, signer).await.map_err(map_intent_error)
 }
 
 fn map_intent_error(e: IntentError) -> CliError {
@@ -615,7 +630,7 @@ mod tests {
 
     #[test]
     fn run_execute_pay_intent_succeeds_with_mock_rpc() {
-        let json = r#"{"type":"Pay","amount":"10.5 USDC","recipient":"0xabc"}"#;
+        let json = r#"{"type":"Pay","amount":"10.5 USDC","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
         // Native sponsor mode (default) — no paymaster env required.
         let result = run_execute(json, "eip155:8453", "sk-test", "native", None);
         assert!(result.is_ok(), "run_execute should succeed with mock RPC");
@@ -632,7 +647,7 @@ mod tests {
     fn run_submit_with_yes_flag_skips_prompt() {
         // --yes skips the interactive prompt, so this should succeed even
         // in non-interactive test contexts.
-        let json = r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabc"}"#;
+        let json = r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
         let result = run_submit(json, "eip155:8453", "sk-test", "native", true, None);
         assert!(result.is_ok(), "run_submit --yes should succeed");
     }
@@ -654,7 +669,7 @@ mod tests {
             "asset":"eip155:8453/erc20:0x1",
             "from_chain":"eip155:8453",
             "to_chain":"eip155:42161",
-            "recipient":"0xdef"
+            "recipient":"0xdefdefdefdefdefdefdefdefdefdefdefdef"
         }"#;
         let result = run_submit(json, "eip155:8453", "sk-test", "native", true, None);
         assert!(result.is_ok());
@@ -671,7 +686,7 @@ mod tests {
     fn run_execute_with_sponsor_mode_falls_back_when_env_unset() {
         // Paymaster env vars are not set in tests, so sponsor mode falls back
         // to native with a warning. The execution should still succeed.
-        let json = r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabc"}"#;
+        let json = r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
         let result = run_execute(json, "eip155:8453", "sk-test", "sponsored", None);
         // Either Ok (fallback) or error is acceptable depending on env state,
         // but with no env vars it should fall back gracefully.

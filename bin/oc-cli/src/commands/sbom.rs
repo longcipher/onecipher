@@ -15,7 +15,7 @@
 
 use std::{fs, path::Path, process::Command};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::CliError;
 
@@ -93,9 +93,7 @@ pub(crate) fn generate(output: &str) -> Result<(), CliError> {
         .status()
         .is_ok_and(|s| s.success())
     {
-        let status = Command::new("cargo")
-            .args(["cyclonedx", "--output-file", output])
-            .status()?;
+        let status = Command::new("cargo").args(["cyclonedx", "--output-file", output]).status()?;
         if status.success() {
             println!("SBOM generated via cargo-cyclonedx: {output}");
             return Ok(());
@@ -116,10 +114,8 @@ pub(crate) fn generate(output: &str) -> Result<(), CliError> {
         .unwrap_or("0.0.0");
 
     let mut components = Vec::new();
-    if let Some(members) = doc
-        .get("workspace")
-        .and_then(|w| w.get("members"))
-        .and_then(|m| m.as_array())
+    if let Some(members) =
+        doc.get("workspace").and_then(|w| w.get("members")).and_then(|m| m.as_array())
     {
         for member in members {
             let name = member.as_str().unwrap_or_default();

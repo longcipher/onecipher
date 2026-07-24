@@ -12,20 +12,20 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 │                                                                      │
 │  ┌──────────────────────────────────────────────────────────────┐    │
 │  │  tokio runtime (async layer)                                  │    │
-│  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐  │    │
-│  │  │ WC v2 Server│  │ x402 Client  │  │ JSON-RPC Server    │  │    │
-│  │  │ (WSS relay) │  │ (HTTP 402)   │  │ (loopback UDS)     │  │    │
-│  │  └──────┬──────┘  └──────┬───────┘  └─────────┬──────────┘  │    │
-│  │         └────────────────┼────────────────────┘              │    │
-│  │                          ▼                                    │    │
-│  │              ┌───────────────────────┐                        │    │
-│  │              │   Intent Engine       │                        │    │
-│  │              │   (simulate + review) │                        │    │
-│  │              └───────────┬───────────┘                        │    │
-│  └──────────────────────────┼────────────────────────────────────┘    │
-│                             │ spawn_blocking                          │
+│  │  ┌─────────────┐  ┌──────────────────────────┐               │    │
+│  │  │ WC v2 Server│  │ Control Socket            │               │    │
+│  │  │ (WSS relay) │  │ (UDS, line protocol)      │               │    │
+│  │  └──────┬──────┘  └───────────┬──────────────┘               │    │
+│  │         └─────────────────────┘                                │    │
+│  │                          ▼                                     │    │
+│  │              ┌───────────────────────┐                         │    │
+│  │              │   Intent Engine       │                         │    │
+│  │              │   (simulate + review) │                         │    │
+│  │              └───────────┬───────────┘                         │    │
+│  └──────────────────────────┼─────────────────────────────────────┘    │
+│                             │ UDS frames (KeyAgentRequest)            │
 │  ┌──────────────────────────▼────────────────────────────────────┐    │
-│  │  Signing Core (sync-only, R56-enforced crates)                │    │
+│  │  Key-Agent thread (sync std::thread, R55/R56-enforced crates) │    │
 │  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐   │    │
 │  │  │ Policy v3   │  │ Vault Decrypt │  │ Multi-chain Signer │   │    │
 │  │  │ (oc-policy) │  │ (oc-vault)   │  │ (oc-signer)        │   │    │
@@ -38,6 +38,8 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 │  │  │ Audit Log (append-only JSONL, persistent device key)    │ │    │
 │  │  └─────────────────────────────────────────────────────────┘ │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
+│                                                                      │
+│  CLI subcommands (clap): wallet · intent · pay · x402 · secret · ... │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │ WSS (outbound)
                                ▼
@@ -52,9 +54,11 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
   └──────────────┘  └──────────────┘  └──────────────┘
 ```
 
+> **Note:** The ConnectRPC-over-UDS server was abolished in v0.4. The sole external interface is now WalletConnect v2 (WSS relay). The control socket accepts CONNECT/PAIR commands for pairing URI injection.
+
 ### Key Design Decisions
 
-- **Single binary**: `onecipher` embeds both the async runtime (tokio) and the sync signing core. No dual daemons, no UDS IPC between them.
+- **Single binary**: `onecipher` embeds both the async runtime (tokio) and the sync Key-Agent thread. No dual daemons — the tokio layer reaches the Key-Agent via UDS frames (`KeyAgentRequest`).
 - **Compile-time isolation**: The signing crates (`oc-policy`, `oc-crypto`, `oc-signer`, `oc-vault`) have zero async/network dependencies. CI enforces this via R56.
 - **`spawn_blocking` bridge**: async layer calls signing-core via `tokio::task::spawn_blocking`, avoiding reactor blockage.
 - **Local First**: All signing and policy evaluation happen locally. The server never touches plaintext private keys.
@@ -112,9 +116,9 @@ oc-netagent (async — tokio runtime)
 └── oc-signer         (called via spawn_blocking)
 
 bin/oc-cli (single binary)
-├── tokio runtime (WC server, x402, JSON-RPC)
-├── oc-keyagent (sync signing engine)
-└── clap (CLI parsing)
+├── tokio runtime (WC v2 server, Control Socket UDS)
+├── oc-keyagent (sync std::thread signing engine, R55)
+└── clap (CLI: wallet · intent · pay · x402 · secret · ...)
 ```
 
 ## Design Principles

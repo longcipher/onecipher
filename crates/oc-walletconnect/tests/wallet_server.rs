@@ -23,7 +23,6 @@ impl WalletMethodHandler for CountingHandler {
         _session_topic: &str,
     ) -> HandlerResult<'a> {
         let method = method.to_string();
-        let params = params.clone();
         Box::pin(async move {
             self.calls.lock().unwrap().push((method, params.clone()));
             Ok(json!({"echoed": params}))

@@ -38,16 +38,16 @@ oc-secret = { workspace = true }
 oc-signer = { workspace = true }
 oc-vault = { workspace = true }
 oc-wallet = { workspace = true, features = ["rpc", "sui-grpc"] }
-oc-walletconnect = { workspace = true, features = ["test-utils"] }
+oc-walletconnect = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
 ratatui = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
-toml = "0.8"
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
+toml = "0.8"
 zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

@@ -59,6 +59,12 @@ thread_local! {
 /// `Some(Duration::ZERO)` disables the exponential backoff so unit tests
 /// can exercise the lockout path without sleeping for 511 seconds.
 /// Pass `None` to restore production behavior.
+///
+/// Gated behind `#[cfg(any(test, feature = "test-utils"))]` so it is only
+/// compiled in unit tests (`cfg(test)`) or when the `test-utils` cargo
+/// feature is enabled (used by the BDD conformance crate, which lives in a
+/// separate crate and so does not have `cfg(test)` set for `oc-vault`).
+#[cfg(any(test, feature = "test-utils"))]
 pub fn set_backoff_override(d: Option<Duration>) {
     BACKOFF_OVERRIDE.with(|cell| *cell.borrow_mut() = d);
 }

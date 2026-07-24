@@ -1,6 +1,18 @@
 use std::{collections::HashMap, path::Path};
 
 use oc_core::{ApiKeyFile, EncryptedWallet, OcError, SecretPermissions};
+// Note: API token signing uses the v1 policy engine (declarative rules +
+// executable subprocess). v3 (Cedar-like) is reserved for agent / session-key
+// / x402 payment-authorization paths — its `evaluate_v3()` takes
+// `(&PolicyV3, &PayRequest, &mut PolicyState) -> Decision`, a different domain
+// model from v1's `evaluate_policies(&[oc_core::Policy], &oc_core::PolicyContext)
+// -> PolicyResult` used here (transaction `raw_hex`, `typed_data`,
+// `AllowedChains`, `AllowedTypedDataContracts`). The input types and decision
+// model are not interchangeable, so a drop-in switch is not feasible. This is
+// intentional layering, not a bug.
+// TODO: migrate to v3 once it gains a signing-path adapter that bridges
+// `oc_core::PolicyContext` → `PayRequest` and declarative `PolicyRule` →
+// Cedar-like `PolicyRule` without loss of semantics.
 use oc_policy::v1 as policy_engine;
 use oc_signer::{
     CryptoEnvelope, SecretBytes, decrypt, eip712, encrypt_with_hkdf, signer_for_chain,

@@ -17,6 +17,10 @@ pub enum KeyAgentError {
     InvalidRequest(String),
     #[error("internal error: {0}")]
     Internal(String),
+    /// Authorization failure — caller did not supply a required unlock token,
+    /// or the supplied token was invalid / expired / bound to a different wallet.
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
     /// T12 sandbox hardening failure (seccomp / capset / prctl).
     #[error("sandbox error: {0}")]
     Sandbox(String),

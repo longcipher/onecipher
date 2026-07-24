@@ -8,9 +8,9 @@ pub mod backup;
 pub mod error;
 pub mod vault;
 
-pub use backup::{
-    Argon2idParams, BackupContainer, MAGIC, MAX_FAILED_ATTEMPTS, VERSION, set_backoff_override,
-};
+#[cfg(any(test, feature = "test-utils"))]
+pub use backup::set_backoff_override;
+pub use backup::{Argon2idParams, BackupContainer, MAGIC, MAX_FAILED_ATTEMPTS, VERSION};
 pub use error::OcVaultError;
 pub use vault::{
     SecretVault, Vault, check_vault_permissions, delete_wallet_file, list_encrypted_wallets,

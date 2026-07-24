@@ -129,10 +129,7 @@ fn update_python_bindings() {
 fn get_latest_tag() -> Result<String, crate::CliError> {
     let api_url = format!("https://api.github.com/repos/{REPO}/releases/latest");
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| crate::CliError::InvalidArgs(format!("tokio: {e}")))?;
-
-    let body = rt.block_on(async {
+    let body = crate::shared_runtime().block_on(async {
         let client = hpx::Client::new();
         let resp = client
             .get(&api_url)
@@ -159,10 +156,7 @@ fn get_latest_tag() -> Result<String, crate::CliError> {
 
 /// Download a binary from a URL via hpx.
 fn download_binary(url: &str, dest: &std::path::Path) -> Result<(), crate::CliError> {
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| crate::CliError::InvalidArgs(format!("tokio: {e}")))?;
-
-    let bytes = rt.block_on(async {
+    let bytes = crate::shared_runtime().block_on(async {
         let client = hpx::Client::new();
         let resp = client
             .get(url)

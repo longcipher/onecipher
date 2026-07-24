@@ -70,11 +70,7 @@ fn run_wc(tx_hex: &str, json_output: bool) -> Result<(), CliError> {
     let data = fs::read_to_string(&dapp_path)?;
     let pairing: super::wc::StoredPairing = serde_json::from_str(&data)?;
 
-    // ponytail: tokio runtime created per call; reuse a global if this is hot
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| CliError::InvalidArgs(format!("tokio runtime: {e}")))?;
-
-    rt.block_on(async {
+    crate::shared_runtime().block_on(async {
         let client = WcDappClient::new();
         client.bind_session(pairing.topic.clone()).await;
 

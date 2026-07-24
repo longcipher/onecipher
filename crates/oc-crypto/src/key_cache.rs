@@ -57,7 +57,7 @@ impl<V: Clone + Send + Sync + 'static> KeyCache<V> {
     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by
     /// the caller's scope.
     pub fn get(&self, id: &str) -> Option<V> {
-        let mut map = self.entries.lock().unwrap();
+        let mut map = self.entries.lock().expect("key cache mutex poisoned");
         let entry = map.get(id)?;
         if entry.last_accessed.elapsed() > self.ttl {
             map.remove(id);
@@ -73,7 +73,7 @@ impl<V: Clone + Send + Sync + 'static> KeyCache<V> {
     /// if at capacity. The cache takes ownership of the value — evicting it
     /// later triggers `Drop` (zeroize + munlock for `HardenedBytes`).
     pub fn insert(&self, id: &str, key: V) {
-        let mut map = self.entries.lock().unwrap();
+        let mut map = self.entries.lock().expect("key cache mutex poisoned");
         self.evict_expired_inner(&mut map);
 
         if map.len() >= self.max_entries && !map.contains_key(id) {
@@ -91,13 +91,13 @@ impl<V: Clone + Send + Sync + 'static> KeyCache<V> {
 
     /// Clear all entries. Triggers `Drop` on every value.
     pub fn clear(&self) {
-        let mut map = self.entries.lock().unwrap();
+        let mut map = self.entries.lock().expect("key cache mutex poisoned");
         map.clear();
     }
 
     /// Evict only expired entries. Called opportunistically by `insert`.
     pub fn evict_expired(&self) {
-        let mut map = self.entries.lock().unwrap();
+        let mut map = self.entries.lock().expect("key cache mutex poisoned");
         self.evict_expired_inner(&mut map);
     }
 
@@ -108,7 +108,7 @@ impl<V: Clone + Send + Sync + 'static> KeyCache<V> {
     /// Current number of entries (including any that are expired but not yet
     /// reaped).
     pub fn len(&self) -> usize {
-        self.entries.lock().unwrap().len()
+        self.entries.lock().expect("key cache mutex poisoned").len()
     }
 
     pub fn is_empty(&self) -> bool {

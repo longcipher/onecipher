@@ -115,7 +115,7 @@ impl PolicyIntegration {
         }
 
         // 4. Write ALLOW/DENY audit entry (R76 / C-07).
-        let mut audit_guard = self.audit.lock().unwrap();
+        let mut audit_guard = self.audit.lock().expect("audit mutex poisoned");
         let status = match &decision {
             Decision::Allow => "ALLOWED",
             Decision::Deny(_) => "DENIED",

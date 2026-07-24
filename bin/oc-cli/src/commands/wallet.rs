@@ -111,15 +111,20 @@ pub(crate) fn export(wallet_name: &str) -> Result<(), CliError> {
         ));
     }
 
-    // Try empty passphrase first, then prompt if it fails
-    let mut exported = if let Ok(s) = oc_wallet::export_wallet(wallet_name, None, None) {
-        s
+    // Try empty passphrase first, then prompt if it fails.
+    // export_wallet returns SecretBytes (HardenedBytes) — memory-hardened,
+    // zeroized on drop. We borrow via std::str::from_utf8 to avoid a plain
+    // String copy.
+    let exported = if let Ok(b) = oc_wallet::export_wallet(wallet_name, None, None) {
+        b
     } else {
         let passphrase = super::read_passphrase();
         oc_wallet::export_wallet(wallet_name, Some(&passphrase), None)?
     };
+    let exported_str = std::str::from_utf8(exported.expose())
+        .map_err(|e| CliError::InvalidArgs(format!("exported wallet not valid UTF-8: {e}")))?;
 
-    let is_key_pair = exported.starts_with('{');
+    let is_key_pair = exported_str.starts_with('{');
     eprintln!();
     if is_key_pair {
         eprintln!("WARNING: The private key below provides FULL ACCESS to this wallet.");
@@ -128,8 +133,8 @@ pub(crate) fn export(wallet_name: &str) -> Result<(), CliError> {
     }
     eprintln!("Do not share it. Store it securely offline.");
     eprintln!();
-    println!("{exported}");
-    exported.zeroize();
+    println!("{exported_str}");
+    // exported (SecretBytes) is zeroized on drop automatically.
 
     let info = oc_wallet::get_wallet(wallet_name, None)?;
     audit::log_wallet_exported(&info.id);

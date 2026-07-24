@@ -6,6 +6,11 @@ use crate::{KeyAgentRequest, KeyAgentResponse, handler, signing_core_error::Sign
 ///
 /// This is the main entry point for the async layer. Call via
 /// `tokio::task::spawn_blocking(move || engine.handle(request))`.
+///
+/// **Note:** The daemon production path uses `oc_keyagent::server::run()`
+/// directly (UDS listener + `handler::dispatch`). This facade is retained for
+/// programmatic embedding and test scenarios.
+#[doc(hidden)]
 pub struct SigningEngine {
     state_dir: PathBuf,
 }

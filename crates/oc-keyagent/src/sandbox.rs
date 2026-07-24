@@ -169,6 +169,11 @@ mod linux {
     /// Any syscall not in the allowlist → `SECCOMP_RET_KILL_PROCESS` (SIGSYS).
     pub(super) fn apply_seccomp() -> Result<(), KeyAgentError> {
         // Step 1: PR_SET_NO_NEW_PRIVS.
+        // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)` takes integer
+        // constant arguments and a well-known syscall number. It does not
+        // dereference any pointer, has no memory-safety implications, and
+        // the return value is checked before use. `PR_SET_NO_NEW_PRIVS` is
+        // a stable Linux ABI constant.
         let rc = unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
         if rc != 0 {
             return Err(KeyAgentError::Sandbox(format!(

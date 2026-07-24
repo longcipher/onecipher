@@ -33,7 +33,7 @@ fn hooks() -> &'static Mutex<Vec<Box<dyn Fn() + Send>>> {
 /// });
 /// ```
 pub fn register_cleanup(f: impl Fn() + Send + 'static) {
-    hooks().lock().unwrap().push(Box::new(f));
+    hooks().lock().expect("process hardening hooks mutex poisoned").push(Box::new(f));
 }
 
 /// Run all registered cleanup hooks. Called by the signal handler thread.

@@ -40,7 +40,9 @@ use std::cell::RefCell;
 use cucumber::{given, then, when};
 use ed25519_dalek::SigningKey;
 use oc_keyagent::{AuditLog, EventType};
-use oc_policy::{Decision, DenyReason, PayRequest, PolicyState, evaluate_11_step};
+use oc_policy::{
+    Decision, DenyReason, PayRequest, PolicyState, deny_reason_to_wire_string, evaluate_11_step,
+};
 use tempfile::tempdir;
 
 use crate::{ConformanceWorld, steps::background::default_test_policy};
@@ -64,33 +66,6 @@ thread_local! {
 /// `expiry_unix` (`now + 3600`) so EXPIRED requires explicitly setting
 /// `expiry_unix` to the past.
 const NOW_OVERRIDE: u64 = 1_000_000;
-
-// ---------------------------------------------------------------------------
-// Helper: DenyReason → wire string (R80 mapping, BDD-only)
-// ---------------------------------------------------------------------------
-
-/// Map a `DenyReason` to its R80 wire string. The `context` arg
-/// disambiguates `BudgetExceeded`:
-/// - `"step_9"` (single-amount check) → `AMOUNT_EXCEEDED` (T25 mapping)
-/// - any other context (step_8 / step_8a / step_8b) → `BUDGET_EXCEEDED`
-///
-/// This helper lives in the BDD step file (not production code) because
-/// the wire-string form is a UI/Agent-facing concern; the policy engine
-/// itself only emits the 9-variant `DenyReason` enum.
-fn deny_reason_to_wire_string(reason: &DenyReason, context: &str) -> String {
-    match (reason, context) {
-        (DenyReason::BudgetExceeded, "step_9") => "AMOUNT_EXCEEDED".to_string(),
-        (DenyReason::BudgetExceeded, _) => "BUDGET_EXCEEDED".to_string(),
-        (DenyReason::RateLimitMinute, _) => "RATE_LIMIT_MINUTE".to_string(),
-        (DenyReason::RateLimitHour, _) => "RATE_LIMIT_HOUR".to_string(),
-        (DenyReason::Whitelist, _) => "WHITELIST".to_string(),
-        (DenyReason::Expired, _) => "EXPIRED".to_string(),
-        (DenyReason::Cooldown, _) => "COOLDOWN".to_string(),
-        (DenyReason::PolicyMissing, _) => "POLICY_INVALID".to_string(),
-        (DenyReason::PasskeyForged, _) => "PASSKEY_FORGED".to_string(),
-        (DenyReason::Unknown, _) => "UNKNOWN".to_string(),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Background (T34-specific — "the Agent" != T31's "an Agent")

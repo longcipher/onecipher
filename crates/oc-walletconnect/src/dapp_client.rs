@@ -46,7 +46,7 @@ impl WcDappClient {
     }
 
     /// Create a mock-relay client for tests.
-    #[cfg(any(test, feature = "test-utils"))]
+    #[cfg(test)]
     pub fn new_mock(relay: Arc<MockRelay>) -> Self {
         Self {
             topic: Mutex::new(None),
