@@ -53,6 +53,8 @@ pub(crate) fn run(force: bool) -> Result<(), crate::CliError> {
 
     // Trigger vault migration in case the user is upgrading from lws
     oc_wallet::migrate::migrate_vault_if_needed();
+    crate::update_shell_rc_paths(".lws/bin", ".onecipher/bin");
+    crate::update_shell_rc_paths(".ows/bin", ".onecipher/bin");
 
     // Update language bindings
     update_node_bindings();

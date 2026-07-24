@@ -267,9 +267,11 @@ impl PasskeyPubkeyStore {
     /// `Option` return type of [`Self::get`]).
     fn load(&self) -> HashMap<String, StoredPasskeyPubkey> {
         match fs::read_to_string(&self.path) {
-            Ok(contents) if !contents.trim().is_empty() => {
-                serde_json::from_str(&contents).unwrap_or_default()
-            }
+            Ok(contents) if !contents.trim().is_empty() => serde_json::from_str(&contents)
+                .unwrap_or_else(|e| {
+                    eprintln!("warning: corrupt passkey store at {}: {e}", self.path.display());
+                    HashMap::new()
+                }),
             _ => HashMap::new(),
         }
     }

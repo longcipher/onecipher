@@ -43,6 +43,7 @@ pub async fn run_server(
     let cfg = oc_walletconnect::WcWalletConfig {
         relay_url: relay_url.to_string(),
         relay_protocol: "waku".into(),
+        trusted_origins: vec![],
     };
 
     let mut server = oc_walletconnect::WcWalletServer::new(cfg, router);
@@ -88,6 +89,7 @@ pub async fn run_server_controlled(
     let cfg = oc_walletconnect::WcWalletConfig {
         relay_url: relay_url.to_string(),
         relay_protocol: "waku".into(),
+        trusted_origins: vec![],
     };
 
     let mut server = oc_walletconnect::WcWalletServer::new(cfg, router);

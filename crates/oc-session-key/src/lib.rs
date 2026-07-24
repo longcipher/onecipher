@@ -19,6 +19,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod abi;
 pub mod error;
 pub mod evm;
 pub mod real;

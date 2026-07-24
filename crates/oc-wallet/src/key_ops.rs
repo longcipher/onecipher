@@ -1,11 +1,12 @@
 use std::{collections::HashMap, path::Path};
 
 use oc_core::{ApiKeyFile, EncryptedWallet, OcError, SecretPermissions};
+use oc_policy::v1 as policy_engine;
 use oc_signer::{
     CryptoEnvelope, SecretBytes, decrypt, eip712, encrypt_with_hkdf, signer_for_chain,
 };
 
-use crate::{error::OcWalletError, key_store, policy_engine, policy_store};
+use crate::{error::OcWalletError, key_store, policy_store};
 
 /// Create an API key for agent access to one or more wallets.
 ///

@@ -20,6 +20,7 @@ hex = { workspace = true }
 hpx = { workspace = true, optional = true }
 jiff = { workspace = true }
 oc-core = { workspace = true }
+oc-policy = { workspace = true }
 oc-signer = { workspace = true }
 oc-vault = { workspace = true }
 prost = { workspace = true }
@@ -32,7 +33,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"], optional =
 tonic = { workspace = true, features = ["transport"], optional = true }
 tonic-prost = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["v4"] }
-zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 bs58 = { workspace = true }

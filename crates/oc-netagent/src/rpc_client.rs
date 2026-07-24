@@ -85,7 +85,15 @@ impl HpxRpcClient {
             obj["from"] = json!(from);
         }
         if let Some(value) = &call_data.value {
-            obj["value"] = json!(value);
+            // Normalize to hex quantity format for EVM JSON-RPC consistency
+            let hex_value = if value.starts_with("0x") {
+                json!(value)
+            } else {
+                // Decimal string → hex quantity
+                let n: u128 = value.parse().unwrap_or(0);
+                json!(format!("0x{:x}", n))
+            };
+            obj["value"] = hex_value;
         }
         if let Some(data) = &call_data.data {
             obj["data"] = json!(format!("0x{}", hex::encode(data)));
@@ -150,9 +158,11 @@ impl RpcClient for HpxRpcClient {
 
     async fn native_price_usd(&self) -> Result<f64, RpcError> {
         // TODO(stage-3): query a price API (e.g. CoinGecko / Chainlink feed)
-        // for the chain's native token. For now we return a hardcoded fallback
-        // so that simulation cost estimates remain non-zero.
-        Ok(2000.0)
+        // for the chain's native token. Return an error until a real price feed
+        // is integrated so callers don't silently use stale/wrong prices.
+        Err(RpcError::Parse(
+            "native_price_usd not yet implemented; no price feed integrated".into(),
+        ))
     }
 }
 
@@ -221,9 +231,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_price_usd_returns_fallback() {
+    async fn native_price_usd_returns_not_implemented() {
         let c = HpxRpcClient::new("eip155:1", "https://eth.example.com").expect("new");
-        let price = c.native_price_usd().await.expect("price");
-        assert!((price - 2000.0).abs() < f64::EPSILON);
+        let err = c.native_price_usd().await.unwrap_err();
+        assert!(format!("{err}").contains("not yet implemented"));
     }
 }
