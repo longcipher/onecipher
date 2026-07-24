@@ -17,7 +17,7 @@ Feature: Key-Agent Sandbox Hard Gates
     Given the oc-keyagent crate is part of the workspace
     When the dependency tree is computed
     Then the tree does not contain tokio, reqwest, tungstenite, hyper, async-std, or smol
-    And the only allowed dependencies are oc-crypto, oc-core, oc-signer, oc-policy, oc-session-key, oc-vault, oc-proto, and prost
+    And the only allowed dependencies are oc-crypto, oc-core, oc-signer, oc-policy, oc-session-key, oc-vault, and prost
     And std::os::unix::net is used for Unix Domain Socket I/O instead of any async runtime
 
   Scenario: Key-Agent binary has no TCP symbols

@@ -35,7 +35,6 @@ lint:
     cargo tree -p oc-policy -e features
     cargo tree -p oc-keyagent -e features
     cargo tree -p oc-session-key -e features
-    cargo tree -p oc-signing-core -e features
 
 # ============================================================
 # Testing

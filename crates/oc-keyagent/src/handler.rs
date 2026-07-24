@@ -154,7 +154,7 @@ fn now_unix() -> u64 {
 /// — but its `pending_challenges` set will be empty, so the client MUST have
 /// called `GenerateChallenge` first or `verify()` will return `Replay`.
 fn verify_passkey(
-    auth: &oc_proto::PasskeyAuthorization,
+    auth: &crate::proto::PasskeyAuthorization,
 ) -> Result<StoredPasskeyPubkey, KeyAgentResponse> {
     let store = match PasskeyPubkeyStore::open_default() {
         Ok(s) => s,
@@ -195,7 +195,7 @@ fn verify_passkey(
             None,
             serde_json::json!({"credential_id": auth.credential_id, "error": e.to_string()}),
         );
-        return Err(KeyAgentResponse::deny(oc_proto::DenyReason::PasskeyForged));
+        return Err(KeyAgentResponse::deny(crate::proto::DenyReason::PasskeyForged));
     }
     Ok(stored)
 }
@@ -278,7 +278,7 @@ fn handle_list_wallets() -> Result<KeyAgentResponse, KeyAgentError> {
     let wallets = oc_vault::vault::list_encrypted_wallets(vault_path())
         .map_err(|e| KeyAgentError::Internal(format!("vault list failed: {e}")))?;
 
-    let proto_wallets: Vec<oc_proto::WalletInfo> = wallets
+    let proto_wallets: Vec<crate::proto::WalletInfo> = wallets
         .iter()
         .map(|w| {
             let key_type = match w.key_type {
@@ -289,7 +289,7 @@ fn handle_list_wallets() -> Result<KeyAgentResponse, KeyAgentError> {
                 .created_at
                 .parse::<jiff::Timestamp>()
                 .map_or(0, |ts| ts.as_second().max(0) as u64);
-            oc_proto::WalletInfo {
+            crate::proto::WalletInfo {
                 id: w.id.clone(),
                 name: w.name.clone(),
                 key_type: key_type.to_string(),
@@ -297,7 +297,7 @@ fn handle_list_wallets() -> Result<KeyAgentResponse, KeyAgentError> {
                 accounts: w
                     .accounts
                     .iter()
-                    .map(|a| oc_proto::WalletAccount {
+                    .map(|a| crate::proto::WalletAccount {
                         account_id: a.account_id.clone(),
                         address: a.address.clone(),
                         chain_id: a.chain_id.clone(),
@@ -308,12 +308,12 @@ fn handle_list_wallets() -> Result<KeyAgentResponse, KeyAgentError> {
         })
         .collect();
 
-    let resp = oc_proto::ListWalletsResponse { wallets: proto_wallets };
+    let resp = crate::proto::ListWalletsResponse { wallets: proto_wallets };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
 fn handle_sign_transaction(
-    req: &oc_proto::SignTransactionRequest,
+    req: &crate::proto::SignTransactionRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     // P0-2: Passkey gate — verify authentication before signing.
     let auth = match req.auth.as_ref() {
@@ -360,7 +360,7 @@ fn handle_sign_transaction(
         serde_json::json!({"action": "sign_transaction", "chain_id": req.chain_id}),
     );
 
-    let resp = oc_proto::SignTransactionResponse {
+    let resp = crate::proto::SignTransactionResponse {
         signature: output.signature,
         signed_tx_hex: hex::encode(&signed_tx),
     };
@@ -368,7 +368,7 @@ fn handle_sign_transaction(
 }
 
 fn handle_sign_message(
-    req: &oc_proto::SignMessageRequest,
+    req: &crate::proto::SignMessageRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     // P0-2: Passkey gate — verify authentication before signing.
     let auth = match req.auth.as_ref() {
@@ -396,12 +396,12 @@ fn handle_sign_message(
         Err(e) => return Ok(KeyAgentResponse::error(format!("signing failed: {e}"))),
     };
 
-    let resp = oc_proto::SignMessageResponse { signature: output.signature };
+    let resp = crate::proto::SignMessageResponse { signature: output.signature };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
 fn handle_sign_typed_data(
-    req: &oc_proto::SignTypedDataRequest,
+    req: &crate::proto::SignTypedDataRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     // P0-2: Passkey gate — verify authentication before signing.
     let auth = match req.auth.as_ref() {
@@ -430,12 +430,12 @@ fn handle_sign_typed_data(
         Err(e) => return Ok(KeyAgentResponse::error(format!("signing failed: {e}"))),
     };
 
-    let resp = oc_proto::SignTypedDataResponse { signature: output.signature };
+    let resp = crate::proto::SignTypedDataResponse { signature: output.signature };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
 fn handle_sign_user_op(
-    req: &oc_proto::SignUserOpRequest,
+    req: &crate::proto::SignUserOpRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     // P0-2: Passkey gate — verify authentication before signing.
     let auth = match req.auth.as_ref() {
@@ -480,7 +480,7 @@ fn handle_sign_user_op(
         serde_json::json!({"action": "sign_user_op", "chain_id": req.chain_id}),
     );
 
-    let resp = oc_proto::SignUserOpResponse {
+    let resp = crate::proto::SignUserOpResponse {
         signature: output.signature,
         signed_user_op_hex: hex::encode(&signed_user_op),
     };
@@ -488,7 +488,7 @@ fn handle_sign_user_op(
 }
 
 fn handle_create_session_key(
-    req: &oc_proto::CreateSessionKeyRequest,
+    req: &crate::proto::CreateSessionKeyRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     // Stage 0: verify PasskeyAuthorization (R30/R31/C-05).
     let auth = match req.auth.as_ref() {
@@ -502,7 +502,7 @@ fn handle_create_session_key(
     let session_key_id = format!("sk-{}", rand::random::<u64>());
     let created_at = now_unix();
 
-    let proto_policy = req.rules.clone().unwrap_or_else(|| oc_proto::Policy {
+    let proto_policy = req.rules.clone().unwrap_or_else(|| crate::proto::Policy {
         version: 2,
         session_key_id: session_key_id.clone(),
         device_id: "keyagent".to_string(),
@@ -516,7 +516,7 @@ fn handle_create_session_key(
         serde_json::json!({"label": req.label, "status": "ALLOWED"}),
     );
 
-    let resp = oc_proto::CreateSessionKeyResponse {
+    let resp = crate::proto::CreateSessionKeyResponse {
         session_key_id,
         created_at_unix: created_at,
         policy: Some(proto_policy),
@@ -525,7 +525,7 @@ fn handle_create_session_key(
 }
 
 fn handle_revoke_session_key(
-    req: &oc_proto::RevokeSessionKeyRequest,
+    req: &crate::proto::RevokeSessionKeyRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     // Stage 0: verify PasskeyAuthorization (R30/R31/C-05).
     let auth = match req.auth.as_ref() {
@@ -544,11 +544,11 @@ fn handle_revoke_session_key(
         serde_json::json!({"status": "ALLOWED", "revoked_at_unix": revoked_at}),
     );
 
-    let resp = oc_proto::RevokeSessionKeyResponse { revoked_at_unix: revoked_at };
+    let resp = crate::proto::RevokeSessionKeyResponse { revoked_at_unix: revoked_at };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
-fn handle_pay_x402(req: &oc_proto::PayX402Request) -> Result<KeyAgentResponse, KeyAgentError> {
+fn handle_pay_x402(req: &crate::proto::PayX402Request) -> Result<KeyAgentResponse, KeyAgentError> {
     // T16: Build PayRequest and evaluate via PolicyIntegration.
     // ponytail: amount/asset/chain/recipient come from x402 protocol response;
     // we use placeholders for now. PolicyIntegration is created per-request.
@@ -590,8 +590,8 @@ fn handle_pay_x402(req: &oc_proto::PayX402Request) -> Result<KeyAgentResponse, K
 
     match decision {
         oc_policy::v2::Decision::Allow => {
-            let resp = oc_proto::PayX402Response {
-                status: oc_proto::PaymentStatus::Ok as i32,
+            let resp = crate::proto::PayX402Response {
+                status: crate::proto::PaymentStatus::Ok as i32,
                 receipt: vec![],
                 retry_authorization: String::new(),
                 deny_reason: String::new(),
@@ -601,8 +601,8 @@ fn handle_pay_x402(req: &oc_proto::PayX402Request) -> Result<KeyAgentResponse, K
         }
         oc_policy::v2::Decision::Deny(reason) => {
             let deny_str = deny_reason_string(&reason);
-            let resp = oc_proto::PayX402Response {
-                status: oc_proto::PaymentStatus::Deny as i32,
+            let resp = crate::proto::PayX402Response {
+                status: crate::proto::PaymentStatus::Deny as i32,
                 receipt: vec![],
                 retry_authorization: String::new(),
                 deny_reason: deny_str,
@@ -614,7 +614,7 @@ fn handle_pay_x402(req: &oc_proto::PayX402Request) -> Result<KeyAgentResponse, K
 }
 
 fn handle_get_payment_history(
-    req: &oc_proto::GetPaymentHistoryRequest,
+    req: &crate::proto::GetPaymentHistoryRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let log_path = PathBuf::from(home).join(".onecipher/logs/audit.jsonl");
@@ -622,7 +622,7 @@ fn handle_get_payment_history(
     let file = match std::fs::File::open(&log_path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let resp = oc_proto::PaymentHistoryResponse { records: vec![] };
+            let resp = crate::proto::PaymentHistoryResponse { records: vec![] };
             return Ok(KeyAgentResponse::ok(resp.encode_to_vec()));
         }
         Err(e) => return Ok(KeyAgentResponse::error(format!("audit log read failed: {e}"))),
@@ -664,14 +664,14 @@ fn handle_get_payment_history(
         let payload = entry.get("payload").cloned().unwrap_or(serde_json::Value::Null);
         let status_str = payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let status = if status_str == "ALLOWED" {
-            oc_proto::PaymentStatus::Ok as i32
+            crate::proto::PaymentStatus::Ok as i32
         } else if status_str == "DENIED" {
-            oc_proto::PaymentStatus::Deny as i32
+            crate::proto::PaymentStatus::Deny as i32
         } else {
-            oc_proto::PaymentStatus::Error as i32
+            crate::proto::PaymentStatus::Error as i32
         };
 
-        records.push(oc_proto::PaymentRecord {
+        records.push(crate::proto::PaymentRecord {
             timestamp_unix: ts_unix,
             session_key_id: entry_sk.to_string(),
             amount_usd: payload.get("amount_usd").and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -692,7 +692,7 @@ fn handle_get_payment_history(
         }
     }
 
-    let resp = oc_proto::PaymentHistoryResponse { records };
+    let resp = crate::proto::PaymentHistoryResponse { records };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
@@ -705,12 +705,12 @@ fn handle_lock_vault() -> Result<KeyAgentResponse, KeyAgentError> {
         serde_json::json!({"action": "lock_vault", "cache_cleared": true}),
     );
 
-    let resp = oc_proto::LockVaultResponse { locked: true };
+    let resp = crate::proto::LockVaultResponse { locked: true };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
 fn handle_unlock_vault(
-    req: &oc_proto::UnlockVaultRequest,
+    req: &crate::proto::UnlockVaultRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     // 1. Verify Passkey.
     let auth = match req.auth.as_ref() {
@@ -736,7 +736,7 @@ fn handle_unlock_vault(
 
     let expires_at = now_unix() + oc_core::UnlockToken::DEFAULT_TTL.as_secs();
 
-    let resp = oc_proto::UnlockVaultResponse {
+    let resp = crate::proto::UnlockVaultResponse {
         unlock_token: token.key_bytes().to_vec(),
         expires_at_unix: expires_at,
     };
@@ -744,7 +744,7 @@ fn handle_unlock_vault(
 }
 
 fn handle_register_passkey(
-    req: &oc_proto::RegisterPasskeyRequest,
+    req: &crate::proto::RegisterPasskeyRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     let mut store = match PasskeyPubkeyStore::open_default() {
         Ok(s) => s,
@@ -762,7 +762,7 @@ fn handle_register_passkey(
         return Ok(KeyAgentResponse::error(format!("register passkey: {e}")));
     }
 
-    let resp = oc_proto::RegisterPasskeyResponse { registered: true };
+    let resp = crate::proto::RegisterPasskeyResponse { registered: true };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
@@ -776,7 +776,7 @@ fn handle_register_passkey(
 /// RPC. [`verify_passkey`] consumes the challenge from the same shared
 /// verifier, providing single-use replay protection.
 fn handle_generate_challenge(
-    req: &oc_proto::GenerateChallengeRequest,
+    req: &crate::proto::GenerateChallengeRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     if req.credential_id.is_empty() {
         return Ok(KeyAgentResponse::error("missing credential_id"));
@@ -822,7 +822,7 @@ fn handle_generate_challenge(
         serde_json::json!({"action": "generate_challenge", "credential_id": req.credential_id}),
     );
 
-    let resp = oc_proto::GenerateChallengeResponse { challenge: challenge.to_vec() };
+    let resp = crate::proto::GenerateChallengeResponse { challenge: challenge.to_vec() };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
@@ -831,10 +831,9 @@ fn handle_generate_challenge(
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use oc_proto::{Empty, PayX402Request};
-
     use super::*;
     use crate::{
+        proto::{Empty, PayX402Request},
         request::{KeyAgentRequest, KeyAgentRequestKind},
         response::KeyAgentResponseKind,
     };
@@ -849,7 +848,7 @@ mod tests {
         let resp = dispatch_req(KeyAgentRequestKind::ListWallets(Empty {}));
         match &resp.kind {
             Some(KeyAgentResponseKind::Ok(bytes)) => {
-                let decoded: oc_proto::ListWalletsResponse =
+                let decoded: crate::proto::ListWalletsResponse =
                     prost::Message::decode(bytes.as_slice()).unwrap();
                 let _ = decoded.wallets.len();
             }
@@ -862,14 +861,15 @@ mod tests {
 
     #[test]
     fn test_sign_transaction_missing_wallet_returns_error() {
-        let resp =
-            dispatch_req(KeyAgentRequestKind::SignTransaction(oc_proto::SignTransactionRequest {
+        let resp = dispatch_req(KeyAgentRequestKind::SignTransaction(
+            crate::proto::SignTransactionRequest {
                 session_key_id: "sk-1".to_string(),
                 wallet_id: "nonexistent-wallet".to_string(),
                 chain_id: "eip155:1".to_string(),
                 raw_tx_hex: "deadbeef".to_string(),
                 auth: None,
-            }));
+            },
+        ));
         // P0-2: with auth=None, the Passkey gate rejects before reaching
         // load_chain_key. Either error path satisfies this smoke test.
         assert!(resp.is_error(), "expected error for missing auth / wallet");
@@ -877,19 +877,20 @@ mod tests {
 
     #[test]
     fn test_sign_message_missing_wallet_returns_error() {
-        let resp = dispatch_req(KeyAgentRequestKind::SignMessage(oc_proto::SignMessageRequest {
-            session_key_id: "sk-1".to_string(),
-            wallet_id: "nonexistent-wallet".to_string(),
-            message: b"hello".to_vec(),
-            auth: None,
-        }));
+        let resp =
+            dispatch_req(KeyAgentRequestKind::SignMessage(crate::proto::SignMessageRequest {
+                session_key_id: "sk-1".to_string(),
+                wallet_id: "nonexistent-wallet".to_string(),
+                message: b"hello".to_vec(),
+                auth: None,
+            }));
         assert!(resp.is_error(), "expected error for missing auth / wallet");
     }
 
     #[test]
     fn test_sign_typed_data_missing_wallet_returns_error() {
         let resp =
-            dispatch_req(KeyAgentRequestKind::SignTypedData(oc_proto::SignTypedDataRequest {
+            dispatch_req(KeyAgentRequestKind::SignTypedData(crate::proto::SignTypedDataRequest {
                 session_key_id: "sk-1".to_string(),
                 wallet_id: "nonexistent-wallet".to_string(),
                 typed_data_json: "{}".to_string(),
@@ -900,7 +901,7 @@ mod tests {
 
     #[test]
     fn test_sign_user_op_missing_wallet_returns_error() {
-        let resp = dispatch_req(KeyAgentRequestKind::SignUserOp(oc_proto::SignUserOpRequest {
+        let resp = dispatch_req(KeyAgentRequestKind::SignUserOp(crate::proto::SignUserOpRequest {
             session_key_id: "sk-1".to_string(),
             wallet_id: "nonexistent-wallet".to_string(),
             chain_id: "eip155:1".to_string(),
@@ -914,7 +915,7 @@ mod tests {
     fn test_create_session_key_missing_auth_returns_error() {
         // Stage 0: auth is now required — missing auth must be rejected.
         let resp = dispatch_req(KeyAgentRequestKind::CreateSessionKey(
-            oc_proto::CreateSessionKeyRequest {
+            crate::proto::CreateSessionKeyRequest {
                 label: "test-key".to_string(),
                 rules: None,
                 budget: None,
@@ -928,14 +929,17 @@ mod tests {
     fn test_revoke_session_key_missing_auth_returns_error() {
         // Stage 0: auth is now required — missing auth must be rejected.
         let resp = dispatch_req(KeyAgentRequestKind::RevokeSessionKey(
-            oc_proto::RevokeSessionKeyRequest { session_key_id: "sk-test".to_string(), auth: None },
+            crate::proto::RevokeSessionKeyRequest {
+                session_key_id: "sk-test".to_string(),
+                auth: None,
+            },
         ));
         assert!(resp.is_error(), "RevokeSessionKey without auth should be rejected");
     }
 
     #[test]
     fn test_get_balance_returns_not_implemented() {
-        let resp = dispatch_req(KeyAgentRequestKind::GetBalance(oc_proto::GetBalanceRequest {
+        let resp = dispatch_req(KeyAgentRequestKind::GetBalance(crate::proto::GetBalanceRequest {
             wallet_id: "w1".to_string(),
             chain_id: "eip155:1".to_string(),
         }));
@@ -945,7 +949,7 @@ mod tests {
     #[test]
     fn test_get_payment_history_returns_ok() {
         let resp = dispatch_req(KeyAgentRequestKind::GetPaymentHistory(
-            oc_proto::GetPaymentHistoryRequest {
+            crate::proto::GetPaymentHistoryRequest {
                 session_key_id: "sk-test".to_string(),
                 since_unix: 0,
                 limit: 10,
@@ -953,7 +957,7 @@ mod tests {
         ));
         match &resp.kind {
             Some(KeyAgentResponseKind::Ok(bytes)) => {
-                let decoded: oc_proto::PaymentHistoryResponse =
+                let decoded: crate::proto::PaymentHistoryResponse =
                     prost::Message::decode(bytes.as_slice()).unwrap();
                 let _ = decoded.records.len();
             }
@@ -970,7 +974,7 @@ mod tests {
         assert!(!resp.is_error(), "LockVault should succeed");
         match &resp.kind {
             Some(KeyAgentResponseKind::Ok(bytes)) => {
-                let decoded: oc_proto::LockVaultResponse =
+                let decoded: crate::proto::LockVaultResponse =
                     prost::Message::decode(bytes.as_slice()).unwrap();
                 assert!(decoded.locked);
             }
@@ -988,13 +992,13 @@ mod tests {
     #[test]
     fn test_all_variants_dispatch_without_panic() {
         let cases: Vec<KeyAgentRequestKind> = vec![
-            KeyAgentRequestKind::CreateSessionKey(oc_proto::CreateSessionKeyRequest {
+            KeyAgentRequestKind::CreateSessionKey(crate::proto::CreateSessionKeyRequest {
                 label: "x".to_string(),
                 rules: None,
                 budget: None,
                 auth: None,
             }),
-            KeyAgentRequestKind::RevokeSessionKey(oc_proto::RevokeSessionKeyRequest {
+            KeyAgentRequestKind::RevokeSessionKey(crate::proto::RevokeSessionKeyRequest {
                 session_key_id: "x".to_string(),
                 auth: None,
             }),
@@ -1006,38 +1010,38 @@ mod tests {
                 headers: std::collections::HashMap::new(),
                 ..Default::default()
             }),
-            KeyAgentRequestKind::SignTransaction(oc_proto::SignTransactionRequest {
+            KeyAgentRequestKind::SignTransaction(crate::proto::SignTransactionRequest {
                 session_key_id: "x".to_string(),
                 wallet_id: "x".to_string(),
                 chain_id: "x".to_string(),
                 raw_tx_hex: "x".to_string(),
                 auth: None,
             }),
-            KeyAgentRequestKind::SignUserOp(oc_proto::SignUserOpRequest {
+            KeyAgentRequestKind::SignUserOp(crate::proto::SignUserOpRequest {
                 session_key_id: "x".to_string(),
                 wallet_id: "x".to_string(),
                 chain_id: "x".to_string(),
                 user_op_hex: "x".to_string(),
                 auth: None,
             }),
-            KeyAgentRequestKind::SignMessage(oc_proto::SignMessageRequest {
+            KeyAgentRequestKind::SignMessage(crate::proto::SignMessageRequest {
                 session_key_id: "x".to_string(),
                 wallet_id: "x".to_string(),
                 message: vec![],
                 auth: None,
             }),
-            KeyAgentRequestKind::SignTypedData(oc_proto::SignTypedDataRequest {
+            KeyAgentRequestKind::SignTypedData(crate::proto::SignTypedDataRequest {
                 session_key_id: "x".to_string(),
                 wallet_id: "x".to_string(),
                 typed_data_json: "x".to_string(),
                 auth: None,
             }),
-            KeyAgentRequestKind::GetPaymentHistory(oc_proto::GetPaymentHistoryRequest {
+            KeyAgentRequestKind::GetPaymentHistory(crate::proto::GetPaymentHistoryRequest {
                 session_key_id: "x".to_string(),
                 since_unix: 0,
                 limit: 0,
             }),
-            KeyAgentRequestKind::GetBalance(oc_proto::GetBalanceRequest {
+            KeyAgentRequestKind::GetBalance(crate::proto::GetBalanceRequest {
                 wallet_id: "x".to_string(),
                 chain_id: "x".to_string(),
             }),
@@ -1049,19 +1053,19 @@ mod tests {
             // the real ~/.onecipher/passkeys.json store, which would pollute
             // the user's passkey registry. It needs an isolated test with a
             // temp-dir store (out of scope for this dispatch smoke test).
-            KeyAgentRequestKind::UnlockVault(oc_proto::UnlockVaultRequest {
+            KeyAgentRequestKind::UnlockVault(crate::proto::UnlockVaultRequest {
                 wallet_id: "x".to_string(),
                 auth: None,
             }),
             // Phase 6 secret variants — R56 returns "not implemented" (no panic).
-            KeyAgentRequestKind::GetSecret(oc_proto::GetSecretRequest {
+            KeyAgentRequestKind::GetSecret(crate::proto::GetSecretRequest {
                 name: "x".to_string(),
                 api_token: "x".to_string(),
             }),
-            KeyAgentRequestKind::ListSecrets(oc_proto::ListSecretsRequest {
+            KeyAgentRequestKind::ListSecrets(crate::proto::ListSecretsRequest {
                 api_token: "x".to_string(),
             }),
-            KeyAgentRequestKind::GenerateTotp(oc_proto::GenerateTotpRequest {
+            KeyAgentRequestKind::GenerateTotp(crate::proto::GenerateTotpRequest {
                 name: "x".to_string(),
                 api_token: "x".to_string(),
             }),

@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use clap::Parser;
-use oc_proto::{
+use oc_keyagent::proto::{
     CreateSessionKeyRequest, CreateSessionKeyResponse, ListSessionKeysResponse, PayX402Request,
     PayX402Response, RevokeSessionKeyRequest, RevokeSessionKeyResponse, SessionKeyInfo,
     SessionKeyStatus,
@@ -42,7 +42,7 @@ impl NetAgentClient for MockNetAgentClient {
         req: RevokeSessionKeyRequest,
     ) -> Result<RevokeSessionKeyResponse, CliError> {
         self.revoke_session_key_requests.lock().unwrap().push(req);
-        Ok((*self.next_revoke_resp.lock().unwrap()).unwrap_or_default())
+        Ok(self.next_revoke_resp.lock().unwrap().clone().unwrap_or_default())
     }
 
     fn list_session_keys(&self) -> Result<ListSessionKeysResponse, CliError> {
@@ -298,7 +298,7 @@ fn test_ocpay_x402_defaults() {
 fn test_ocpay_x402_handles_deny_status() {
     let mock = MockNetAgentClient::default();
     *mock.next_pay_x402_resp.lock().unwrap() = Some(PayX402Response {
-        status: oc_proto::PaymentStatus::Deny as i32,
+        status: oc_keyagent::proto::PaymentStatus::Deny as i32,
         receipt: vec![],
         retry_authorization: String::new(),
         deny_reason: "RATE_LIMIT_MINUTE".to_string(),

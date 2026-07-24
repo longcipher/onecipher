@@ -15,8 +15,10 @@
 //! is simulated by sending an empty / garbage signature with valid challenge
 //! and credential_id — the verifier must still deny with `Forged`.
 
-use oc_keyagent::passkey::{PasskeyError, PasskeyPubkey, PasskeyVerifier};
-use oc_proto::PasskeyAuthorization;
+use oc_keyagent::{
+    passkey::{PasskeyError, PasskeyPubkey, PasskeyVerifier},
+    proto::PasskeyAuthorization,
+};
 // ----------------------------------------------------------------------------
 // Test helpers
 // ----------------------------------------------------------------------------

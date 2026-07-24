@@ -308,7 +308,7 @@ async fn tree_no_forbidden_crates(world: &mut ConformanceWorld) {
 }
 
 /// `And the only allowed dependencies are oc-crypto, oc-core, oc-signer,
-/// oc-policy, oc-session-key, oc-vault, oc-proto, and prost`.
+/// oc-policy, oc-session-key, oc-vault, and prost`.
 ///
 /// Per the task note, this step is interpreted as "no forbidden crates"
 /// (already checked by the previous `Then`) PLUS "the expected oc-* crates
@@ -318,7 +318,7 @@ async fn tree_no_forbidden_crates(world: &mut ConformanceWorld) {
 /// side), so we don't assert its presence — the feature file lists it as
 /// "allowed" but not "required".
 #[then(
-    "the only allowed dependencies are oc-crypto, oc-core, oc-signer, oc-policy, oc-session-key, oc-vault, oc-proto, and prost"
+    "the only allowed dependencies are oc-crypto, oc-core, oc-signer, oc-policy, oc-session-key, oc-vault, and prost"
 )]
 async fn tree_has_allowed_crates(_world: &mut ConformanceWorld) {
     let output =
@@ -330,9 +330,7 @@ async fn tree_has_allowed_crates(_world: &mut ConformanceWorld) {
     );
     let tree = String::from_utf8_lossy(&output.stdout);
     // oc-session-key is intentionally omitted (not a dep of oc-keyagent).
-    for allowed in
-        ["oc-crypto", "oc-core", "oc-signer", "oc-policy", "oc-vault", "oc-proto", "prost"]
-    {
+    for allowed in ["oc-crypto", "oc-core", "oc-signer", "oc-policy", "oc-vault", "prost"] {
         assert!(tree.contains(allowed), "cargo tree for oc-keyagent must contain '{allowed}'");
     }
 }

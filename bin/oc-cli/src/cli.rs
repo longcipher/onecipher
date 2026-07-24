@@ -891,9 +891,7 @@ pub(crate) enum CliError {
     Migration(#[from] oc_secret::migrate::MigrationError),
     #[error("{0}")]
     InvalidArgs(String),
-    #[error(
-        "Network-Agent not yet available (Phase D T17-T21 will implement ConnectRPC transport)"
-    )]
+    #[error("Network-Agent not available (Key-Agent daemon not reachable via UDS)")]
     NetAgentUnavailable,
     #[error("daemon init failed: {0}")]
     DaemonInit(String),

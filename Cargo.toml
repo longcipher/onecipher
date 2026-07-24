@@ -10,7 +10,6 @@ members = [
     "crates/oc-netagent",
     "crates/oc-pay",
     "crates/oc-policy",
-    "crates/oc-proto",
     "crates/oc-secret",
     "crates/oc-session-key",
     "crates/oc-signer",
@@ -36,7 +35,6 @@ oc-keyagent = { path = "crates/oc-keyagent" }
 oc-netagent = { path = "crates/oc-netagent" }
 oc-pay = { path = "crates/oc-pay" }
 oc-policy = { path = "crates/oc-policy" }
-oc-proto = { path = "crates/oc-proto" }
 oc-secret = { path = "crates/oc-secret" }
 oc-session-key = { path = "crates/oc-session-key" }
 oc-signer = { path = "crates/oc-signer" }
@@ -82,7 +80,6 @@ ml-dsa = "0.1.1"
 p256 = "0.14.0"
 proptest = "1.11.0"
 prost = "0.14.4"
-prost-build = "0.14.4"
 rand = "0.10.2"
 ratatui = "0.30.2"
 ripemd = "0.2.0"

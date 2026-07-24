@@ -59,8 +59,8 @@ fn main() {
     }
 
     // Try the Key-Agent daemon first; fall back to the stub client if the
-    // daemon is not reachable. Phase D (T17-T21) will add a real ConnectRPC
-    // transport to the Network-Agent.
+    // daemon is not reachable. The daemon hosts the Network-Agent (WC v2
+    // wallet-role server) and forwards requests to the Key-Agent over UDS.
     let client: Box<dyn netagent::NetAgentClient> =
         match netagent::UdsKeyAgentClient::connect_default() {
             Ok(c) => Box::new(c),

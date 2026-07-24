@@ -16,7 +16,6 @@ hex = { workspace = true }
 hpx = { workspace = true }
 oc-intent = { workspace = true }
 oc-keyagent = { workspace = true }
-oc-proto = { workspace = true }
 oc-walletconnect = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }

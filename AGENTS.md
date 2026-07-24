@@ -23,7 +23,7 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 │   ├── oc-netagent/        # Network-Agent lib (tokio + WalletConnect v2)
 │   ├── oc-pay/             # Payment primitives (x402 + MPP settlers)
 │   ├── oc-policy/          # Policy Engine v2/v3 (11-step evaluation)
-│   ├── oc-proto/           # prost proto definitions (AgentService IPC)
+│   ├── oc-secret/          # Secret vault (age-encrypted secrets + TOTP)
 │   ├── oc-session-key/     # Multi-chain SessionKeyProvider (EVM/Solana)
 │   ├── oc-signer/          # Multi-chain signing
 │   ├── oc-vault/           # Wallet vault (filesystem 700/600, .ocbk backup)
@@ -168,7 +168,8 @@ just setup     # install dev tools (cargo-sort, nightly toolchain)
    - Application/CLI layer: `eyre` (currently `oc-cli` uses `thiserror`).
 2. **Concurrency:**
    - Key-Agent: sync `std::thread` + `std::os::unix::net` (R55 — NO tokio).
-   - Network-Agent: `tokio` + `tonic` (ConnectRPC over UDS).
+   - Network-Agent: `tokio` + WalletConnect v2 (WSS relay) + async UDS to
+     Key-Agent (length-prefixed prost frames — see `oc_keyagent::frame`).
    - Prefer lock-free patterns where possible; `Mutex` is acceptable for
      low-contention state.
 3. **Safety:**

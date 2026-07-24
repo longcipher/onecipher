@@ -1,7 +1,9 @@
 //! Length-prefixed prost frame encoding for UDS IPC.
 //!
 //! Frame format: 4-byte big-endian length prefix + prost-encoded payload.
-//! This is the standard ConnectRPC/gRPC wire format (without compression).
+//! This mirrors the gRPC/ConnectRPC wire format (without compression) — purely
+//! a length-prefixed prost frame, used over UDS between Key-Agent and
+//! Network-Agent. No gRPC/tonic runtime is involved.
 //!
 //! A clean client disconnect (EOF at the start of a length prefix) is
 //! reported as [`FrameError::Eof`] so callers can distinguish "client went

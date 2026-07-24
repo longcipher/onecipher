@@ -18,7 +18,6 @@ oc-core = { workspace = true }
 oc-crypto = { workspace = true }
 oc-keyagent = { workspace = true }
 oc-policy = { workspace = true }
-oc-proto = { workspace = true }
 oc-session-key = { workspace = true }
 oc-signer = { workspace = true }
 oc-vault = { workspace = true, features = ["test-utils"] }

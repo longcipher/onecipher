@@ -29,8 +29,8 @@ const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 /// Async client for the Key-Agent over UDS.
 ///
 /// Stateless — each [`send`] call opens a new connection. The socket path is
-/// stored as a `String` so `KeyAgentClient` is `Clone` (which `NetAgent`
-/// requires to satisfy `tonic::transport::Server::add_service` bounds).
+/// stored as a `String` so `KeyAgentClient` is `Clone` (the WC method router
+/// may be invoked from multiple tokio tasks).
 #[derive(Clone)]
 pub struct KeyAgentClient {
     sock_path: String,
@@ -98,8 +98,7 @@ impl KeyAgentClient {
 
 #[cfg(test)]
 mod tests {
-    use oc_keyagent::{KeyAgentRequest, KeyAgentRequestKind};
-    use oc_proto::Empty;
+    use oc_keyagent::{KeyAgentRequest, KeyAgentRequestKind, proto::Empty};
     use tokio::net::UnixListener;
 
     use super::*;

@@ -12,7 +12,7 @@ name = "oc_keyagent"
 path = "src/lib.rs"
 
 [dependencies]
-# T11 scaffolding: oc-proto (request/response wire types) + prost (Message) + thiserror (errors).
+# T11 scaffolding: prost (Message wire codec) + thiserror (errors).
 # T13 (memory hardening): oc-crypto (HardenedBytes) + oc-vault (Vault::decrypt) + oc-signer (Mnemonic, HdDeriver).
 # T14 (audit): serde + sha2 + ed25519-dalek + hex + jiff (chain hash + signatures).
 # T15 (passkey): p256 + ed25519-dalek + rand (P-256/Ed25519 verify + OsRng).
@@ -23,7 +23,6 @@ jiff = { workspace = true }
 oc-core = { workspace = true }
 oc-crypto = { workspace = true }
 oc-policy = { workspace = true }
-oc-proto = { workspace = true }
 oc-signer = { workspace = true }
 oc-vault = { workspace = true }
 oc-wallet = { workspace = true, default-features = false }
@@ -37,6 +36,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 # R56: NO tokio, NO reqwest, NO hyper, NO async-std, NO smol — even as dev-deps.
 # tracing is a pure log facade (no I/O, no async runtime) — R56-safe.
+# IPC wire types live in `src/proto.rs` (replaces the former `oc-proto` crate).
 
 # T12 sandbox: Linux-only libc dep for seccomp/prctl/capset syscalls.
 # Target-specific so the dep doesn't even resolve on macOS / Windows.

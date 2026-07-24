@@ -26,9 +26,10 @@
 
 use cucumber::{given, then, when};
 use ed25519_dalek::{Signer, SigningKey};
-use oc_keyagent::{EventType, PasskeyError, PasskeyPubkey, PasskeyVerifier};
+use oc_keyagent::{
+    EventType, PasskeyError, PasskeyPubkey, PasskeyVerifier, proto::PasskeyAuthorization,
+};
 use oc_policy::DenyReason;
-use oc_proto::PasskeyAuthorization;
 use tempfile::tempdir;
 
 use crate::ConformanceWorld;
@@ -521,7 +522,7 @@ async fn ui_sends_boolean_without_signature(world: &mut ConformanceWorld) {
 /// `credential_id` (string). There is NO boolean field on the proto message.
 /// The Key-Agent cannot consult a UI boolean because none is transmitted.
 /// This is a structural property verified by the type definition in
-/// `oc-proto/src/lib.rs` (R31 / C-05).
+/// `oc-keyagent/src/proto.rs` (R31 / C-05).
 #[then("the Key-Agent ignores the boolean field entirely")]
 async fn then_ignores_boolean_field(world: &mut ConformanceWorld) {
     // The verify call in the When step returned Forged — proving the

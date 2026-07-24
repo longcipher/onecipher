@@ -146,12 +146,12 @@ pub fn handle_conn(stream: UnixStream) -> Result<(), KeyAgentError> {
 mod tests {
     use std::{os::unix::net::UnixStream, thread};
 
-    use oc_proto::{Empty, PayX402Request};
     use prost::Message;
 
     use super::*;
     use crate::{
         frame::{read_frame, write_frame},
+        proto::{Empty, PayX402Request},
         request::{KeyAgentRequest, KeyAgentRequestKind},
         response::{KeyAgentResponse, KeyAgentResponseKind},
     };

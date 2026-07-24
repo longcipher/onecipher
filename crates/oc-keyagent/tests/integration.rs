@@ -14,10 +14,10 @@ use oc_keyagent::{
     KeyAgentError,
     frame::{read_frame, write_frame},
     handle_conn,
+    proto::{Empty, PayX402Request},
     request::{KeyAgentRequest, KeyAgentRequestKind},
     response::{KeyAgentResponse, KeyAgentResponseKind},
 };
-use oc_proto::{Empty, PayX402Request};
 use proptest::prelude::*;
 use prost::Message;
 
@@ -178,18 +178,22 @@ fn test_all_request_variants_dispatch() {
     // One of each variant (field values are dummy — handlers are stubs).
     let requests: Vec<KeyAgentRequest> = vec![
         KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::CreateSessionKey(oc_proto::CreateSessionKeyRequest {
-                label: "x".into(),
-                rules: None,
-                budget: None,
-                auth: None,
-            })),
+            kind: Some(KeyAgentRequestKind::CreateSessionKey(
+                oc_keyagent::proto::CreateSessionKeyRequest {
+                    label: "x".into(),
+                    rules: None,
+                    budget: None,
+                    auth: None,
+                },
+            )),
         },
         KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::RevokeSessionKey(oc_proto::RevokeSessionKeyRequest {
-                session_key_id: "x".into(),
-                auth: None,
-            })),
+            kind: Some(KeyAgentRequestKind::RevokeSessionKey(
+                oc_keyagent::proto::RevokeSessionKeyRequest {
+                    session_key_id: "x".into(),
+                    auth: None,
+                },
+            )),
         },
         KeyAgentRequest {
             kind: Some(KeyAgentRequestKind::PayX402(PayX402Request {
@@ -202,16 +206,18 @@ fn test_all_request_variants_dispatch() {
             })),
         },
         KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::SignTransaction(oc_proto::SignTransactionRequest {
-                session_key_id: "x".into(),
-                wallet_id: "x".into(),
-                chain_id: "x".into(),
-                raw_tx_hex: "x".into(),
-                auth: None,
-            })),
+            kind: Some(KeyAgentRequestKind::SignTransaction(
+                oc_keyagent::proto::SignTransactionRequest {
+                    session_key_id: "x".into(),
+                    wallet_id: "x".into(),
+                    chain_id: "x".into(),
+                    raw_tx_hex: "x".into(),
+                    auth: None,
+                },
+            )),
         },
         KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::SignUserOp(oc_proto::SignUserOpRequest {
+            kind: Some(KeyAgentRequestKind::SignUserOp(oc_keyagent::proto::SignUserOpRequest {
                 session_key_id: "x".into(),
                 wallet_id: "x".into(),
                 chain_id: "x".into(),
@@ -220,7 +226,7 @@ fn test_all_request_variants_dispatch() {
             })),
         },
         KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::SignMessage(oc_proto::SignMessageRequest {
+            kind: Some(KeyAgentRequestKind::SignMessage(oc_keyagent::proto::SignMessageRequest {
                 session_key_id: "x".into(),
                 wallet_id: "x".into(),
                 message: vec![],
@@ -228,16 +234,18 @@ fn test_all_request_variants_dispatch() {
             })),
         },
         KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::SignTypedData(oc_proto::SignTypedDataRequest {
-                session_key_id: "x".into(),
-                wallet_id: "x".into(),
-                typed_data_json: "x".into(),
-                auth: None,
-            })),
+            kind: Some(KeyAgentRequestKind::SignTypedData(
+                oc_keyagent::proto::SignTypedDataRequest {
+                    session_key_id: "x".into(),
+                    wallet_id: "x".into(),
+                    typed_data_json: "x".into(),
+                    auth: None,
+                },
+            )),
         },
         KeyAgentRequest {
             kind: Some(KeyAgentRequestKind::GetPaymentHistory(
-                oc_proto::GetPaymentHistoryRequest {
+                oc_keyagent::proto::GetPaymentHistoryRequest {
                     session_key_id: "x".into(),
                     since_unix: 0,
                     limit: 10,
@@ -245,7 +253,7 @@ fn test_all_request_variants_dispatch() {
             )),
         },
         KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::GetBalance(oc_proto::GetBalanceRequest {
+            kind: Some(KeyAgentRequestKind::GetBalance(oc_keyagent::proto::GetBalanceRequest {
                 wallet_id: "x".into(),
                 chain_id: "x".into(),
             })),

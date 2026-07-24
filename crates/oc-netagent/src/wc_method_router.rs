@@ -5,11 +5,13 @@
 //! variant, forwarded to the Key-Agent via UDS, and the response is translated
 //! back to a JSON value (or a JSON-RPC error code).
 
-use oc_keyagent::{KeyAgentRequest, KeyAgentRequestKind, KeyAgentResponse, KeyAgentResponseKind};
-use oc_proto::{
-    GenerateChallengeRequest, GetBalanceRequest, ListWalletsResponse, PasskeyAuthorization,
-    PayX402Request, SignMessageRequest, SignTransactionRequest, SignTypedDataRequest,
-    SignUserOpRequest,
+use oc_keyagent::{
+    KeyAgentRequest, KeyAgentRequestKind, KeyAgentResponse, KeyAgentResponseKind,
+    proto::{
+        GenerateChallengeRequest, GetBalanceRequest, ListWalletsResponse, PasskeyAuthorization,
+        PayX402Request, SignMessageRequest, SignTransactionRequest, SignTypedDataRequest,
+        SignUserOpRequest,
+    },
 };
 use oc_walletconnect::{
     WalletMethodHandler, jsonrpc::JsonRpcErrorCode, wallet_server::HandlerResult,
@@ -84,18 +86,26 @@ impl WcMethodRouter {
         match resp.kind {
             Some(KeyAgentResponseKind::Ok(b)) => Ok(b),
             Some(KeyAgentResponseKind::Deny(d)) => {
-                let code = match oc_proto::DenyReason::try_from(d.reason)
-                    .unwrap_or(oc_proto::DenyReason::Unknown)
+                let code = match oc_keyagent::proto::DenyReason::try_from(d.reason)
+                    .unwrap_or(oc_keyagent::proto::DenyReason::Unknown)
                 {
-                    oc_proto::DenyReason::RateLimitMinute => JsonRpcErrorCode::PolicyRateLimit,
-                    oc_proto::DenyReason::RateLimitHour => JsonRpcErrorCode::PolicyRateLimit,
-                    oc_proto::DenyReason::BudgetExceeded => JsonRpcErrorCode::PolicyBudgetExceeded,
-                    oc_proto::DenyReason::Whitelist => JsonRpcErrorCode::PolicyWhitelist,
-                    oc_proto::DenyReason::Expired => JsonRpcErrorCode::PolicyExpired,
-                    oc_proto::DenyReason::PasskeyForged => JsonRpcErrorCode::Unauthorized,
-                    oc_proto::DenyReason::PolicyMissing => JsonRpcErrorCode::PolicyMissing,
-                    oc_proto::DenyReason::Cooldown => JsonRpcErrorCode::PolicyCooldown,
-                    oc_proto::DenyReason::Unknown => JsonRpcErrorCode::Internal,
+                    oc_keyagent::proto::DenyReason::RateLimitMinute => {
+                        JsonRpcErrorCode::PolicyRateLimit
+                    }
+                    oc_keyagent::proto::DenyReason::RateLimitHour => {
+                        JsonRpcErrorCode::PolicyRateLimit
+                    }
+                    oc_keyagent::proto::DenyReason::BudgetExceeded => {
+                        JsonRpcErrorCode::PolicyBudgetExceeded
+                    }
+                    oc_keyagent::proto::DenyReason::Whitelist => JsonRpcErrorCode::PolicyWhitelist,
+                    oc_keyagent::proto::DenyReason::Expired => JsonRpcErrorCode::PolicyExpired,
+                    oc_keyagent::proto::DenyReason::PasskeyForged => JsonRpcErrorCode::Unauthorized,
+                    oc_keyagent::proto::DenyReason::PolicyMissing => {
+                        JsonRpcErrorCode::PolicyMissing
+                    }
+                    oc_keyagent::proto::DenyReason::Cooldown => JsonRpcErrorCode::PolicyCooldown,
+                    oc_keyagent::proto::DenyReason::Unknown => JsonRpcErrorCode::Internal,
                 };
                 Err((code, "policy denied".into()))
             }
@@ -116,8 +126,9 @@ impl WalletMethodHandler for WcMethodRouter {
         Box::pin(async move {
             match method.as_str() {
                 "onecipher_listWallets" => {
-                    let bytes =
-                        self.forward(KeyAgentRequestKind::ListWallets(oc_proto::Empty {})).await?;
+                    let bytes = self
+                        .forward(KeyAgentRequestKind::ListWallets(oc_keyagent::proto::Empty {}))
+                        .await?;
                     let resp: ListWalletsResponse = Message::decode(bytes.as_slice())
                         .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
                     let wallets: Vec<Value> = resp.wallets.iter().map(|w| {
@@ -173,8 +184,9 @@ impl WalletMethodHandler for WcMethodRouter {
                         auth: Some(auth),
                     };
                     let bytes = self.forward(KeyAgentRequestKind::SignTransaction(req)).await?;
-                    let resp: oc_proto::SignTransactionResponse = Message::decode(bytes.as_slice())
-                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    let resp: oc_keyagent::proto::SignTransactionResponse =
+                        Message::decode(bytes.as_slice())
+                            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
                     Ok(json!({"signature": resp.signature, "signed_tx_hex": resp.signed_tx_hex}))
                 }
 
@@ -206,8 +218,9 @@ impl WalletMethodHandler for WcMethodRouter {
                     let req =
                         SignMessageRequest { session_key_id, wallet_id, message, auth: Some(auth) };
                     let bytes = self.forward(KeyAgentRequestKind::SignMessage(req)).await?;
-                    let resp: oc_proto::SignMessageResponse = Message::decode(bytes.as_slice())
-                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    let resp: oc_keyagent::proto::SignMessageResponse =
+                        Message::decode(bytes.as_slice())
+                            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
                     Ok(json!({"signature": resp.signature}))
                 }
 
@@ -242,7 +255,7 @@ impl WalletMethodHandler for WcMethodRouter {
                         auth: Some(auth),
                     };
                     let bytes = self.forward(KeyAgentRequestKind::SignTypedData(req)).await?;
-                    let resp: oc_proto::SignTypedDataResponse =
+                    let resp: oc_keyagent::proto::SignTypedDataResponse =
                         Message::decode(bytes.as_slice())
                             .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
                     Ok(json!({"signature": resp.signature}))
@@ -287,8 +300,9 @@ impl WalletMethodHandler for WcMethodRouter {
                         auth: Some(auth),
                     };
                     let bytes = self.forward(KeyAgentRequestKind::SignUserOp(req)).await?;
-                    let resp: oc_proto::SignUserOpResponse = Message::decode(bytes.as_slice())
-                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    let resp: oc_keyagent::proto::SignUserOpResponse =
+                        Message::decode(bytes.as_slice())
+                            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
                     Ok(
                         json!({"signature": resp.signature, "signed_user_op_hex": resp.signed_user_op_hex}),
                     )
@@ -307,7 +321,7 @@ impl WalletMethodHandler for WcMethodRouter {
                         .to_string();
                     let req = GenerateChallengeRequest { credential_id };
                     let bytes = self.forward(KeyAgentRequestKind::GenerateChallenge(req)).await?;
-                    let resp: oc_proto::GenerateChallengeResponse =
+                    let resp: oc_keyagent::proto::GenerateChallengeResponse =
                         Message::decode(bytes.as_slice())
                             .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
                     Ok(json!({"challenge_hex": hex::encode(&resp.challenge)}))
@@ -330,8 +344,9 @@ impl WalletMethodHandler for WcMethodRouter {
                         .to_string();
                     let req = GetBalanceRequest { wallet_id, chain_id };
                     let bytes = self.forward(KeyAgentRequestKind::GetBalance(req)).await?;
-                    let resp: oc_proto::BalanceResponse = Message::decode(bytes.as_slice())
-                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    let resp: oc_keyagent::proto::BalanceResponse =
+                        Message::decode(bytes.as_slice())
+                            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
                     Ok(
                         json!({"wallet_id": resp.wallet_id, "chain_id": resp.chain_id, "balance": resp.balance, "decimals": resp.decimals, "symbol": resp.symbol}),
                     )
@@ -370,8 +385,9 @@ impl WalletMethodHandler for WcMethodRouter {
                         ..Default::default()
                     };
                     let bytes = self.forward(KeyAgentRequestKind::PayX402(req)).await?;
-                    let resp: oc_proto::PayX402Response = Message::decode(bytes.as_slice())
-                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    let resp: oc_keyagent::proto::PayX402Response =
+                        Message::decode(bytes.as_slice())
+                            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
                     Ok(
                         json!({"status": resp.status, "receipt": resp.receipt, "retry_authorization": resp.retry_authorization, "deny_reason": resp.deny_reason, "error": resp.error}),
                     )
