@@ -27,19 +27,23 @@
 pub mod error;
 pub mod evm;
 pub mod mpp;
+pub mod paymaster;
 pub mod settler;
 pub mod solana;
 pub mod tempo;
 pub mod types;
 pub mod x402;
 
-pub use async_trait::async_trait;
 pub use error::PayError;
 pub use evm::{BundlerClient, EvmSettler, PaymasterClient};
 pub use mpp::{MppChunk, MppStreamHandle, PayMpp};
 // Re-export the bits of `oc-session-key` that callers of `PaymentSettler`
 // commonly need — they appear in the trait signature (`payer: &SessionKey`).
 pub use oc_session_key::{KeyScheme, PublicKey, SessionPrivateKey};
+pub use paymaster::{
+    PaymasterClient as PaymasterService, PaymasterError, SponsorMode, SponsorStrategy,
+    SponsoredUserOp, UserOperation, UserOperationBuilder,
+};
 // Re-export `Decimal` so downstream callers don't have to depend on
 // `rust_decimal` directly just to spell the amount type.
 pub use rust_decimal::Decimal;
@@ -50,4 +54,13 @@ pub use types::{Caip19Asset, ChannelId, ChannelState, PaymentReceipt, PaymentSch
 pub use x402::{
     ExactPlusUserOpScheme, ExactScheme, FacilitatorRequest, FacilitatorResponse,
     PaymentRequirements, X402Scheme,
+};
+
+#[cfg(feature = "http")]
+pub mod http;
+
+#[cfg(feature = "http")]
+pub use http::{
+    Account as HttpAccount, DiscoverResult, OcPayHttpError, OcPayHttpErrorCode,
+    PayResult as HttpPayResult, PaymentInfo, Protocol, Service, WalletAccess, discover, pay,
 };

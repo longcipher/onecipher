@@ -5,7 +5,8 @@
 //! serialized policy — see Deviation Note) and a simplified mock ABI encoding.
 //! Real Merkle tree + ABI encoding lives in `oc-netagent` (Phase D, R74 YAGNI).
 
-use async_trait::async_trait;
+use std::{future::Future, pin::Pin};
+
 use oc_policy::PolicyV2;
 use oc_signer::{chains::EvmSigner, traits::ChainSigner};
 use sha2::{Digest, Sha256};
@@ -79,89 +80,108 @@ impl EvmSessionKeyProvider {
     }
 }
 
-#[async_trait]
 impl SessionKeyProvider for EvmSessionKeyProvider {
     fn chain_id(&self) -> &str {
         &self.chain_id
     }
 
-    async fn grant(
+    fn grant(
         &self,
         owner_key: &OwnerKey,
         session_pubkey: &PublicKey,
         policy: &PolicyV2,
-    ) -> Result<GrantReceipt, SessionKeyError> {
+    ) -> Pin<Box<dyn Future<Output = Result<GrantReceipt, SessionKeyError>> + Send + '_>> {
         if owner_key.chain_id != self.chain_id {
-            return Err(SessionKeyError::ChainMismatch {
-                expected: self.chain_id.clone(),
-                actual: owner_key.chain_id.clone(),
-            });
+            let (expected, actual) = (self.chain_id.clone(), owner_key.chain_id.clone());
+            return Box::pin(async { Err(SessionKeyError::ChainMismatch { expected, actual }) });
         }
-        let merkle_root = Self::compute_merkle_root(policy)?;
+        let merkle_root = match Self::compute_merkle_root(policy) {
+            Ok(r) => r,
+            Err(e) => return Box::pin(async { Err(e) }),
+        };
         let calldata = Self::encode_grant_permission(
             session_pubkey.bytes.as_slice(),
             &merkle_root,
             policy.rules.expiry_unix,
         );
-        let tx_hash = self.rpc.send_evm_tx(&self.sca_address, &calldata).await?;
-        Ok(GrantReceipt::Evm { tx_hash, merkle_root, sca_address: self.sca_address.clone() })
+        let sca = self.sca_address.clone();
+        let rpc = &self.rpc;
+        Box::pin(async move {
+            let tx_hash = rpc.send_evm_tx(&sca, &calldata).await?;
+            Ok(GrantReceipt::Evm { tx_hash, merkle_root, sca_address: sca })
+        })
     }
 
-    async fn verify_active(&self, session_key_id: &str) -> Result<bool, SessionKeyError> {
-        // Call SCA's isPermissionGranted(bytes32) view function.
-        // Mock: returns 0x01 (true) or 0x00 (false).
+    fn verify_active(
+        &self,
+        session_key_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, SessionKeyError>> + Send + '_>> {
         let calldata = Self::encode_is_permission_granted(session_key_id);
-        let result = self.rpc.call_evm_view(&self.sca_address, &calldata).await?;
-        Ok(!result.is_empty() && result[0] != 0)
+        let sca = self.sca_address.clone();
+        let rpc = &self.rpc;
+        Box::pin(async move {
+            let result = rpc.call_evm_view(&sca, &calldata).await?;
+            Ok(!result.is_empty() && result[0] != 0)
+        })
     }
 
-    async fn revoke(
+    fn revoke(
         &self,
         owner_key: &OwnerKey,
         session_key_id: &str,
-    ) -> Result<(), SessionKeyError> {
+    ) -> Pin<Box<dyn Future<Output = Result<(), SessionKeyError>> + Send + '_>> {
         if owner_key.chain_id != self.chain_id {
-            return Err(SessionKeyError::ChainMismatch {
-                expected: self.chain_id.clone(),
-                actual: owner_key.chain_id.clone(),
-            });
+            let (expected, actual) = (self.chain_id.clone(), owner_key.chain_id.clone());
+            return Box::pin(async { Err(SessionKeyError::ChainMismatch { expected, actual }) });
         }
         let calldata = Self::encode_revoke_permission(session_key_id);
-        let _ = self.rpc.send_evm_tx(&self.sca_address, &calldata).await?;
-        Ok(())
+        let sca = self.sca_address.clone();
+        let rpc = &self.rpc;
+        Box::pin(async move {
+            let _ = rpc.send_evm_tx(&sca, &calldata).await?;
+            Ok(())
+        })
     }
 
-    async fn sign_with(
+    fn sign_with(
         &self,
         session_priv: &SessionPrivateKey,
         payload: &SignPayload,
-    ) -> Result<Signature, SessionKeyError> {
-        // Signing is local (no RPC); the SCA validates the signature on-chain.
-        // Delegate to oc-signer's EvmSigner (ponytail ladder — reuse, don't re-roll).
+    ) -> Pin<Box<dyn Future<Output = Result<Signature, SessionKeyError>> + Send + '_>> {
         let signer = EvmSigner;
-        let priv_bytes = session_priv.raw.expose();
-        let sig_bytes = match payload {
+        let priv_bytes = session_priv.raw.expose().to_vec();
+        let result = match payload {
             SignPayload::Transaction { raw_hex, .. } => {
                 let raw = hex::decode(raw_hex.trim_start_matches("0x"))
-                    .map_err(|e| SessionKeyError::InvalidPayload(e.to_string()))?;
-                signer
-                    .sign_transaction(priv_bytes, &raw)
-                    .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?
+                    .map_err(|e| SessionKeyError::InvalidPayload(e.to_string()));
+                match raw {
+                    Ok(r) => signer
+                        .sign_transaction(&priv_bytes, &r)
+                        .map(|s| Signature::Evm { hex: format!("0x{}", hex::encode(&s.signature)) })
+                        .map_err(|e| SessionKeyError::SigningFailed(e.to_string())),
+                    Err(e) => Err(e),
+                }
             }
             SignPayload::UserOp { user_op_hex, .. } => {
                 let raw = hex::decode(user_op_hex.trim_start_matches("0x"))
-                    .map_err(|e| SessionKeyError::InvalidPayload(e.to_string()))?;
-                signer
-                    .sign_transaction(priv_bytes, &raw)
-                    .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?
+                    .map_err(|e| SessionKeyError::InvalidPayload(e.to_string()));
+                match raw {
+                    Ok(r) => signer
+                        .sign_transaction(&priv_bytes, &r)
+                        .map(|s| Signature::Evm { hex: format!("0x{}", hex::encode(&s.signature)) })
+                        .map_err(|e| SessionKeyError::SigningFailed(e.to_string())),
+                    Err(e) => Err(e),
+                }
             }
             SignPayload::Message { bytes } => signer
-                .sign_message(priv_bytes, bytes)
-                .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?,
+                .sign_message(&priv_bytes, bytes)
+                .map(|s| Signature::Evm { hex: format!("0x{}", hex::encode(&s.signature)) })
+                .map_err(|e| SessionKeyError::SigningFailed(e.to_string())),
             SignPayload::TypedData { json } => signer
-                .sign_typed_data(priv_bytes, json)
-                .map_err(|e| SessionKeyError::SigningFailed(e.to_string()))?,
+                .sign_typed_data(&priv_bytes, json)
+                .map(|s| Signature::Evm { hex: format!("0x{}", hex::encode(&s.signature)) })
+                .map_err(|e| SessionKeyError::SigningFailed(e.to_string())),
         };
-        Ok(Signature::Evm { hex: format!("0x{}", hex::encode(&sig_bytes.signature)) })
+        Box::pin(async { result })
     }
 }

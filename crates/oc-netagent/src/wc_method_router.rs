@@ -5,14 +5,15 @@
 //! variant, forwarded to the Key-Agent via UDS, and the response is translated
 //! back to a JSON value (or a JSON-RPC error code).
 
-use async_trait::async_trait;
 use oc_keyagent::{KeyAgentRequest, KeyAgentRequestKind, KeyAgentResponse, KeyAgentResponseKind};
 use oc_proto::{
     GenerateChallengeRequest, GetBalanceRequest, ListWalletsResponse, PasskeyAuthorization,
     PayX402Request, SignMessageRequest, SignTransactionRequest, SignTypedDataRequest,
     SignUserOpRequest,
 };
-use oc_walletconnect::{WalletMethodHandler, jsonrpc::JsonRpcErrorCode};
+use oc_walletconnect::{
+    WalletMethodHandler, jsonrpc::JsonRpcErrorCode, wallet_server::HandlerResult,
+};
 use prost::Message;
 use serde_json::{Value, json};
 
@@ -104,264 +105,283 @@ impl WcMethodRouter {
     }
 }
 
-#[async_trait]
 impl WalletMethodHandler for WcMethodRouter {
-    async fn handle(
-        &self,
+    fn handle<'a>(
+        &'a self,
         method: &str,
         params: Value,
         _session_topic: &str,
-    ) -> Result<Value, (JsonRpcErrorCode, String)> {
-        match method {
-            "onecipher_listWallets" => {
-                let bytes =
-                    self.forward(KeyAgentRequestKind::ListWallets(oc_proto::Empty {})).await?;
-                let resp: ListWalletsResponse = Message::decode(bytes.as_slice())
-                    .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
-                let wallets: Vec<Value> = resp.wallets.iter().map(|w| {
+    ) -> HandlerResult<'a> {
+        let method = method.to_string();
+        Box::pin(async move {
+            match method.as_str() {
+                "onecipher_listWallets" => {
+                    let bytes =
+                        self.forward(KeyAgentRequestKind::ListWallets(oc_proto::Empty {})).await?;
+                    let resp: ListWalletsResponse = Message::decode(bytes.as_slice())
+                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    let wallets: Vec<Value> = resp.wallets.iter().map(|w| {
                     let accounts: Vec<Value> = w.accounts.iter().map(|a| {
                         json!({"account_id": a.account_id, "address": a.address, "chain_id": a.chain_id, "derivation_path": a.derivation_path})
                     }).collect();
                     json!({"id": w.id, "name": w.name, "key_type": w.key_type, "created_at": w.created_at, "accounts": accounts})
                 }).collect();
-                Ok(json!({"wallets": wallets}))
-            }
+                    Ok(json!({"wallets": wallets}))
+                }
 
-            "eth_sendTransaction" |
-            "eth_signTransaction" |
-            "solana_signTransaction" |
-            "cosmos_signDirect" |
-            "cosmos_signAmino" |
-            "onecipher_signTransaction" => {
-                // P0-2: Passkey gate — signing RPCs require auth.
-                let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
-                    (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
-                })?;
-                let wallet_id = params
-                    .get("wallet_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
-                    })?
-                    .to_string();
-                let chain_id = params
-                    .get("chain_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
-                    })?
-                    .to_string();
-                let raw_tx_hex = params
-                    .get("raw_tx_hex")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing raw_tx_hex".into())
-                    })?
-                    .to_string();
-                let session_key_id =
-                    params.get("session_key_id").and_then(Value::as_str).unwrap_or("").to_string();
-                let req = SignTransactionRequest {
-                    session_key_id,
-                    wallet_id,
-                    chain_id,
-                    raw_tx_hex,
-                    auth: Some(auth),
-                };
-                let bytes = self.forward(KeyAgentRequestKind::SignTransaction(req)).await?;
-                let resp: oc_proto::SignTransactionResponse = Message::decode(bytes.as_slice())
-                    .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
-                Ok(json!({"signature": resp.signature, "signed_tx_hex": resp.signed_tx_hex}))
-            }
-
-            "personal_sign" | "eth_sign" | "solana_signMessage" | "onecipher_signMessage" => {
-                // P0-2: Passkey gate — signing RPCs require auth.
-                let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
-                    (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
-                })?;
-                let wallet_id = params
-                    .get("wallet_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
-                    })?
-                    .to_string();
-                let message = params
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| (JsonRpcErrorCode::UnsupportedMethod, "missing message".into()))?
-                    .as_bytes()
-                    .to_vec();
-                let session_key_id =
-                    params.get("session_key_id").and_then(Value::as_str).unwrap_or("").to_string();
-                let req =
-                    SignMessageRequest { session_key_id, wallet_id, message, auth: Some(auth) };
-                let bytes = self.forward(KeyAgentRequestKind::SignMessage(req)).await?;
-                let resp: oc_proto::SignMessageResponse = Message::decode(bytes.as_slice())
-                    .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
-                Ok(json!({"signature": resp.signature}))
-            }
-
-            "eth_signTypedData_v4" | "onecipher_signTypedData" => {
-                // P0-2: Passkey gate — signing RPCs require auth.
-                let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
-                    (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
-                })?;
-                let wallet_id = params
-                    .get("wallet_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
-                    })?
-                    .to_string();
-                let typed_data_json = params
-                    .get("typed_data_json")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing typed_data_json".into())
-                    })?
-                    .to_string();
-                let session_key_id =
-                    params.get("session_key_id").and_then(Value::as_str).unwrap_or("").to_string();
-                let req = SignTypedDataRequest {
-                    session_key_id,
-                    wallet_id,
-                    typed_data_json,
-                    auth: Some(auth),
-                };
-                let bytes = self.forward(KeyAgentRequestKind::SignTypedData(req)).await?;
-                let resp: oc_proto::SignTypedDataResponse = Message::decode(bytes.as_slice())
-                    .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
-                Ok(json!({"signature": resp.signature}))
-            }
-
-            "onecipher_signUserOp" => {
-                // P0-2: Passkey gate — signing RPCs require auth.
-                let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
-                    (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
-                })?;
-                let wallet_id = params
-                    .get("wallet_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
-                    })?
-                    .to_string();
-                let chain_id = params
-                    .get("chain_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
-                    })?
-                    .to_string();
-                let user_op_hex = params
-                    .get("user_op_hex")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing user_op_hex".into())
-                    })?
-                    .to_string();
-                let session_key_id =
-                    params.get("session_key_id").and_then(Value::as_str).unwrap_or("").to_string();
-                let req = SignUserOpRequest {
-                    session_key_id,
-                    wallet_id,
-                    chain_id,
-                    user_op_hex,
-                    auth: Some(auth),
-                };
-                let bytes = self.forward(KeyAgentRequestKind::SignUserOp(req)).await?;
-                let resp: oc_proto::SignUserOpResponse = Message::decode(bytes.as_slice())
-                    .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
-                Ok(
-                    json!({"signature": resp.signature, "signed_user_op_hex": resp.signed_user_op_hex}),
-                )
-            }
-
-            // P0-2: Challenge issuance RPC. Clients MUST call this before any
-            // Passkey-gated signing RPC to obtain a fresh 32-byte nonce that the
-            // Key-Agent stores in its pending_challenges set.
-            "onecipher_generateChallenge" => {
-                let credential_id = params
-                    .get("credential_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing credential_id".into())
-                    })?
-                    .to_string();
-                let req = GenerateChallengeRequest { credential_id };
-                let bytes = self.forward(KeyAgentRequestKind::GenerateChallenge(req)).await?;
-                let resp: oc_proto::GenerateChallengeResponse =
-                    Message::decode(bytes.as_slice())
+                "eth_sendTransaction" |
+                "eth_signTransaction" |
+                "solana_signTransaction" |
+                "cosmos_signDirect" |
+                "cosmos_signAmino" |
+                "onecipher_signTransaction" => {
+                    // P0-2: Passkey gate — signing RPCs require auth.
+                    let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
+                        (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
+                    })?;
+                    let wallet_id = params
+                        .get("wallet_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
+                        })?
+                        .to_string();
+                    let chain_id = params
+                        .get("chain_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
+                        })?
+                        .to_string();
+                    let raw_tx_hex = params
+                        .get("raw_tx_hex")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing raw_tx_hex".into())
+                        })?
+                        .to_string();
+                    let session_key_id = params
+                        .get("session_key_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let req = SignTransactionRequest {
+                        session_key_id,
+                        wallet_id,
+                        chain_id,
+                        raw_tx_hex,
+                        auth: Some(auth),
+                    };
+                    let bytes = self.forward(KeyAgentRequestKind::SignTransaction(req)).await?;
+                    let resp: oc_proto::SignTransactionResponse = Message::decode(bytes.as_slice())
                         .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
-                Ok(json!({"challenge_hex": hex::encode(&resp.challenge)}))
-            }
+                    Ok(json!({"signature": resp.signature, "signed_tx_hex": resp.signed_tx_hex}))
+                }
 
-            "onecipher_getBalance" => {
-                let wallet_id = params
-                    .get("wallet_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
-                    })?
-                    .to_string();
-                let chain_id = params
-                    .get("chain_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
-                    })?
-                    .to_string();
-                let req = GetBalanceRequest { wallet_id, chain_id };
-                let bytes = self.forward(KeyAgentRequestKind::GetBalance(req)).await?;
-                let resp: oc_proto::BalanceResponse = Message::decode(bytes.as_slice())
-                    .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
-                Ok(
-                    json!({"wallet_id": resp.wallet_id, "chain_id": resp.chain_id, "balance": resp.balance, "decimals": resp.decimals, "symbol": resp.symbol}),
-                )
-            }
+                "personal_sign" | "eth_sign" | "solana_signMessage" | "onecipher_signMessage" => {
+                    // P0-2: Passkey gate — signing RPCs require auth.
+                    let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
+                        (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
+                    })?;
+                    let wallet_id = params
+                        .get("wallet_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
+                        })?
+                        .to_string();
+                    let message = params
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing message".into())
+                        })?
+                        .as_bytes()
+                        .to_vec();
+                    let session_key_id = params
+                        .get("session_key_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let req =
+                        SignMessageRequest { session_key_id, wallet_id, message, auth: Some(auth) };
+                    let bytes = self.forward(KeyAgentRequestKind::SignMessage(req)).await?;
+                    let resp: oc_proto::SignMessageResponse = Message::decode(bytes.as_slice())
+                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    Ok(json!({"signature": resp.signature}))
+                }
 
-            "onecipher_payX402" => {
-                let session_key_id = params
-                    .get("session_key_id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        (JsonRpcErrorCode::UnsupportedMethod, "missing session_key_id".into())
-                    })?
-                    .to_string();
-                let url = params
-                    .get("url")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| (JsonRpcErrorCode::UnsupportedMethod, "missing url".into()))?
-                    .to_string();
-                let method =
-                    params.get("method").and_then(Value::as_str).unwrap_or("GET").to_string();
-                let body = params
-                    .get("body")
-                    .and_then(Value::as_str)
-                    .map(|b| b.as_bytes().to_vec())
-                    .unwrap_or_default();
-                let headers = params
-                    .get("headers")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok())
-                    .unwrap_or_default();
-                let req = PayX402Request {
-                    session_key_id,
-                    url,
-                    method,
-                    body,
-                    headers,
-                    ..Default::default()
-                };
-                let bytes = self.forward(KeyAgentRequestKind::PayX402(req)).await?;
-                let resp: oc_proto::PayX402Response = Message::decode(bytes.as_slice())
-                    .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
-                Ok(
-                    json!({"status": resp.status, "receipt": resp.receipt, "retry_authorization": resp.retry_authorization, "deny_reason": resp.deny_reason, "error": resp.error}),
-                )
-            }
+                "eth_signTypedData_v4" | "onecipher_signTypedData" => {
+                    // P0-2: Passkey gate — signing RPCs require auth.
+                    let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
+                        (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
+                    })?;
+                    let wallet_id = params
+                        .get("wallet_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
+                        })?
+                        .to_string();
+                    let typed_data_json = params
+                        .get("typed_data_json")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing typed_data_json".into())
+                        })?
+                        .to_string();
+                    let session_key_id = params
+                        .get("session_key_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let req = SignTypedDataRequest {
+                        session_key_id,
+                        wallet_id,
+                        typed_data_json,
+                        auth: Some(auth),
+                    };
+                    let bytes = self.forward(KeyAgentRequestKind::SignTypedData(req)).await?;
+                    let resp: oc_proto::SignTypedDataResponse =
+                        Message::decode(bytes.as_slice())
+                            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    Ok(json!({"signature": resp.signature}))
+                }
 
-            _ => Err((JsonRpcErrorCode::UnsupportedMethod, format!("unknown method: {method}"))),
-        }
+                "onecipher_signUserOp" => {
+                    // P0-2: Passkey gate — signing RPCs require auth.
+                    let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
+                        (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
+                    })?;
+                    let wallet_id = params
+                        .get("wallet_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
+                        })?
+                        .to_string();
+                    let chain_id = params
+                        .get("chain_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
+                        })?
+                        .to_string();
+                    let user_op_hex = params
+                        .get("user_op_hex")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing user_op_hex".into())
+                        })?
+                        .to_string();
+                    let session_key_id = params
+                        .get("session_key_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let req = SignUserOpRequest {
+                        session_key_id,
+                        wallet_id,
+                        chain_id,
+                        user_op_hex,
+                        auth: Some(auth),
+                    };
+                    let bytes = self.forward(KeyAgentRequestKind::SignUserOp(req)).await?;
+                    let resp: oc_proto::SignUserOpResponse = Message::decode(bytes.as_slice())
+                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    Ok(
+                        json!({"signature": resp.signature, "signed_user_op_hex": resp.signed_user_op_hex}),
+                    )
+                }
+
+                // P0-2: Challenge issuance RPC. Clients MUST call this before any
+                // Passkey-gated signing RPC to obtain a fresh 32-byte nonce that the
+                // Key-Agent stores in its pending_challenges set.
+                "onecipher_generateChallenge" => {
+                    let credential_id = params
+                        .get("credential_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing credential_id".into())
+                        })?
+                        .to_string();
+                    let req = GenerateChallengeRequest { credential_id };
+                    let bytes = self.forward(KeyAgentRequestKind::GenerateChallenge(req)).await?;
+                    let resp: oc_proto::GenerateChallengeResponse =
+                        Message::decode(bytes.as_slice())
+                            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    Ok(json!({"challenge_hex": hex::encode(&resp.challenge)}))
+                }
+
+                "onecipher_getBalance" => {
+                    let wallet_id = params
+                        .get("wallet_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
+                        })?
+                        .to_string();
+                    let chain_id = params
+                        .get("chain_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
+                        })?
+                        .to_string();
+                    let req = GetBalanceRequest { wallet_id, chain_id };
+                    let bytes = self.forward(KeyAgentRequestKind::GetBalance(req)).await?;
+                    let resp: oc_proto::BalanceResponse = Message::decode(bytes.as_slice())
+                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    Ok(
+                        json!({"wallet_id": resp.wallet_id, "chain_id": resp.chain_id, "balance": resp.balance, "decimals": resp.decimals, "symbol": resp.symbol}),
+                    )
+                }
+
+                "onecipher_payX402" => {
+                    let session_key_id = params
+                        .get("session_key_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing session_key_id".into())
+                        })?
+                        .to_string();
+                    let url = params
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| (JsonRpcErrorCode::UnsupportedMethod, "missing url".into()))?
+                        .to_string();
+                    let method =
+                        params.get("method").and_then(Value::as_str).unwrap_or("GET").to_string();
+                    let body = params
+                        .get("body")
+                        .and_then(Value::as_str)
+                        .map(|b| b.as_bytes().to_vec())
+                        .unwrap_or_default();
+                    let headers = params
+                        .get("headers")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    let req = PayX402Request {
+                        session_key_id,
+                        url,
+                        method,
+                        body,
+                        headers,
+                        ..Default::default()
+                    };
+                    let bytes = self.forward(KeyAgentRequestKind::PayX402(req)).await?;
+                    let resp: oc_proto::PayX402Response = Message::decode(bytes.as_slice())
+                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    Ok(
+                        json!({"status": resp.status, "receipt": resp.receipt, "retry_authorization": resp.retry_authorization, "deny_reason": resp.deny_reason, "error": resp.error}),
+                    )
+                }
+
+                _ => {
+                    Err((JsonRpcErrorCode::UnsupportedMethod, format!("unknown method: {method}")))
+                }
+            }
+        })
     }
 }
 

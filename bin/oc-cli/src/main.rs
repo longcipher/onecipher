@@ -334,7 +334,7 @@ fn run_daemon() -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::PermissionsExt;
 
     eprintln!("onecipher daemon starting...");
-    let engine = oc_signing_core::SigningEngine::open_default()?;
+    let engine = oc_keyagent::SigningEngine::open_default()?;
     let state_dir = engine.state_dir().to_path_buf();
     eprintln!("signing engine opened at {}", state_dir.display());
 

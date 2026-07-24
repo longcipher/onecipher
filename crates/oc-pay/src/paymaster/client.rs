@@ -1,6 +1,6 @@
 /// How gas should be sponsored for a UserOp.
-pub use crate::sponsor::SponsorStrategy as SponsorMode;
-use crate::{error::PaymasterError, sponsor::SponsorStrategy, user_op::UserOperation};
+pub use crate::paymaster::sponsor::SponsorStrategy as SponsorMode;
+use crate::paymaster::{error::PaymasterError, sponsor::SponsorStrategy, user_op::UserOperation};
 
 /// A UserOp that has been sponsored and submitted to the bundler.
 #[derive(Debug, Clone)]
@@ -66,7 +66,6 @@ impl PaymasterClient {
 
     /// Request paymaster sponsorship (mock — returns a dummy paymasterAndData).
     // Async signature preserved for future HTTP integration (Stage 3).
-    #[allow(clippy::unused_async_trait_impl)]
     async fn request_sponsorship(
         &self,
         _user_op: &UserOperation,
@@ -87,7 +86,6 @@ impl PaymasterClient {
 
     /// Submit a UserOp to the bundler (mock — returns a dummy tx hash).
     // Async signature preserved for future HTTP integration (Stage 3).
-    #[allow(clippy::unused_async_trait_impl)]
     async fn submit_to_bundler(&self, _user_op: &UserOperation) -> Result<String, PaymasterError> {
         // Mock: return a dummy tx hash
         Ok(format!("0x{}", "0".repeat(64)))

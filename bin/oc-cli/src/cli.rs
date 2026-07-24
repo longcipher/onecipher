@@ -869,7 +869,7 @@ pub(crate) enum CliError {
     #[error("{0}")]
     Json(#[from] serde_json::Error),
     #[error("{0}")]
-    Pay(#[from] oc_pay_http::OcPayHttpError),
+    Pay(#[from] oc_pay::http::OcPayHttpError),
     #[cfg(feature = "git")]
     #[error("git error: {0}")]
     Git(#[from] oc_secret::git::GitError),

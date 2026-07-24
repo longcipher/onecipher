@@ -9,6 +9,7 @@
 #![deny(unsafe_code)]
 
 pub mod audit;
+pub mod engine;
 pub mod error;
 pub mod frame;
 pub mod handler;
@@ -19,17 +20,22 @@ pub mod request;
 pub mod response;
 pub mod sandbox;
 pub mod server;
+pub mod signing_core_error;
 
 pub use audit::{AuditEntry, AuditError, AuditLog, EventType};
+pub use engine::{SignRequest, SignResult, SigningEngine};
 pub use error::KeyAgentError;
 pub use frame::{FrameClient, FrameClientError, FrameError, read_frame, write_frame};
 pub use key_ops::{decrypt_mnemonic, derive_chain_key};
+// Re-export key types for convenience (formerly in oc-signing-core).
+pub use oc_core::{Passphrase, UnlockToken, WalletId};
 pub use passkey::{PasskeyError, PasskeyPubkey, PasskeyVerifier};
 pub use policy_integration::PolicyIntegration;
 pub use request::{KeyAgentRequest, KeyAgentRequestKind};
 pub use response::{KeyAgentResponse, KeyAgentResponseKind};
 pub use sandbox::apply_sandbox;
 pub use server::{handle_conn, run};
+pub use signing_core_error::SigningCoreError;
 
 /// Type alias for the process-wide key cache.
 ///

@@ -1,6 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
 
-use crate::{
+use super::{
     chains,
     error::{OcPayHttpError, OcPayHttpErrorCode},
     types::{
@@ -161,7 +161,7 @@ fn build_evm_exact(
         })
     };
 
-    let amount_display = crate::discovery::format_usdc(&req.amount);
+    let amount_display = super::discovery::format_usdc(&req.amount);
     let payment_info = PaymentInfo {
         amount: amount_display,
         network: chains::display_name(network).to_string(),
@@ -790,8 +790,8 @@ mod tests {
         fn supported_chains(&self) -> Vec<ChainType> {
             vec![ChainType::Evm]
         }
-        fn account(&self, _network: &str) -> Result<crate::wallet::Account, OcPayHttpError> {
-            Ok(crate::wallet::Account {
+        fn account(&self, _network: &str) -> Result<super::super::wallet::Account, OcPayHttpError> {
+            Ok(super::super::wallet::Account {
                 address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".into(),
             })
         }
@@ -810,8 +810,8 @@ mod tests {
         fn supported_chains(&self) -> Vec<ChainType> {
             vec![ChainType::Solana]
         }
-        fn account(&self, _network: &str) -> Result<crate::wallet::Account, OcPayHttpError> {
-            Ok(crate::wallet::Account {
+        fn account(&self, _network: &str) -> Result<super::super::wallet::Account, OcPayHttpError> {
+            Ok(super::super::wallet::Account {
                 address: "So11111111111111111111111111111111111111112".into(),
             })
         }
@@ -830,8 +830,8 @@ mod tests {
         fn supported_chains(&self) -> Vec<ChainType> {
             vec![ChainType::Evm, ChainType::Solana]
         }
-        fn account(&self, _network: &str) -> Result<crate::wallet::Account, OcPayHttpError> {
-            Ok(crate::wallet::Account {
+        fn account(&self, _network: &str) -> Result<super::super::wallet::Account, OcPayHttpError> {
+            Ok(super::super::wallet::Account {
                 address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".into(),
             })
         }
@@ -1330,7 +1330,7 @@ mod tests {
         let encoded = B64.encode(serde_json::to_string(&x402).unwrap().as_bytes());
         let (url, rx, handle) = spawn_x402_flow_server("x-payment-required", encoded);
 
-        let result = crate::pay(&EvmWallet, &url, "GET", None).await.unwrap();
+        let result = super::super::pay(&EvmWallet, &url, "GET", None).await.unwrap();
         let retry_request = rx.recv_timeout(Duration::from_secs(3)).unwrap();
         handle.join().unwrap();
 
@@ -1373,7 +1373,7 @@ mod tests {
         let encoded = B64.encode(serde_json::to_string(&x402).unwrap().as_bytes());
         let (url, rx, handle) = spawn_x402_flow_server("payment-required", encoded);
 
-        let result = crate::pay(&EvmWallet, &url, "GET", None).await.unwrap();
+        let result = super::super::pay(&EvmWallet, &url, "GET", None).await.unwrap();
         let retry_request = rx.recv_timeout(Duration::from_secs(3)).unwrap();
         handle.join().unwrap();
 

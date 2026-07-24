@@ -18,7 +18,7 @@ use oc_intent::{
     Intent, IntentError, IntentKind, IntentResult, IntentSummary, MessageEncoding, MockRpcClient,
     RpcClient, execute_intent, simulate_intent,
 };
-use oc_paymaster::{PaymasterClient, SponsorMode, UserOperation};
+use oc_pay::paymaster::{PaymasterClient, SponsorMode, UserOperation};
 use serde_json::Value;
 
 use crate::CliError;

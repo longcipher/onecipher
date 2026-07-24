@@ -1,6 +1,6 @@
 use oc_core::ChainType;
 
-use crate::error::OcPayHttpError;
+use super::error::OcPayHttpError;
 
 /// An account on any chain.
 #[derive(Debug, Clone)]

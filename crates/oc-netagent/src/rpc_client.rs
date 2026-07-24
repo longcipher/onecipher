@@ -8,9 +8,12 @@
 //! support will be added in a later stage once the `RpcClient` trait grows
 //! chain-specific methods.
 
-use std::time::{Duration, Instant};
+use std::{
+    future::Future,
+    pin::Pin,
+    time::{Duration, Instant},
+};
 
-use async_trait::async_trait;
 use oc_intent::{CallData, RpcClient, RpcError};
 use serde_json::{Value, json};
 use tracing::debug;
@@ -102,67 +105,86 @@ impl HpxRpcClient {
     }
 }
 
-#[async_trait]
 impl RpcClient for HpxRpcClient {
     fn chain_id(&self) -> &str {
         &self.chain_id
     }
 
-    async fn estimate_gas(&self, call_data: &CallData) -> Result<u64, RpcError> {
+    fn estimate_gas(
+        &self,
+        call_data: &CallData,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, RpcError>> + Send + '_>> {
         let call_obj = Self::call_object(call_data);
-        let result = self.rpc_call("eth_estimateGas", json!([call_obj])).await?;
-        let hex_str = result.as_str().ok_or_else(|| {
-            RpcError::Parse(format!("estimate_gas: expected hex string, got {result}"))
-        })?;
-        parse_hex_u64(hex_str)
-    }
-
-    async fn eth_call(&self, call_data: &CallData) -> Result<Value, RpcError> {
-        let call_obj = Self::call_object(call_data);
-        self.rpc_call("eth_call", json!([call_obj, "latest"])).await
-    }
-
-    async fn send_raw_transaction(&self, tx_bytes: &[u8]) -> Result<String, RpcError> {
-        let hex_tx = format!("0x{}", hex::encode(tx_bytes));
-        let result = self.rpc_call("eth_sendRawTransaction", json!([hex_tx])).await?;
-        result.as_str().map(String::from).ok_or_else(|| {
-            RpcError::Parse(format!("send_raw_transaction: expected tx hash string, got {result}"))
+        Box::pin(async move {
+            let result = self.rpc_call("eth_estimateGas", json!([call_obj])).await?;
+            let hex_str = result.as_str().ok_or_else(|| {
+                RpcError::Parse(format!("estimate_gas: expected hex string, got {result}"))
+            })?;
+            parse_hex_u64(hex_str)
         })
     }
 
-    async fn wait_for_receipt(&self, tx_hash: &str) -> Result<Value, RpcError> {
-        // Poll eth_getTransactionReceipt until the receipt is available or the
-        // ~60 s deadline elapses. A `null` result means the tx is still pending.
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let poll_interval = Duration::from_secs(2);
-        loop {
-            if Instant::now() >= deadline {
-                return Err(RpcError::Timeout);
-            }
-            let result = self.rpc_call("eth_getTransactionReceipt", json!([tx_hash])).await?;
-            if !result.is_null() {
-                return Ok(result);
-            }
-            debug!(tx_hash, "receipt not yet available; polling");
-            tokio::time::sleep(poll_interval).await;
-        }
+    fn eth_call(
+        &self,
+        call_data: &CallData,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + '_>> {
+        let call_obj = Self::call_object(call_data);
+        Box::pin(async move { self.rpc_call("eth_call", json!([call_obj, "latest"])).await })
     }
 
-    async fn gas_price(&self) -> Result<u64, RpcError> {
-        let result = self.rpc_call("eth_gasPrice", json!([])).await?;
-        let hex_str = result.as_str().ok_or_else(|| {
-            RpcError::Parse(format!("gas_price: expected hex string, got {result}"))
-        })?;
-        parse_hex_u64(hex_str)
+    fn send_raw_transaction(
+        &self,
+        tx_bytes: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, RpcError>> + Send + '_>> {
+        let hex_tx = format!("0x{}", hex::encode(tx_bytes));
+        Box::pin(async move {
+            let result = self.rpc_call("eth_sendRawTransaction", json!([hex_tx])).await?;
+            result.as_str().map(String::from).ok_or_else(|| {
+                RpcError::Parse(format!(
+                    "send_raw_transaction: expected tx hash string, got {result}"
+                ))
+            })
+        })
     }
 
-    async fn native_price_usd(&self) -> Result<f64, RpcError> {
-        // TODO(stage-3): query a price API (e.g. CoinGecko / Chainlink feed)
-        // for the chain's native token. Return an error until a real price feed
-        // is integrated so callers don't silently use stale/wrong prices.
-        Err(RpcError::Parse(
-            "native_price_usd not yet implemented; no price feed integrated".into(),
-        ))
+    fn wait_for_receipt(
+        &self,
+        tx_hash: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + '_>> {
+        let tx_hash = tx_hash.to_string();
+        Box::pin(async move {
+            let deadline = Instant::now() + Duration::from_secs(60);
+            let poll_interval = Duration::from_secs(2);
+            loop {
+                if Instant::now() >= deadline {
+                    return Err(RpcError::Timeout);
+                }
+                let result = self.rpc_call("eth_getTransactionReceipt", json!([tx_hash])).await?;
+                if !result.is_null() {
+                    return Ok(result);
+                }
+                debug!(tx_hash, "receipt not yet available; polling");
+                tokio::time::sleep(poll_interval).await;
+            }
+        })
+    }
+
+    fn gas_price(&self) -> Pin<Box<dyn Future<Output = Result<u64, RpcError>> + Send + '_>> {
+        Box::pin(async move {
+            let result = self.rpc_call("eth_gasPrice", json!([])).await?;
+            let hex_str = result.as_str().ok_or_else(|| {
+                RpcError::Parse(format!("gas_price: expected hex string, got {result}"))
+            })?;
+            parse_hex_u64(hex_str)
+        })
+    }
+
+    fn native_price_usd(&self) -> Pin<Box<dyn Future<Output = Result<f64, RpcError>> + Send + '_>> {
+        Box::pin(async {
+            Err(RpcError::Parse(
+                "native_price_usd not yet implemented; no price feed integrated".into(),
+            ))
+        })
     }
 }
 

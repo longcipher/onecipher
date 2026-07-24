@@ -1,4 +1,4 @@
-use crate::{
+use super::{
     error::{OcPayHttpError, OcPayHttpErrorCode},
     types::{DiscoverResult, DiscoveryResponse, Protocol, Service},
 };
@@ -89,7 +89,7 @@ async fn discover_with_query(
 /// Filter and convert raw discovered services, optionally matching against a
 /// query string (case-insensitive, checked against URL and descriptions).
 fn filter_services(
-    items: Vec<crate::types::DiscoveredService>,
+    items: Vec<super::types::DiscoveredService>,
     query: Option<&str>,
 ) -> Vec<Service> {
     let q = query.map(|q| q.to_lowercase());
@@ -145,7 +145,7 @@ fn filter_services(
 // ===========================================================================
 
 struct FetchResult {
-    items: Vec<crate::types::DiscoveredService>,
+    items: Vec<super::types::DiscoveredService>,
     total: u64,
 }
 
@@ -180,7 +180,7 @@ async fn fetch_x402(limit: u64, offset: u64) -> Result<FetchResult, OcPayHttpErr
 // ===========================================================================
 
 pub(crate) fn format_price(amount_str: &str, network: &str) -> String {
-    let chain_type = crate::chains::resolve_chain_type(network);
+    let chain_type = super::chains::resolve_chain_type(network);
     match chain_type {
         Some(oc_core::ChainType::Nano) => format_nano(amount_str),
         Some(oc_core::ChainType::Near) => format_near(amount_str),
@@ -376,7 +376,7 @@ mod tests {
     #[test]
     fn truncate_long_utf8_string_respects_char_boundaries() {
         let prefix = "a".repeat(76);
-        let input = format!("{prefix}“🙂 rest");
+        let input = format!("{prefix}🙂 rest");
         let result = truncate(&input, 80);
 
         assert_eq!(result, format!("{prefix}..."));
@@ -424,12 +424,12 @@ mod tests {
         resource: &str,
         network: &str,
         desc: Option<&str>,
-    ) -> crate::types::DiscoveredService {
-        crate::types::DiscoveredService {
+    ) -> super::super::types::DiscoveredService {
+        super::super::types::DiscoveredService {
             resource: resource.to_string(),
             r#type: Some("x402".to_string()),
             x402_version: Some(1),
-            accepts: vec![crate::types::PaymentRequirements {
+            accepts: vec![super::super::types::PaymentRequirements {
                 scheme: "exact".into(),
                 network: network.to_string(),
                 amount: "10000".into(),

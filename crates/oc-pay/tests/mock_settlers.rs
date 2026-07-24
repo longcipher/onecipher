@@ -5,9 +5,8 @@
 //! the `PaymentSettler` trait end-to-end with mockable trait-object clients
 //! and assert the receipts / errors match the spec.
 
-use std::{collections::HashMap, sync::Mutex};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Mutex};
 
-use async_trait::async_trait;
 use oc_pay::{
     BundlerClient, Caip19Asset, ChannelId, EvmSettler, PayError, PayMpp, PaymasterClient,
     PaymentScheme, PaymentSettler, SessionKey, SolanaRpcClient, SolanaSettler, TempoChannelClient,
@@ -24,10 +23,12 @@ struct MockBundler {
     tx_hash: String,
 }
 
-#[async_trait]
 impl BundlerClient for MockBundler {
-    async fn submit_user_op(&self, _user_op: &[u8]) -> Result<String, PayError> {
-        Ok(self.tx_hash.clone())
+    fn submit_user_op(
+        &self,
+        _user_op: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, PayError>> + Send + '_>> {
+        Box::pin(async { Ok(self.tx_hash.clone()) })
     }
 }
 
@@ -35,14 +36,19 @@ struct MockPaymaster {
     fail: bool,
 }
 
-#[async_trait]
 impl PaymasterClient for MockPaymaster {
-    async fn sponsor(&self, _user_op: &mut Vec<u8>) -> Result<(), PayError> {
-        if self.fail {
-            return Err(PayError::PaymasterError("sponsor refused".into()));
-        }
-        _user_op.extend_from_slice(&[0u8; 52]);
-        Ok(())
+    fn sponsor<'a>(
+        &'a self,
+        _user_op: &'a mut Vec<u8>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), PayError>> + Send + 'a>> {
+        let fail = self.fail;
+        Box::pin(async move {
+            if fail {
+                return Err(PayError::PaymasterError("sponsor refused".into()));
+            }
+            _user_op.extend_from_slice(&[0u8; 52]);
+            Ok(())
+        })
     }
 }
 
@@ -50,14 +56,19 @@ struct MockSolanaRpc {
     signature: String,
 }
 
-#[async_trait]
 impl SolanaRpcClient for MockSolanaRpc {
-    async fn send_transaction(&self, _tx: &[u8]) -> Result<String, PayError> {
-        Ok(self.signature.clone())
+    fn send_transaction(
+        &self,
+        _tx: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, PayError>> + Send + '_>> {
+        Box::pin(async { Ok(self.signature.clone()) })
     }
 
-    async fn get_account(&self, _address: &str) -> Result<Option<Vec<u8>>, PayError> {
-        Ok(Some(vec![0x01]))
+    fn get_account(
+        &self,
+        _address: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>, PayError>> + Send + '_>> {
+        Box::pin(async { Ok(Some(vec![0x01])) })
     }
 }
 
@@ -77,37 +88,49 @@ impl MockTempo {
     }
 }
 
-#[async_trait]
 impl TempoChannelClient for MockTempo {
-    async fn open(
+    fn open(
         &self,
         _payer: &SessionKey,
         _recipient: &str,
         _max_amount: Decimal,
-    ) -> Result<ChannelId, PayError> {
+    ) -> Pin<Box<dyn Future<Output = Result<ChannelId, PayError>> + Send + '_>> {
         let mut next = self.next_id.lock().expect("next_id poisoned");
         let id = ChannelId::for_test(*next);
         *next += 1;
         self.states.lock().expect("states poisoned").insert(id.clone(), oc_pay::ChannelState::Open);
         self.streamed.lock().expect("streamed poisoned").insert(id.clone(), Decimal::ZERO);
-        Ok(id)
+        Box::pin(async move { Ok(id) })
     }
 
-    async fn stream(&self, channel_id: &ChannelId, amount: Decimal) -> Result<Decimal, PayError> {
+    fn stream(
+        &self,
+        channel_id: &ChannelId,
+        amount: Decimal,
+    ) -> Pin<Box<dyn Future<Output = Result<Decimal, PayError>> + Send + '_>> {
         let mut streamed = self.streamed.lock().expect("streamed poisoned");
         let entry = streamed.entry(channel_id.clone()).or_insert(Decimal::ZERO);
         *entry += amount;
-        Ok(*entry)
+        let result = *entry;
+        Box::pin(async move { Ok(result) })
     }
 
-    async fn close(&self, channel_id: &ChannelId) -> Result<(String, Decimal), PayError> {
+    fn close(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Pin<Box<dyn Future<Output = Result<(String, Decimal), PayError>> + Send + '_>> {
         let mut states = self.states.lock().expect("states poisoned");
         let state = states
             .get(channel_id)
             .copied()
-            .ok_or_else(|| PayError::ChannelNotFound(channel_id.hex.clone()))?;
-        if state == oc_pay::ChannelState::Closed {
-            return Err(PayError::ChannelClosed(channel_id.hex.clone()));
+            .ok_or_else(|| PayError::ChannelNotFound(channel_id.hex.clone()));
+        let hex = channel_id.hex.clone();
+        match state {
+            Ok(oc_pay::ChannelState::Closed) => {
+                return Box::pin(async move { Err(PayError::ChannelClosed(hex)) });
+            }
+            Err(e) => return Box::pin(async { Err(e) }),
+            _ => {}
         }
         states.insert(channel_id.clone(), oc_pay::ChannelState::Closed);
         let total = self
@@ -117,15 +140,19 @@ impl TempoChannelClient for MockTempo {
             .get(channel_id)
             .copied()
             .unwrap_or(Decimal::ZERO);
-        Ok((format!("0xclose_{}", channel_id.hex), total))
+        Box::pin(async move { Ok((format!("0xclose_{hex}"), total)) })
     }
 
-    async fn state(&self, channel_id: &ChannelId) -> Result<oc_pay::ChannelState, PayError> {
+    fn state(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Pin<Box<dyn Future<Output = Result<oc_pay::ChannelState, PayError>> + Send + '_>> {
         let states = self.states.lock().expect("states poisoned");
-        states
+        let result = states
             .get(channel_id)
             .copied()
-            .ok_or_else(|| PayError::ChannelNotFound(channel_id.hex.clone()))
+            .ok_or_else(|| PayError::ChannelNotFound(channel_id.hex.clone()));
+        Box::pin(async move { result })
     }
 }
 
@@ -155,8 +182,6 @@ fn solana_session_key() -> SessionKey {
 
 #[tokio::test]
 async fn test_evm_settler_pay_exact_mock() {
-    // Mock Bundler returns "0xabc..." tx_hash; mock Paymaster sponsors; assert
-    // receipt.tx_hash == "0xabc...".
     let settler = EvmSettler::new(
         "eip155:8453",
         Box::new(MockBundler { tx_hash: "0xabc".into() }),
@@ -179,7 +204,6 @@ async fn test_evm_settler_pay_exact_mock() {
 
 #[tokio::test]
 async fn test_solana_settler_pay_exact_mock() {
-    // Mock Solana RPC returns signature; assert receipt matches.
     let settler = SolanaSettler::new(
         "solana:mainnet",
         Box::new(MockSolanaRpc { signature: "sol_sig_mock".into() }),
@@ -200,7 +224,6 @@ async fn test_solana_settler_pay_exact_mock() {
 
 #[tokio::test]
 async fn test_tempo_settler_open_close() {
-    // Mock Tempo returns ChannelId on open; assert close returns final receipt.
     let settler = TempoSettler::new("eip155:8453", Box::new(MockTempo::new()));
     let channel_id = settler
         .open_channel(&evm_session_key(), "0xpeer", Decimal::from(100))
@@ -211,14 +234,12 @@ async fn test_tempo_settler_open_close() {
     let receipt =
         settler.close_channel(&channel_id).await.expect("tempo close_channel should succeed");
     assert!(receipt.tx_hash.starts_with("0xclose_"));
-    assert_eq!(receipt.amount, Decimal::ZERO); // no streams in this test
+    assert_eq!(receipt.amount, Decimal::ZERO);
     assert_eq!(receipt.chain_id, "eip155:8453");
 }
 
 #[tokio::test]
 async fn test_payment_scheme_exact() {
-    // Assert EvmSettler::supported_schemes() contains both Exact and
-    // ExactPlusUserOp.
     let settler = EvmSettler::new(
         "eip155:8453",
         Box::new(MockBundler { tx_hash: "0xabc".into() }),
@@ -230,21 +251,17 @@ async fn test_payment_scheme_exact() {
         schemes.contains(&PaymentScheme::ExactPlusUserOp),
         "EvmSettler should support ExactPlusUserOp"
     );
-    // SolanaSettler supports only Exact.
     let sol_settler = SolanaSettler::new(
         "solana:mainnet",
         Box::new(MockSolanaRpc { signature: "sol_sig_mock".into() }),
     );
     assert_eq!(sol_settler.supported_schemes(), &[PaymentScheme::Exact]);
-    // TempoSettler supports no x402 schemes (MPP-only).
     let tempo_settler = TempoSettler::new("eip155:8453", Box::new(MockTempo::new()));
     assert!(tempo_settler.supported_schemes().is_empty());
 }
 
 #[tokio::test]
 async fn test_pay_error_variants() {
-    // Assert PayError has the required variants by constructing each one and
-    // round-tripping it through Display.
     let cases: Vec<PayError> = vec![
         PayError::BundlerError("b".into()),
         PayError::PaymasterError("p".into()),
@@ -261,7 +278,6 @@ async fn test_pay_error_variants() {
         let _cloned = err.clone();
     }
 
-    // End-to-end: Paymaster failure surfaces as PayError::PaymasterError.
     let settler = EvmSettler::new(
         "eip155:8453",
         Box::new(MockBundler { tx_hash: "0xabc".into() }),
@@ -285,8 +301,6 @@ async fn test_pay_error_variants() {
 
 #[tokio::test]
 async fn test_mpp_open_stream_close_round_trip() {
-    // Open a Tempo channel, then drive a PayMpp stream handle over it,
-    // streaming 3 chunks and closing.
     let tempo = std::sync::Arc::new(MockTempo::new());
     let settler =
         TempoSettler::new("eip155:8453", Box::new(MockTempoShim { inner: tempo.clone() }));
@@ -319,23 +333,32 @@ struct MockTempoShim {
     inner: std::sync::Arc<MockTempo>,
 }
 
-#[async_trait]
 impl TempoChannelClient for MockTempoShim {
-    async fn open(
+    fn open(
         &self,
         payer: &SessionKey,
         recipient: &str,
         max_amount: Decimal,
-    ) -> Result<ChannelId, PayError> {
-        self.inner.open(payer, recipient, max_amount).await
+    ) -> Pin<Box<dyn Future<Output = Result<ChannelId, PayError>> + Send + '_>> {
+        self.inner.open(payer, recipient, max_amount)
     }
-    async fn stream(&self, channel_id: &ChannelId, amount: Decimal) -> Result<Decimal, PayError> {
-        self.inner.stream(channel_id, amount).await
+    fn stream(
+        &self,
+        channel_id: &ChannelId,
+        amount: Decimal,
+    ) -> Pin<Box<dyn Future<Output = Result<Decimal, PayError>> + Send + '_>> {
+        self.inner.stream(channel_id, amount)
     }
-    async fn close(&self, channel_id: &ChannelId) -> Result<(String, Decimal), PayError> {
-        self.inner.close(channel_id).await
+    fn close(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Pin<Box<dyn Future<Output = Result<(String, Decimal), PayError>> + Send + '_>> {
+        self.inner.close(channel_id)
     }
-    async fn state(&self, channel_id: &ChannelId) -> Result<oc_pay::ChannelState, PayError> {
-        self.inner.state(channel_id).await
+    fn state(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Pin<Box<dyn Future<Output = Result<oc_pay::ChannelState, PayError>> + Send + '_>> {
+        self.inner.state(channel_id)
     }
 }

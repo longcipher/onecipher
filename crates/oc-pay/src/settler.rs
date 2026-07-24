@@ -9,7 +9,8 @@
 //! The trait surface mirrors the T18 contract exactly — see the spec excerpt
 //! in the crate-level docs.
 
-use async_trait::async_trait;
+use std::{future::Future, pin::Pin};
+
 use rust_decimal::Decimal;
 
 use crate::{
@@ -35,7 +36,6 @@ use crate::{
 /// [`crate::solana::SolanaRpcClient`] / [`crate::tempo::TempoChannelClient`])
 /// so tests can inject mock impls without spinning up real Bundler / Paymaster
 /// / Solana / Tempo services. Real HTTP clients live in `oc-netagent` (T19).
-#[async_trait]
 pub trait PaymentSettler: Send + Sync {
     /// CAIP-2 chain id this settler is bound to (e.g. `"eip155:8453"` or
     /// `"solana:mainnet"`).
@@ -55,29 +55,32 @@ pub trait PaymentSettler: Send + Sync {
     ///
     /// `amount` is in the asset's smallest on-chain unit (wei / lamports /
     /// token-base-unit) — the settler does not interpret decimals.
-    async fn pay_exact(
+    fn pay_exact(
         &self,
         payer: &SessionKey,
         recipient: &str,
         amount: Decimal,
         asset: Caip19Asset,
-    ) -> Result<PaymentReceipt, PayError>;
+    ) -> Pin<Box<dyn Future<Output = Result<PaymentReceipt, PayError>> + Send + '_>>;
 
     /// Open an MPP channel with `recipient` capped at `max_amount`.
     ///
     /// Returns the new [`ChannelId`] on success. The channel can then stream
     /// payments via [`crate::mpp::PayMpp`] and be closed via
     /// [`PaymentSettler::close_channel`].
-    async fn open_channel(
+    fn open_channel(
         &self,
         payer: &SessionKey,
         recipient: &str,
         max_amount: Decimal,
-    ) -> Result<ChannelId, PayError>;
+    ) -> Pin<Box<dyn Future<Output = Result<ChannelId, PayError>> + Send + '_>>;
 
     /// Close an MPP channel and return the final settlement receipt.
     ///
     /// The receipt's `amount` is the total amount streamed through the
     /// channel; `tx_hash` is the on-chain close-tx identifier.
-    async fn close_channel(&self, channel_id: &ChannelId) -> Result<PaymentReceipt, PayError>;
+    fn close_channel(
+        &self,
+        channel_id: &ChannelId,
+    ) -> Pin<Box<dyn Future<Output = Result<PaymentReceipt, PayError>> + Send + '_>>;
 }

@@ -1,29 +1,41 @@
-use async_trait::async_trait;
+use std::{future::Future, pin::Pin};
+
 use serde_json::Value;
 
 /// RPC client trait for chain interactions (eth_call, estimateGas, etc.)
-#[async_trait]
 pub trait RpcClient: Send + Sync {
     /// Get chain ID.
     fn chain_id(&self) -> &str;
 
     /// Estimate gas for a transaction (returns gas units).
-    async fn estimate_gas(&self, call_data: &CallData) -> Result<u64, RpcError>;
+    fn estimate_gas(
+        &self,
+        call_data: &CallData,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, RpcError>> + Send + '_>>;
 
     /// Simulate a call without sending (eth_call).
-    async fn eth_call(&self, call_data: &CallData) -> Result<Value, RpcError>;
+    fn eth_call(
+        &self,
+        call_data: &CallData,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + '_>>;
 
     /// Send a raw signed transaction.
-    async fn send_raw_transaction(&self, tx_bytes: &[u8]) -> Result<String, RpcError>;
+    fn send_raw_transaction(
+        &self,
+        tx_bytes: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, RpcError>> + Send + '_>>;
 
     /// Wait for a transaction receipt.
-    async fn wait_for_receipt(&self, tx_hash: &str) -> Result<Value, RpcError>;
+    fn wait_for_receipt(
+        &self,
+        tx_hash: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + '_>>;
 
     /// Get current gas price (in wei).
-    async fn gas_price(&self) -> Result<u64, RpcError>;
+    fn gas_price(&self) -> Pin<Box<dyn Future<Output = Result<u64, RpcError>> + Send + '_>>;
 
     /// Get native token price in USD.
-    async fn native_price_usd(&self) -> Result<f64, RpcError>;
+    fn native_price_usd(&self) -> Pin<Box<dyn Future<Output = Result<f64, RpcError>> + Send + '_>>;
 }
 
 /// Call data for an EVM transaction.
@@ -62,33 +74,44 @@ impl MockRpcClient {
     }
 }
 
-#[async_trait]
 impl RpcClient for MockRpcClient {
     fn chain_id(&self) -> &str {
         &self.chain_id
     }
 
-    async fn estimate_gas(&self, _call_data: &CallData) -> Result<u64, RpcError> {
-        Ok(21000)
+    fn estimate_gas(
+        &self,
+        _call_data: &CallData,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, RpcError>> + Send + '_>> {
+        Box::pin(async { Ok(21000) })
     }
 
-    async fn eth_call(&self, _call_data: &CallData) -> Result<Value, RpcError> {
-        Ok(Value::Null)
+    fn eth_call(
+        &self,
+        _call_data: &CallData,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + '_>> {
+        Box::pin(async { Ok(Value::Null) })
     }
 
-    async fn send_raw_transaction(&self, _tx_bytes: &[u8]) -> Result<String, RpcError> {
-        Ok("0x".to_string() + &"0".repeat(64))
+    fn send_raw_transaction(
+        &self,
+        _tx_bytes: &[u8],
+    ) -> Pin<Box<dyn Future<Output = Result<String, RpcError>> + Send + '_>> {
+        Box::pin(async { Ok("0x".to_string() + &"0".repeat(64)) })
     }
 
-    async fn wait_for_receipt(&self, _tx_hash: &str) -> Result<Value, RpcError> {
-        Ok(serde_json::json!({"status": "0x1", "blockNumber": "0x1"}))
+    fn wait_for_receipt(
+        &self,
+        _tx_hash: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + '_>> {
+        Box::pin(async { Ok(serde_json::json!({"status": "0x1", "blockNumber": "0x1"})) })
     }
 
-    async fn gas_price(&self) -> Result<u64, RpcError> {
-        Ok(1_000_000_000) // 1 gwei
+    fn gas_price(&self) -> Pin<Box<dyn Future<Output = Result<u64, RpcError>> + Send + '_>> {
+        Box::pin(async { Ok(1_000_000_000) })
     }
 
-    async fn native_price_usd(&self) -> Result<f64, RpcError> {
-        Ok(2500.0) // mock ETH price
+    fn native_price_usd(&self) -> Pin<Box<dyn Future<Output = Result<f64, RpcError>> + Send + '_>> {
+        Box::pin(async { Ok(2500.0) })
     }
 }

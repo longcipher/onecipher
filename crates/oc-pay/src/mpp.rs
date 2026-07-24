@@ -121,11 +121,7 @@ impl PayMpp {
 
     /// Open an MPP stream over an existing channel and return a handle for
     /// streaming chunks.
-    #[allow(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "Phase 1 stub — T19 will add real async streaming"
-    )]
+    #[allow(clippy::unused_async, reason = "Phase 1 stub — T19 will add real async streaming")]
     pub async fn open<'a>(
         &self,
         client: &'a dyn TempoChannelClient,
@@ -142,9 +138,8 @@ impl PayMpp {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Mutex};
+    use std::{collections::HashMap, future::Future, pin::Pin, sync::Mutex};
 
-    use async_trait::async_trait;
     use rust_decimal::Decimal;
 
     use super::*;
@@ -160,29 +155,33 @@ mod tests {
         }
     }
 
-    #[async_trait]
     impl TempoChannelClient for MockTempo {
-        async fn open(
+        fn open(
             &self,
             _payer: &SessionKey,
             _recipient: &str,
             _max_amount: Decimal,
-        ) -> Result<ChannelId, PayError> {
+        ) -> Pin<Box<dyn Future<Output = Result<ChannelId, PayError>> + Send + '_>> {
             unreachable!("PayMpp tests call stream/close only")
         }
 
-        async fn stream(
+        fn stream(
             &self,
             channel_id: &ChannelId,
             amount: Decimal,
-        ) -> Result<Decimal, PayError> {
+        ) -> Pin<Box<dyn Future<Output = Result<Decimal, PayError>> + Send + '_>> {
             let mut streamed = self.streamed.lock().expect("streamed poisoned");
             let entry = streamed.entry(channel_id.clone()).or_insert(Decimal::ZERO);
             *entry += amount;
-            Ok(*entry)
+            let result = *entry;
+            Box::pin(async move { Ok(result) })
         }
 
-        async fn close(&self, channel_id: &ChannelId) -> Result<(String, Decimal), PayError> {
+        fn close(
+            &self,
+            channel_id: &ChannelId,
+        ) -> Pin<Box<dyn Future<Output = Result<(String, Decimal), PayError>> + Send + '_>>
+        {
             let total = self
                 .streamed
                 .lock()
@@ -190,11 +189,15 @@ mod tests {
                 .get(channel_id)
                 .copied()
                 .unwrap_or(Decimal::ZERO);
-            Ok((format!("0xclose_{}", channel_id.hex), total))
+            let hex = channel_id.hex.clone();
+            Box::pin(async move { Ok((format!("0xclose_{hex}"), total)) })
         }
 
-        async fn state(&self, _channel_id: &ChannelId) -> Result<ChannelState, PayError> {
-            Ok(ChannelState::Open)
+        fn state(
+            &self,
+            _channel_id: &ChannelId,
+        ) -> Pin<Box<dyn Future<Output = Result<ChannelState, PayError>> + Send + '_>> {
+            Box::pin(async { Ok(ChannelState::Open) })
         }
     }
 

@@ -68,7 +68,6 @@ so a TOTP read and a signing operation are governed by one consistent ruleset.
 │   ├── oc-netagent/        # Network-Agent lib (tokio + WalletConnect v2)
 │   ├── oc-pay/             # Payment primitives (x402 + MPP settlers)
 │   ├── oc-pay-http/        # HTTP payment client (x402 discovery/fund/pay)
-│   ├── oc-paymaster/       # Paymaster (gas sponsorship)
 │   ├── oc-policy/          # Policy Engine v2/v3 (11-step evaluation)
 │   ├── oc-proto/           # prost proto definitions (AgentService IPC)
 │   ├── oc-session-key/     # Multi-chain SessionKeyProvider (EVM/Solana)

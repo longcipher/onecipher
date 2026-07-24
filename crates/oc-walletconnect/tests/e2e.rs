@@ -1,6 +1,9 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
-use async_trait::async_trait;
 use oc_walletconnect::{
     dapp_client::WcDappClient,
     mock_relay::MockRelay,
@@ -13,16 +16,25 @@ struct EchoHandler {
     seen: Arc<Mutex<Vec<String>>>,
 }
 
-#[async_trait]
 impl WalletMethodHandler for EchoHandler {
-    async fn handle(
+    fn handle(
         &self,
         method: &str,
         params: Value,
         _topic: &str,
-    ) -> Result<Value, (oc_walletconnect::jsonrpc::JsonRpcErrorCode, String)> {
-        self.seen.lock().unwrap().push(method.into());
-        Ok(json!({"method": method, "params": params}))
+    ) -> Pin<
+        Box<
+            dyn Future<
+                    Output = Result<Value, (oc_walletconnect::jsonrpc::JsonRpcErrorCode, String)>,
+                > + Send
+                + '_,
+        >,
+    > {
+        let method = method.to_string();
+        Box::pin(async move {
+            self.seen.lock().unwrap().push(method.clone());
+            Ok(json!({"method": method, "params": params}))
+        })
     }
 }
 

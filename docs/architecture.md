@@ -74,7 +74,6 @@ onecipher/
 │   ├── oc-netagent/            # Network-Agent (WC v2 server logic)
 │   ├── oc-pay/                 # Payment primitives (x402 + MPP settlers)
 │   ├── oc-pay-http/            # HTTP payment client (x402 discovery/fund/pay)
-│   ├── oc-paymaster/           # ERC-4337 Paymaster + Bundler client
 │   ├── oc-policy/              # Policy Engine v2/v3 (11-step + Cedar DSL)
 │   ├── oc-proto/               # Prost proto definitions
 │   ├── oc-session-key/         # Multi-chain SessionKeyProvider (EVM/Solana)
