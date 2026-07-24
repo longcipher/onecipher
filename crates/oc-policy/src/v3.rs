@@ -127,6 +127,14 @@ pub fn evaluate_v3(policy: &PolicyV3, request: &PayRequest, state: &mut PolicySt
     // Any matching Forbid rule overrides to Deny.
     for rule in &policy.rules {
         if rule.effect == RuleEffect::Forbid && evaluate_condition(&rule.condition, request) {
+            // R80 caps `DenyReason` at exactly 9 variants, so a dedicated
+            // Cedar-rule deny reason is unavailable. Preserve the rule
+            // identity in the structured log before returning Unknown.
+            tracing::warn!(
+                target: "oc-policy::v3",
+                rule_id = %rule.id,
+                "Cedar Forbid rule matched; overriding decision to Deny"
+            );
             return Decision::Deny(DenyReason::Unknown);
         }
     }
@@ -140,6 +148,12 @@ pub fn evaluate_v3(policy: &PolicyV3, request: &PayRequest, state: &mut PolicySt
             .filter(|r| r.effect == RuleEffect::Permit)
             .any(|r| evaluate_condition(&r.condition, request));
         if !any_permit_matched {
+            // No Permit rule matched. R80 has no Cedar-specific deny reason,
+            // so log the context before returning Unknown.
+            tracing::warn!(
+                target: "oc-policy::v3",
+                "No matching Cedar Permit rule; denying"
+            );
             return Decision::Deny(DenyReason::Unknown);
         }
     }

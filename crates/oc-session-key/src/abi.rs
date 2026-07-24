@@ -1,6 +1,6 @@
 //! Shared mock ABI encoding helpers for ERC-7715 session key operations.
 //!
-//! Phase 1 (`evm.rs`) and Phase 2 (`real.rs`) use the same encoding layout
+//! Phase 1 (`evm.rs`) and Phase 2 (`mock_v1.rs`) use the same encoding layout
 //! but different selectors. These helpers take the selector as a parameter
 //! so both modules share one implementation.
 

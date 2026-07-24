@@ -12,6 +12,7 @@ use std::{
 };
 
 use prost::Message;
+use tracing::warn;
 
 use crate::{
     audit::{AuditLog, DeviceKeyStore, EventType},
@@ -30,20 +31,31 @@ use crate::{
 /// Stage 0: device key is persisted via DeviceKeyStore (survives restarts).
 static GLOBAL_AUDIT_LOG: OnceLock<Arc<Mutex<AuditLog>>> = OnceLock::new();
 
-fn global_audit_log() -> Arc<Mutex<AuditLog>> {
-    GLOBAL_AUDIT_LOG
-        .get_or_init(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            let path = PathBuf::from(home).join(".onecipher/logs/audit.jsonl");
-            let device_id = "keyagent".to_string();
-            // Stage 0: persistent device key instead of per-process random key.
-            let store = DeviceKeyStore::open_default().expect("failed to open device key store");
-            let device_key = store.load_or_generate().expect("failed to load/generate device key");
-            Arc::new(Mutex::new(
-                AuditLog::open(&path, &device_id, device_key).expect("failed to open audit log"),
-            ))
-        })
-        .clone()
+fn global_audit_log() -> Result<Arc<Mutex<AuditLog>>, KeyAgentError> {
+    if let Some(log) = GLOBAL_AUDIT_LOG.get() {
+        return Ok(log.clone());
+    }
+    // L3 fix: HOME must be set — refuse to fall back to /tmp (world-readable,
+    // survives reboot, leaks audit trail to a shared location).
+    let home = std::env::var("HOME").map_err(|_| {
+        KeyAgentError::Internal("HOME environment variable not set — refusing to use /tmp".into())
+    })?;
+    let path = PathBuf::from(home).join(".onecipher/logs/audit.jsonl");
+    let device_id = "keyagent".to_string();
+    // Stage 0: persistent device key instead of per-process random key.
+    let store = DeviceKeyStore::open_default()
+        .map_err(|e| KeyAgentError::Internal(format!("failed to open device key store: {e}")))?;
+    let device_key = store
+        .load_or_generate()
+        .map_err(|e| KeyAgentError::Internal(format!("failed to load/generate device key: {e}")))?;
+    let log = AuditLog::open(&path, &device_id, device_key)
+        .map_err(|e| KeyAgentError::Internal(format!("failed to open audit log: {e}")))?;
+    let arc = Arc::new(Mutex::new(log));
+    // set may fail on race — another thread won. Return the winner's arc.
+    match GLOBAL_AUDIT_LOG.set(arc.clone()) {
+        Ok(()) => Ok(arc),
+        Err(winner) => Ok(winner),
+    }
 }
 
 /// P0-2: Process-wide shared Passkey verifier table, keyed by `credential_id`.
@@ -78,23 +90,22 @@ fn vault_path() -> Option<&'static std::path::Path> {
 /// Load a wallet from the vault, decrypt it, and derive the chain signing key.
 /// Returns `(key, signer)`. Key is zeroized on drop.
 ///
-/// `unlock_token` carries Passkey-derived key material. When `Some`, the
-/// token's passphrase is derived (validating the token) and used to decrypt
-/// the wallet. When `None`, an empty passphrase is used (backward compat).
+/// `unlock_token` carries Passkey-derived key material. The token's passphrase
+/// is derived (validating the token) and used to decrypt the wallet. A valid
+/// unlock token is REQUIRED — the empty-passphrase backward-compat path was
+/// removed (C1 fix) because it allowed signing without a freshly-verified
+/// Passkey.
 fn load_chain_key(
     wallet_id: &str,
     chain_id: &str,
-    unlock_token: Option<&oc_core::UnlockToken>,
+    unlock_token: &oc_core::UnlockToken,
 ) -> Result<(oc_signer::SecretBytes, Box<dyn oc_signer::ChainSigner>), String> {
     let chain = oc_core::parse_chain(chain_id).map_err(|e| format!("invalid chain: {e}"))?;
 
-    let pp = if let Some(token) = unlock_token {
-        Some(token.to_passphrase().map_err(|e| format!("passphrase derivation: {e}"))?)
-    } else {
-        eprintln!("[WARN] no unlock token — using empty passphrase (backward compat)");
-        None
-    };
-    let pp_bytes: &[u8] = pp.as_ref().map_or(b"", |p| p.as_bytes());
+    let pp = unlock_token.to_passphrase().map_err(|e| format!("passphrase derivation: {e}"))?;
+    // Note: load_chain_key now requires a valid unlock token — empty passphrase path removed (C1
+    // fix).
+    let pp_bytes: &[u8] = pp.as_bytes();
 
     let key = oc_wallet::ops::decrypt_signing_key(
         wallet_id,
@@ -110,9 +121,16 @@ fn load_chain_key(
 
 /// Append an audit entry. Silently logs on failure (audit must not break ops).
 fn audit(event_type: EventType, session_key_id: Option<&str>, payload: serde_json::Value) {
-    if let Ok(mut log) = global_audit_log().lock() {
+    let audit_log = match global_audit_log() {
+        Ok(log) => log,
+        Err(e) => {
+            warn!(target: "oc-keyagent::audit", "audit log unavailable: {e}");
+            return;
+        }
+    };
+    if let Ok(mut log) = audit_log.lock() {
         if let Err(e) = log.append(event_type, session_key_id.map(String::from), payload) {
-            eprintln!("[AUDIT-WARN] append failed: {e}");
+            warn!(target: "oc-keyagent::audit", "audit append failed: {e}");
         }
     }
 }
@@ -169,7 +187,7 @@ fn verify_passkey(
     }
     let verifier = verifiers
         .get_mut(&auth.credential_id)
-        .expect("verifier was just inserted or already present");
+        .ok_or_else(|| KeyAgentResponse::error("passkey verifier evicted"))?;
 
     if let Err(e) = verifier.verify(auth) {
         audit(
@@ -306,7 +324,14 @@ fn handle_sign_transaction(
         return Ok(resp);
     }
 
-    let (key, signer) = match load_chain_key(&req.wallet_id, &req.chain_id, None) {
+    // C1 fix: derive an UnlockToken from the freshly-verified Passkey signature.
+    // The empty-passphrase backward-compat path was removed; a valid token is
+    // required to decrypt the wallet signing key.
+    let unlock_token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
+        Ok(t) => t,
+        Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
+    };
+    let (key, signer) = match load_chain_key(&req.wallet_id, &req.chain_id, &unlock_token) {
         Ok(v) => v,
         Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
@@ -354,8 +379,14 @@ fn handle_sign_message(
         return Ok(resp);
     }
 
+    // C1 fix: derive an UnlockToken from the freshly-verified Passkey signature.
+    let unlock_token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
+        Ok(t) => t,
+        Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
+    };
+
     // SignMessage has no chain_id; default to EVM (ponytail: most common).
-    let (key, signer) = match load_chain_key(&req.wallet_id, "eip155:1", None) {
+    let (key, signer) = match load_chain_key(&req.wallet_id, "eip155:1", &unlock_token) {
         Ok(v) => v,
         Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
@@ -381,8 +412,14 @@ fn handle_sign_typed_data(
         return Ok(resp);
     }
 
+    // C1 fix: derive an UnlockToken from the freshly-verified Passkey signature.
+    let unlock_token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
+        Ok(t) => t,
+        Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
+    };
+
     // EIP-712 typed data is EVM-only.
-    let (key, _) = match load_chain_key(&req.wallet_id, "eip155:1", None) {
+    let (key, _) = match load_chain_key(&req.wallet_id, "eip155:1", &unlock_token) {
         Ok(v) => v,
         Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
@@ -409,7 +446,12 @@ fn handle_sign_user_op(
         return Ok(resp);
     }
 
-    let (key, signer) = match load_chain_key(&req.wallet_id, &req.chain_id, None) {
+    // C1 fix: derive an UnlockToken from the freshly-verified Passkey signature.
+    let unlock_token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
+        Ok(t) => t,
+        Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
+    };
+    let (key, signer) = match load_chain_key(&req.wallet_id, &req.chain_id, &unlock_token) {
         Ok(v) => v,
         Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
@@ -519,9 +561,17 @@ fn handle_pay_x402(req: &oc_proto::PayX402Request) -> Result<KeyAgentResponse, K
         recipient: if req.recipient.is_empty() { None } else { Some(req.recipient.clone()) },
     };
 
-    let audit_log = global_audit_log();
+    let audit_log = match global_audit_log() {
+        Ok(log) => log,
+        Err(e) => return Ok(KeyAgentResponse::error(format!("audit log init: {e}"))),
+    };
     let state_path = {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        // L3 fix: HOME must be set — refuse to fall back to /tmp.
+        let home = std::env::var("HOME").map_err(|_| {
+            KeyAgentError::Internal(
+                "HOME environment variable not set — refusing to use /tmp".into(),
+            )
+        })?;
         PathBuf::from(home).join(".onecipher/policy_state.json")
     };
 
@@ -762,7 +812,7 @@ fn handle_generate_challenge(
     }
     let verifier = verifiers
         .get_mut(&req.credential_id)
-        .expect("verifier was just inserted or already present");
+        .ok_or_else(|| KeyAgentError::Unauthorized("passkey verifier evicted".into()))?;
 
     let challenge = verifier.generate_challenge();
 

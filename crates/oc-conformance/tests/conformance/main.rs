@@ -179,6 +179,11 @@ impl ConformanceWorld {
 
 #[tokio::main]
 async fn main() {
-    let features = workspace_root().join("specs/2026-07-22-01-unified-vault/features");
+    // Cucumber 0.23's `Basic` parser uses `globwalk` to recursively discover
+    // `*.feature` files under the given path. Pointing at the parent `specs/`
+    // directory picks up BOTH feature sets in a single test run:
+    //   - specs/2026-07-22-01-unified-vault/features/*.feature
+    //   - specs/2026-07-22-02-core-security/features/*.feature
+    let features = workspace_root().join("specs");
     ConformanceWorld::run(features.as_path()).await;
 }

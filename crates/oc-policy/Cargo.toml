@@ -12,6 +12,7 @@ oc-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }

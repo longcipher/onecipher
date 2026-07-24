@@ -95,10 +95,7 @@ pub(crate) fn run(
 
     let wallet = CliWallet { wallet_name: wallet_name.to_string(), passphrase };
 
-    let rt =
-        tokio::runtime::Runtime::new().map_err(|e| CliError::InvalidArgs(format!("tokio: {e}")))?;
-
-    let result = rt.block_on(oc_pay::http::pay(&wallet, url, method, body))?;
+    let result = crate::shared_runtime().block_on(oc_pay::http::pay(&wallet, url, method, body))?;
 
     if result.status < 400 {
         if let Some(ref payment) = result.payment {
@@ -124,10 +121,7 @@ pub(crate) fn discover(
     limit: Option<u64>,
     offset: Option<u64>,
 ) -> Result<(), CliError> {
-    let rt =
-        tokio::runtime::Runtime::new().map_err(|e| CliError::InvalidArgs(format!("tokio: {e}")))?;
-
-    let result = rt.block_on(oc_pay::http::discover(query, limit, offset))?;
+    let result = crate::shared_runtime().block_on(oc_pay::http::discover(query, limit, offset))?;
 
     if result.services.is_empty() {
         eprintln!("No services found.");

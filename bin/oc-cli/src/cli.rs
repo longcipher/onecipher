@@ -895,6 +895,10 @@ pub(crate) enum CliError {
         "Network-Agent not yet available (Phase D T17-T21 will implement ConnectRPC transport)"
     )]
     NetAgentUnavailable,
+    #[error("daemon init failed: {0}")]
+    DaemonInit(String),
+    #[error("key-agent error: {0}")]
+    KeyAgent(String),
 }
 
 pub(crate) fn parse_chain(s: &str) -> Result<oc_core::Chain, CliError> {

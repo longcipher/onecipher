@@ -97,7 +97,9 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             if app.experimental {
                 app.set_message("New secret creation not yet implemented");
             } else {
-                app.set_message("New secret creation is experimental. Restart with --experimental to enable.");
+                app.set_message(
+                    "New secret creation is experimental. Restart with --experimental to enable.",
+                );
             }
             false
         }

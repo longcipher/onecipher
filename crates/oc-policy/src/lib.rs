@@ -30,3 +30,44 @@ pub use v2::{
 pub use v3::{
     ComparisonOp, PolicyRule, PolicyV3, RuleCondition, RuleEffect, evaluate_v3, parse_policy_v3,
 };
+
+// ---------------------------------------------------------------------------
+// DenyReason → wire string (R80 mapping)
+// ---------------------------------------------------------------------------
+
+/// Converts a [`DenyReason`] to its R80 wire-string form for `PayX402Response`.
+///
+/// R80 caps `DenyReason` at exactly 9 variants. The wire-string form is the
+/// Agent/UI-facing representation carried in `PayX402Response.deny_reason`
+/// and the `PayX402` audit payload.
+///
+/// `context` disambiguates [`DenyReason::BudgetExceeded`]:
+/// - `"step_9"` (single-amount check) → `"AMOUNT_EXCEEDED"` (T25 mapping)
+/// - any other context (step_8 / step_8a / step_8b) → `"BUDGET_EXCEEDED"`
+///
+/// Full mapping (see `crates/oc-conformance/.../x402_deny_reason.rs`):
+/// - `RateLimitMinute` → `RATE_LIMIT_MINUTE`
+/// - `RateLimitHour`   → `RATE_LIMIT_HOUR`
+/// - `BudgetExceeded` (step_8/8a/8b) → `BUDGET_EXCEEDED`
+/// - `BudgetExceeded` (step_9) → `AMOUNT_EXCEEDED`
+/// - `Whitelist`       → `WHITELIST`
+/// - `Expired`         → `EXPIRED`
+/// - `Cooldown`        → `COOLDOWN`
+/// - `PolicyMissing`   → `POLICY_INVALID` (T30 mapping)
+/// - `PasskeyForged`   → `PASSKEY_FORGED`
+/// - `Unknown`         → `UNKNOWN`
+pub fn deny_reason_to_wire_string(reason: &DenyReason, context: &str) -> String {
+    match (reason, context) {
+        (DenyReason::BudgetExceeded, "step_9") => "AMOUNT_EXCEEDED",
+        (DenyReason::BudgetExceeded, _) => "BUDGET_EXCEEDED",
+        (DenyReason::RateLimitMinute, _) => "RATE_LIMIT_MINUTE",
+        (DenyReason::RateLimitHour, _) => "RATE_LIMIT_HOUR",
+        (DenyReason::Whitelist, _) => "WHITELIST",
+        (DenyReason::Expired, _) => "EXPIRED",
+        (DenyReason::Cooldown, _) => "COOLDOWN",
+        (DenyReason::PolicyMissing, _) => "POLICY_INVALID",
+        (DenyReason::PasskeyForged, _) => "PASSKEY_FORGED",
+        (DenyReason::Unknown, _) => "UNKNOWN",
+    }
+    .to_string()
+}

@@ -73,10 +73,13 @@ pub enum SignPayload {
 pub enum GrantReceipt {
     /// EVM: transaction hash + Merkle root of the permission set (ERC-7715).
     Evm {
+        // TODO(M10): change to a HexBytes / TxHash newtype
         /// `0x`-prefixed transaction hash.
         tx_hash: String,
+        // TODO(M10): change to a HexBytes / MerkleRoot newtype
         /// `0x`-prefixed hex (32 bytes) — Merkle root of the permission set.
         merkle_root: String,
+        // TODO(M10): change to an EvmAddress newtype
         /// ERC-7579 SCA address (`0x`-prefixed).
         sca_address: String,
     },
@@ -84,6 +87,7 @@ pub enum GrantReceipt {
     Solana {
         /// Session Tokens account address (base58).
         session_tokens_account: String,
+        // TODO(M10): change to a SolanaPubkey newtype
         /// Session Tokens program id (base58).
         program_id: String,
         /// Slot at which the account was created.

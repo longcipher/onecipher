@@ -21,6 +21,9 @@ pub enum OcVaultError {
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
+    #[error("insecure vault permissions: mode {0:04o}, expected 0700")]
+    InsecurePermissions(u32),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

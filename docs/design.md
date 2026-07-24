@@ -2,6 +2,33 @@
 
 > OneCipher design document — staged evolution of the architecture, storage, and cryptographic primitives.
 
+## Stage 0–3: Architecture Retrospective
+
+### Stage 0 — Security Foundations
+Fixed critical security vulnerabilities: empty-password signing paths,
+Passkey verification stubs, x402 amount parsing, audit log keys, and
+CLI client connections. Established the HardenedBytes memory-hardening
+contract and the R56 dependency isolation hard gates.
+
+### Stage 1 — Unified Binary
+Merged the dual-process architecture (Key-Agent + Network-Agent) into a
+single `onecipher` binary. Created the signing-core facade (the
+`oc-signer` crate; formerly referenced as `oc-signing-core`) and used
+`tokio::task::spawn_blocking` for async→sync bridging. The Key-Agent
+runs as a sync `std::thread` with UDS; the WC v2 server runs on tokio.
+
+### Stage 2 — AI Agent Native Features
+- **Intent Layer (`oc-intent`):** Declarative intent framing, simulation,
+  and execution for Pay/SignTransaction/SignMessage/CrossChainTransfer.
+- **Paymaster (`oc-pay`):** ERC-4337 gas abstraction via sponsor strategies.
+- **Real Session Keys:** ERC-7579 (EVM) and Session Tokens (Solana).
+- **Policy v3:** Cedar-like DSL with permit/forbid rules.
+- **CLI integration:** `onecipher intent`, `onecipher pay` commands.
+
+### Stage 3 — TEE + Cross-Chain (Planned)
+Documented but not yet implemented: TEE-based subprocess enclave,
+cross-chain routing via ERC-7683, and Cedar-policy full integration.
+
 ## Stage 4 — Unified Secret Vault (age + TUI)
 
 ### 4.1 Motivation
@@ -95,3 +122,57 @@
 | `oc-cli` | `git` | on | Forwards to `oc-secret/git`. Enables the `onecipher git` subcommand. Disable with `--no-default-features` for environments without libssh2. |
 | `oc-wallet` | `rpc` | off | Enables hpx/tokio RPC client (R56: keeps `oc-keyagent` clean). |
 | `oc-wallet` | `sui-grpc` | off | Enables Sui gRPC verification. |
+
+## §6 Component Design References
+
+### §6.1 Intent Layer (`oc-intent`)
+The Intent Layer provides a declarative interface for AI agents to
+express signing and payment intentions (e.g. "pay 10.5 USDC to 0xABC
+on Base") without constructing raw transactions. Intents flow through
+three stages: **Simulated** (pre-flight `eth_call` + `eth_estimateGas`
+to produce a human-readable summary), **Confirmed** (user/Passkey
+approves the summary), and **Executed** (signed and broadcast,
+optionally via the Paymaster for gasless transactions).
+
+Key types: `Intent`, `IntentKind` (`Pay` / `SignTransaction` /
+`SignMessage` / `CrossChainTransfer`), `IntentStatus`, `IntentResult`,
+`IntentSummary`, `MessageEncoding`.
+Key functions: `simulate_intent`, `execute_intent`.
+
+`simulate_intent` and `execute_intent` both take an `&dyn RpcClient`
+trait object. `oc-intent` stays decoupled from the Key-Agent by
+depending only on this `RpcClient` abstraction (gas estimation, tx
+construction, `send_raw_transaction`, receipt polling); real RPC
+implementations are supplied by `oc-netagent`. `execute_intent` builds
+an unsigned EIP-1559 transaction and forwards it through the RPC
+client — it does not sign directly. `MockRpcClient` backs unit tests.
+
+### §6.2 Session Keys (`oc-session-key`)
+Session keys enable delegated signing for AI agents without exposing
+the master key. EVM uses ERC-7715 `grantPermission` on an ERC-7579
+SCA; Solana uses the Session Tokens program. Per R21, the crate
+defines the `SessionKeyProvider` trait unifying `grant` /
+`verify_active` / `revoke` / `sign_with` across chains. Per R56, the
+crate MUST NOT depend on tokio / reqwest / tungstenite / hyper /
+async-std / smol — it uses native `async fn` (edition 2024) returning
+runtime-agnostic `Pin<Box<dyn Future>>` futures; the caller
+(Net-Agent) supplies the executor.
+
+Phase 1 ships `EvmSessionKeyProvider` (`evm.rs`) and
+`SolanaSessionKeyProvider` (`solana.rs`), both backed by the
+`MockRpcClient` in `rpc.rs`. Phase 2 (`real.rs`) defines the
+`EvmRpcClient`, `EvmBundlerClient`, and `SolanaRpcClient` traits for
+injectable real providers; the real on-chain RPC implementations
+(alloy / solana-client) are wired up in `oc-netagent`.
+
+Key types: `SessionKeyProvider`, `GrantReceipt`, `KeyScheme`,
+`OwnerKey`, `PublicKey`, `SessionPrivateKey`, `SignPayload`,
+`Signature`, `SolanaInstruction`.
+Key function: `derive_session_key_id` — format
+`sk-{chain_namespace}-0x{8-byte hash}`, where the hash is the first
+8 bytes of `SHA-256("onecipher-session-key" || session_pubkey || chain_id)`.
+
+**Deviation note (R74 YAGNI):** Phase 1/2 use SHA-256 for the Merkle
+root and session-key ID derivation instead of keccak256. keccak256
+lives in `oc-netagent` where the alloy dependency is available; the
+real Merkle tree + ABI encoding is a Phase 2+ concern.

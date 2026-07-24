@@ -9,8 +9,8 @@
 //!
 //! Phase 1 ships `EvmSessionKeyProvider` (ERC-7715 on ERC-7579 SCA) and
 //! `SolanaSessionKeyProvider` (Session Tokens program) backed by a unified
-//! [`rpc::MockRpcClient`]. Phase 2 (module [`real`]) adds split
-//! [`real::EvmRpcClient`] + [`real::EvmBundlerClient`] + [`real::SolanaRpcClient`]
+//! [`rpc::MockRpcClient`]. Phase 2 (module [`mock_v1`]) adds split
+//! [`mock_v1::EvmRpcClient`] + [`mock_v1::EvmBundlerClient`] + [`mock_v1::SolanaRpcClient`]
 //! traits with injectable real providers — the same `SessionKeyProvider` trait
 //! backed by chain-specific RPC abstractions that `oc-netagent` wires up to
 //! alloy / solana-client. Real on-chain RPC calls happen in `oc-netagent`.
@@ -25,15 +25,18 @@ use std::{future::Future, pin::Pin};
 pub mod abi;
 pub mod error;
 pub mod evm;
-pub mod real;
+/// Phase 1 mock implementation — uses hardcoded selectors and non-standard
+/// UserOp envelopes. NOT for production use. Real implementations will
+/// live in oc-netagent behind the `real-rpc` feature.
+pub mod mock_v1;
 pub mod rpc;
 pub mod solana;
 pub mod types;
 
 pub use error::SessionKeyError;
 pub use evm::EvmSessionKeyProvider;
+pub use mock_v1::{EvmBundlerClient, EvmRpcClient, SolanaRpcClient, derive_session_key_id};
 pub use oc_policy::PolicyV2;
-pub use real::{EvmBundlerClient, EvmRpcClient, SolanaRpcClient, derive_session_key_id};
 pub use rpc::{MockRpcClient, MockRpcCounters, RpcClient};
 pub use solana::SolanaSessionKeyProvider;
 pub use types::{

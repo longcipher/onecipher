@@ -75,14 +75,19 @@ pub enum MessageEncoding {
 
 /// Status of an intent execution.
 ///
-/// Lifecycle: `Pending` → `Simulated` → `Approved` (user confirms) →
+/// Lifecycle: `Pending` → `Simulated` → `Denied` (user rejects) or
 /// `Submitted` (tx broadcast) → `Confirmed` (on-chain receipt) or
 /// `Failed` / `Expired`.
+///
+/// `Approved` was removed — it was never set anywhere in the codebase. The
+/// user-confirmation gate now transitions directly to `Submitted` (on
+/// execution) or `Denied` (on cancellation).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IntentStatus {
     Pending,
     Simulated,
-    Approved,
+    /// User rejected the intent at the confirmation prompt.
+    Denied,
     Submitted,
     Confirmed,
     Failed,
@@ -206,7 +211,7 @@ mod tests {
         for status in [
             IntentStatus::Pending,
             IntentStatus::Simulated,
-            IntentStatus::Approved,
+            IntentStatus::Denied,
             IntentStatus::Submitted,
             IntentStatus::Confirmed,
             IntentStatus::Failed,
@@ -216,6 +221,14 @@ mod tests {
             let back: IntentStatus = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(status, back);
         }
+    }
+
+    #[test]
+    fn intent_status_denied_serializes_as_denied() {
+        // Regression for M14 — `Denied` replaces the dead `Approved` variant.
+        let json = serde_json::to_string(&IntentStatus::Denied).expect("serialize");
+        assert_eq!(json, "\"Denied\"");
+        assert!(!json.contains("Approved"));
     }
 
     #[test]

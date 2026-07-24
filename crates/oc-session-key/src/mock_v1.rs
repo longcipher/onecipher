@@ -1,3 +1,8 @@
+//! **MOCK — not for production use.** This module uses hardcoded 4-byte
+//! selectors instead of keccak256-derived selectors, and generates
+//! length-prefixed envelopes instead of real ERC-4337 UserOps. Real
+//! implementations will live in oc-netagent behind the `real-rpc` feature.
+//!
 //! Real ERC-7579 EVM + Solana Session Tokens providers (Phase 2).
 //!
 //! This module sits alongside the Phase 1 mock-based providers in

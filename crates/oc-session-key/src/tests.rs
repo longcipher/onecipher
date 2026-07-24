@@ -12,7 +12,7 @@ use oc_policy::{BudgetAllocation, PolicyRulesV2, PolicyV2};
 use crate::{
     GrantReceipt, SessionKeyError, SessionKeyProvider, Signature,
     evm::EvmSessionKeyProvider,
-    real::{
+    mock_v1::{
         EvmSessionKeyProvider as RealEvmSessionKeyProvider, MockEvmBundlerClient, MockEvmRpcClient,
         MockSolanaRpcClient, SolanaSessionKeyProvider as RealSolanaSessionKeyProvider,
         derive_session_key_id,
@@ -450,7 +450,7 @@ fn test_merkle_root_differs_for_different_policies() {
 }
 
 // ===========================================================================
-// Phase 2 — real providers (`crate::real`)
+// Phase 2 — real providers (`crate::mock_v1`)
 // ===========================================================================
 
 /// Build a real EVM provider backed by mock RPC + bundler clients.

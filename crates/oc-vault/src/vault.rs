@@ -22,6 +22,7 @@ use std::{
 use oc_core::{Config, EncryptedWallet};
 use oc_crypto::HardenedBytes;
 use oc_signer::{CryptoEnvelope, decrypt};
+use tracing::warn;
 
 use crate::error::OcVaultError;
 
@@ -31,7 +32,7 @@ fn set_dir_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let perms = fs::Permissions::from_mode(0o700);
     if let Err(e) = fs::set_permissions(path, perms) {
-        eprintln!("warning: failed to set permissions on {}: {e}", path.display());
+        warn!(target: "oc-vault", "failed to set permissions on {}: {e}", path.display());
     }
 }
 
@@ -41,20 +42,23 @@ fn set_file_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let perms = fs::Permissions::from_mode(0o600);
     if let Err(e) = fs::set_permissions(path, perms) {
-        eprintln!("warning: failed to set permissions on {}: {e}", path.display());
+        warn!(target: "oc-vault", "failed to set permissions on {}: {e}", path.display());
     }
 }
 
-/// Warn if a directory has permissions more open than 0o700.
+/// Check that a directory has permissions of exactly 0o700 (owner-only).
+///
+/// Returns `Err(InsecurePermissions)` if the mode is not 0o700, or
+/// `Err(Io)` if the directory metadata cannot be read.
 #[cfg(unix)]
-pub fn check_vault_permissions(path: &Path) {
+pub fn check_vault_permissions(path: &Path) -> Result<(), OcVaultError> {
     use std::os::unix::fs::PermissionsExt;
-    if let Ok(meta) = fs::metadata(path) {
-        let mode = meta.permissions().mode() & 0o777;
-        if mode != 0o700 {
-            eprintln!("warning: {} has permissions {:04o}, expected 0700", path.display(), mode);
-        }
+    let meta = fs::metadata(path)?;
+    let mode = meta.permissions().mode() & 0o777;
+    if mode != 0o700 {
+        return Err(OcVaultError::InsecurePermissions(mode));
     }
+    Ok(())
 }
 
 #[cfg(not(unix))]
@@ -64,7 +68,9 @@ fn set_dir_permissions(_path: &Path) {}
 fn set_file_permissions(_path: &Path) {}
 
 #[cfg(not(unix))]
-pub fn check_vault_permissions(_path: &Path) {}
+pub fn check_vault_permissions(_path: &Path) -> Result<(), OcVaultError> {
+    Ok(())
+}
 
 /// Resolve the vault path: use explicit path if provided, otherwise default (~/.onecipher).
 pub fn resolve_vault_path(vault_path: Option<&Path>) -> PathBuf {
@@ -98,13 +104,14 @@ pub fn save_encrypted_wallet(
 }
 
 /// Load all encrypted wallets from the vault.
-/// Checks directory permissions and warns if insecure.
+/// Checks directory permissions and returns `InsecurePermissions` if the
+/// wallets directory is not `0o700`.
 /// Returns wallets sorted by created_at descending (newest first).
 pub fn list_encrypted_wallets(
     vault_path: Option<&Path>,
 ) -> Result<Vec<EncryptedWallet>, OcVaultError> {
     let dir = wallets_dir(vault_path)?;
-    check_vault_permissions(&dir);
+    check_vault_permissions(&dir)?;
 
     let mut wallets = Vec::new();
 
@@ -124,11 +131,11 @@ pub fn list_encrypted_wallets(
             Ok(contents) => match serde_json::from_str::<EncryptedWallet>(&contents) {
                 Ok(w) => wallets.push(w),
                 Err(e) => {
-                    eprintln!("warning: skipping {}: {e}", path.display());
+                    warn!(target: "oc-vault", "skipping {}: {e}", path.display());
                 }
             },
             Err(e) => {
-                eprintln!("warning: skipping {}: {e}", path.display());
+                warn!(target: "oc-vault", "skipping {}: {e}", path.display());
             }
         }
     }

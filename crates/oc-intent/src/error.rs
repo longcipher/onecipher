@@ -6,6 +6,8 @@ pub enum IntentError {
     Rpc(#[from] RpcError),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("invalid chain id: {0}")]
+    InvalidChain(String),
     #[error("intent expired")]
     Expired,
     #[error("simulation failed: {0}")]

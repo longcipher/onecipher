@@ -34,7 +34,9 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 # R56: NO tokio, NO reqwest, NO hyper, NO async-std, NO smol — even as dev-deps.
+# tracing is a pure log facade (no I/O, no async runtime) — R56-safe.
 
 # T12 sandbox: Linux-only libc dep for seccomp/prctl/capset syscalls.
 # Target-specific so the dep doesn't even resolve on macOS / Windows.

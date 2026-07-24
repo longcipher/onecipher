@@ -21,7 +21,7 @@ oc-policy = { workspace = true }
 oc-proto = { workspace = true }
 oc-session-key = { workspace = true }
 oc-signer = { workspace = true }
-oc-vault = { workspace = true }
+oc-vault = { workspace = true, features = ["test-utils"] }
 rand_core = "0.10"
 serde_json = { workspace = true }
 sha2 = { workspace = true }

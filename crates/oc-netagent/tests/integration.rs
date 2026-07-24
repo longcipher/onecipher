@@ -6,7 +6,6 @@ use std::{sync::Arc, time::Duration};
 
 use oc_walletconnect::{
     WalletMethodHandler, WcDappClient, WcSession, WcWalletServer,
-    jsonrpc::JsonRpcErrorCode,
     mock_relay::MockRelay,
     wallet_server::{HandlerResult, WcWalletConfig},
 };

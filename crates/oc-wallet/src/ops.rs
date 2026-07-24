@@ -371,27 +371,27 @@ pub fn delete_wallet(name_or_id: &str, vault_path: Option<&Path>) -> Result<(), 
 }
 
 /// Export a wallet's secret.
-/// Mnemonic wallets return the phrase. Private key wallets return JSON with both keys.
+///
+/// Mnemonic wallets return the phrase. Private key wallets return JSON with
+/// both keys.
+///
+/// The decrypted secret is returned as [`SecretBytes`] (a type alias for
+/// `oc_crypto::HardenedBytes`) so the material stays memory-hardened (mlock +
+/// `MADV_DONTDUMP` + zeroize on drop). Callers that need a `&str` should use
+/// `std::str::from_utf8(secret.expose())` and handle the UTF-8 error.
 pub fn export_wallet(
     name_or_id: &str,
     passphrase: Option<&str>,
     vault_path: Option<&Path>,
-) -> Result<String, OcWalletError> {
+) -> Result<SecretBytes, OcWalletError> {
     let passphrase = passphrase.unwrap_or("");
     let wallet = oc_vault::load_wallet_by_name_or_id(name_or_id, vault_path)?;
-    let envelope: CryptoEnvelope = serde_json::from_value(wallet.crypto.clone())?;
+    let envelope: CryptoEnvelope = serde_json::from_value(wallet.crypto)?;
     let secret = decrypt(&envelope, passphrase.as_bytes())?;
-
-    match wallet.key_type {
-        KeyType::Mnemonic => String::from_utf8(secret.expose().to_vec()).map_err(|_| {
-            OcWalletError::InvalidInput("wallet contains invalid UTF-8 mnemonic".into())
-        }),
-        KeyType::PrivateKey => {
-            // Return the JSON key pair as-is
-            String::from_utf8(secret.expose().to_vec())
-                .map_err(|_| OcWalletError::InvalidInput("wallet contains invalid key data".into()))
-        }
-    }
+    // Return the HardenedBytes directly — do not copy the decrypted mnemonic /
+    // key material into an un-hardened String. Callers obtain &str via
+    // `std::str::from_utf8(secret.expose())` when needed.
+    Ok(secret)
 }
 
 /// Rename a wallet.
@@ -663,7 +663,7 @@ pub fn decrypt_signing_key(
     vault_path: Option<&Path>,
 ) -> Result<SecretBytes, OcWalletError> {
     let wallet = oc_vault::load_wallet_by_name_or_id(wallet_name_or_id, vault_path)?;
-    let envelope: CryptoEnvelope = serde_json::from_value(wallet.crypto.clone())?;
+    let envelope: CryptoEnvelope = serde_json::from_value(wallet.crypto)?;
     let secret = decrypt(&envelope, passphrase)?;
     secret_to_signing_key(&secret, &wallet.key_type, chain_type, index)
 }
@@ -824,11 +824,12 @@ mod tests {
         assert!(!w1.accounts.is_empty());
 
         // Export mnemonic
-        let phrase = export_wallet("w1", None, Some(v1.path())).unwrap();
+        let phrase_bytes = export_wallet("w1", None, Some(v1.path())).unwrap();
+        let phrase = std::str::from_utf8(phrase_bytes.expose()).unwrap();
         assert_eq!(phrase.split_whitespace().count(), 12);
 
         // Re-import into fresh vault
-        let w2 = import_wallet_mnemonic("w2", &phrase, None, None, Some(v2.path())).unwrap();
+        let w2 = import_wallet_mnemonic("w2", phrase, None, None, Some(v2.path())).unwrap();
 
         // Addresses must match exactly
         assert_eq!(w1.accounts.len(), w2.accounts.len());
@@ -950,7 +951,8 @@ mod tests {
         save_privkey_wallet("pk-export", TEST_PRIVKEY, "", dir.path());
 
         let exported = export_wallet("pk-export", None, Some(dir.path())).unwrap();
-        let obj: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        let exported_str = std::str::from_utf8(exported.expose()).unwrap();
+        let obj: serde_json::Value = serde_json::from_str(exported_str).unwrap();
         assert_eq!(
             obj["secp256k1"].as_str().unwrap(),
             TEST_PRIVKEY,
@@ -1008,7 +1010,8 @@ mod tests {
 
         // Export should return JSON key pair with original key
         let exported = export_wallet("pk-api", None, Some(vault)).unwrap();
-        let obj: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        let exported_str = std::str::from_utf8(exported.expose()).unwrap();
+        let obj: serde_json::Value = serde_json::from_str(exported_str).unwrap();
         assert_eq!(obj["secp256k1"].as_str().unwrap(), TEST_PRIVKEY);
     }
 
@@ -1048,7 +1051,8 @@ mod tests {
 
         // Export should return both keys
         let exported = export_wallet("pk-both", None, Some(vault)).unwrap();
-        let obj: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        let exported_str = std::str::from_utf8(exported.expose()).unwrap();
+        let obj: serde_json::Value = serde_json::from_str(exported_str).unwrap();
         assert_eq!(obj["secp256k1"].as_str().unwrap(), secp_key);
         assert_eq!(obj["ed25519"].as_str().unwrap(), ed_key);
     }
@@ -1070,7 +1074,8 @@ mod tests {
         assert!(!sig.signature.is_empty());
 
         // Export with correct passphrase
-        let phrase = export_wallet("pass-mn", Some("s3cret"), Some(vault)).unwrap();
+        let phrase_bytes = export_wallet("pass-mn", Some("s3cret"), Some(vault)).unwrap();
+        let phrase = std::str::from_utf8(phrase_bytes.expose()).unwrap();
         assert_eq!(phrase.split_whitespace().count(), 12);
 
         // Wrong passphrase should fail
@@ -1096,7 +1101,8 @@ mod tests {
         assert!(!sig.signature.is_empty());
 
         let exported = export_wallet("pass-pk", Some("mypass"), Some(dir.path())).unwrap();
-        let obj: serde_json::Value = serde_json::from_str(&exported).unwrap();
+        let exported_str = std::str::from_utf8(exported.expose()).unwrap();
+        let obj: serde_json::Value = serde_json::from_str(exported_str).unwrap();
         assert_eq!(obj["secp256k1"].as_str().unwrap(), TEST_PRIVKEY);
 
         // Wrong passphrase
@@ -1474,7 +1480,8 @@ mod tests {
         let vault = dir.path();
         create_wallet("char-none-exp", None, None, Some(vault)).unwrap();
 
-        let phrase = export_wallet("char-none-exp", None, Some(vault)).unwrap();
+        let phrase_bytes = export_wallet("char-none-exp", None, Some(vault)).unwrap();
+        let phrase = std::str::from_utf8(phrase_bytes.expose()).unwrap();
         assert_eq!(phrase.split_whitespace().count(), 12);
     }
 
@@ -1515,7 +1522,8 @@ mod tests {
         let export_none = export_wallet("char-equiv", None, Some(vault)).unwrap();
         let export_empty = export_wallet("char-equiv", Some(""), Some(vault)).unwrap();
         assert_eq!(
-            export_none, export_empty,
+            export_none.expose(),
+            export_empty.expose(),
             "export_wallet: None and Some(\"\") must return the same mnemonic"
         );
     }
@@ -1687,10 +1695,11 @@ mod tests {
 
         // Export
         let exported = export_wallet("char-det", None, Some(v1.path())).unwrap();
-        assert_eq!(exported.trim(), phrase);
+        let exported_str = std::str::from_utf8(exported.expose()).unwrap();
+        assert_eq!(exported_str.trim(), phrase);
 
         // Re-import into vault 2
-        import_wallet_mnemonic("char-det-2", &exported, None, None, Some(v2.path())).unwrap();
+        import_wallet_mnemonic("char-det-2", exported_str, None, None, Some(v2.path())).unwrap();
 
         // Sign in vault 2 — must produce identical signature
         let sig2 = sign_message(
@@ -1871,7 +1880,8 @@ mod tests {
         assert!(!info.accounts.is_empty());
 
         // Export → verify 24 words
-        let phrase = export_wallet("char-24w", None, Some(vault)).unwrap();
+        let phrase_bytes = export_wallet("char-24w", None, Some(vault)).unwrap();
+        let phrase = std::str::from_utf8(phrase_bytes.expose()).unwrap();
         assert_eq!(phrase.split_whitespace().count(), 24, "should be a 24-word mnemonic");
 
         // Sign transaction
@@ -1891,7 +1901,7 @@ mod tests {
 
         // Re-import into separate vault → deterministic
         let v2 = tempfile::tempdir().unwrap();
-        import_wallet_mnemonic("char-24w-2", &phrase, None, None, Some(v2.path())).unwrap();
+        import_wallet_mnemonic("char-24w-2", phrase, None, None, Some(v2.path())).unwrap();
         let sig2 = sign_transaction("char-24w-2", "evm", tx, None, None, Some(v2.path())).unwrap();
         assert_eq!(
             sig.signature, sig2.signature,
