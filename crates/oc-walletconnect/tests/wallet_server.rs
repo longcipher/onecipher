@@ -31,7 +31,11 @@ impl WalletMethodHandler for CountingHandler {
 #[tokio::test]
 async fn server_responds_to_session_request() {
     let relay = Arc::new(MockRelay::new());
-    let cfg = WcWalletConfig { relay_url: "mock://test".into(), relay_protocol: "waku".into() };
+    let cfg = WcWalletConfig {
+        relay_url: "mock://test".into(),
+        relay_protocol: "waku".into(),
+        trusted_origins: vec!["localhost".into(), "127.0.0.1".into()],
+    };
     let handler = CountingHandler::default();
     let mut server = WcWalletServer::new(cfg, handler);
     server.attach_mock_relay(relay.clone());
@@ -73,7 +77,11 @@ async fn server_responds_to_session_request() {
 #[tokio::test]
 async fn server_returns_method_error_when_handler_fails() {
     let relay = Arc::new(MockRelay::new());
-    let cfg = WcWalletConfig { relay_url: "mock://test".into(), relay_protocol: "waku".into() };
+    let cfg = WcWalletConfig {
+        relay_url: "mock://test".into(),
+        relay_protocol: "waku".into(),
+        trusted_origins: vec!["localhost".into(), "127.0.0.1".into()],
+    };
 
     struct FailHandler;
     #[async_trait::async_trait]

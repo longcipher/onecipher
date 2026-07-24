@@ -1,14 +1,6 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-};
+use std::path::{Path, PathBuf};
 
-use oc_keyagent::{
-    KeyAgentRequest, KeyAgentResponse,
-    audit::{AuditLog, DeviceKeyStore},
-    handler,
-    passkey::PasskeyPubkeyStore,
-};
+use oc_keyagent::{KeyAgentRequest, KeyAgentResponse, handler};
 
 use crate::error::SigningCoreError;
 
@@ -17,8 +9,6 @@ use crate::error::SigningCoreError;
 /// This is the main entry point for the async layer. Call via
 /// `tokio::task::spawn_blocking(move || engine.handle(request))`.
 pub struct SigningEngine {
-    audit: Arc<Mutex<AuditLog>>,
-    passkey_store: PasskeyPubkeyStore,
     state_dir: PathBuf,
 }
 
@@ -33,25 +23,7 @@ impl SigningEngine {
 
     /// Open the engine with a custom state directory.
     pub fn open(state_dir: &Path) -> Result<Self, SigningCoreError> {
-        // Open audit log with persistent device key (survives restarts).
-        let device_key_store =
-            DeviceKeyStore::open_default().map_err(|e| SigningCoreError::Audit(e.to_string()))?;
-        let device_key = device_key_store
-            .load_or_generate()
-            .map_err(|e| SigningCoreError::Audit(e.to_string()))?;
-
-        let audit_path = state_dir.join("logs").join("audit.jsonl");
-        let audit = AuditLog::open(&audit_path, "signing-core", device_key)
-            .map_err(|e| SigningCoreError::Audit(e.to_string()))?;
-
-        let passkey_store = PasskeyPubkeyStore::open_default()
-            .map_err(|e| SigningCoreError::Passkey(e.to_string()))?;
-
-        Ok(Self {
-            audit: Arc::new(Mutex::new(audit)),
-            passkey_store,
-            state_dir: state_dir.to_path_buf(),
-        })
+        Ok(Self { state_dir: state_dir.to_path_buf() })
     }
 
     /// Handle a [`KeyAgentRequest`] synchronously.
@@ -63,16 +35,6 @@ impl SigningEngine {
     /// [`KeyAgentResponse`] (as `Error` variants) and returned via `Ok`.
     pub fn handle(&self, req: &KeyAgentRequest) -> Result<KeyAgentResponse, SigningCoreError> {
         handler::dispatch(req).map_err(|e| SigningCoreError::KeyAgent(e.to_string()))
-    }
-
-    /// Get a reference to the audit log.
-    pub fn audit(&self) -> &Arc<Mutex<AuditLog>> {
-        &self.audit
-    }
-
-    /// Get a reference to the passkey store.
-    pub fn passkey_store(&self) -> &PasskeyPubkeyStore {
-        &self.passkey_store
     }
 
     /// Get the state directory.
@@ -143,21 +105,6 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let engine = SigningEngine::open(dir.path()).expect("open");
         assert_eq!(engine.state_dir(), dir.path());
-    }
-
-    #[test]
-    fn open_engine_audit_is_accessible() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let engine = SigningEngine::open(dir.path()).expect("open");
-        let audit = engine.audit();
-        let _lock = audit.lock().expect("lock");
-    }
-
-    #[test]
-    fn open_engine_passkey_store_is_accessible() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let engine = SigningEngine::open(dir.path()).expect("open");
-        let _store = engine.passkey_store();
     }
 
     #[test]

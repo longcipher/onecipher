@@ -51,6 +51,10 @@ pub trait WalletMethodHandler: Send + Sync {
 pub struct WcWalletConfig {
     pub relay_url: String,
     pub relay_protocol: String,
+    /// If non-empty, only session proposals from dApps whose origin URL contains
+    /// one of these strings are auto-approved. If empty, all proposals are
+    /// rejected (secure default).
+    pub trusted_origins: Vec<String>,
 }
 
 pub struct WcWalletServer<H: WalletMethodHandler> {
@@ -343,8 +347,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         }
     }
 
-    /// Handle `wc_sessionPropose` — auto-approve for MVP.
-    // ponytail: TODO add Passkey gate before production; auto-approve is for dev only
+    /// Handle `wc_sessionPropose` — approve only if dApp origin is trusted.
     async fn handle_session_propose(
         &self,
         relay: &mut RelayClient,
@@ -359,6 +362,39 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         };
         let propose_params: SessionProposeParams = serde_json::from_value(req.params.clone())
             .map_err(|e| WcError::InvalidMessage(format!("bad sessionPropose params: {e}")))?;
+
+        let sym_key_bytes = hex::decode(&session.sym_key)
+            .map_err(|_| WcError::InvalidMessage("bad sym_key hex".into()))?;
+        if sym_key_bytes.len() != 32 {
+            return Err(WcError::InvalidMessage("sym_key must be 32 bytes".into()));
+        }
+        let mut key_arr = [0u8; 32];
+        key_arr.copy_from_slice(&sym_key_bytes);
+        let sym_key = WcSymKey::from_bytes(key_arr);
+
+        // Origin allowlist check
+        let dapp_origin = &propose_params.proposer.metadata.url;
+        if self.cfg.trusted_origins.is_empty() ||
+            !self.cfg.trusted_origins.iter().any(|o| dapp_origin.contains(o.as_str()))
+        {
+            let reason = if self.cfg.trusted_origins.is_empty() {
+                "no trusted origins configured; session proposal rejected"
+            } else {
+                "dApp origin not in trusted origins"
+            };
+            self.send_encrypted(
+                relay,
+                pairing_topic,
+                &sym_key,
+                &JsonRpcResponse::error(
+                    req.id,
+                    JsonRpcError::new(JsonRpcErrorCode::Unauthorized, reason.into()),
+                ),
+                &mut next_id,
+            )
+            .await?;
+            return Ok(());
+        }
 
         let session_topic = {
             use sha2::{Digest, Sha256};
@@ -375,36 +411,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         });
         let approve_resp = JsonRpcResponse::success(req.id, approve_result);
 
-        let sym_key_bytes = match hex::decode(&session.sym_key) {
-            Ok(b) => b,
-            Err(_) => return Ok(()),
-        };
-        if sym_key_bytes.len() != 32 {
-            return Ok(());
-        }
-        let mut key_arr = [0u8; 32];
-        key_arr.copy_from_slice(&sym_key_bytes);
-        let sym_key = WcSymKey::from_bytes(key_arr);
-
-        let resp_bytes = serde_json::to_vec(&approve_resp)?;
-        let mut nonce = [0u8; 12];
-        rand::rng().fill(&mut nonce[..]);
-        let ciphertext = WcCipher::seal(&sym_key, &nonce, WC_AAD, &resp_bytes)?;
-        let mut env = nonce.to_vec();
-        env.extend_from_slice(&ciphertext);
-
-        let pub_msg = serde_json::json!({
-            "id": next_id(),
-            "jsonrpc": "2.0",
-            "method": "publish",
-            "params": {
-                "topic": pairing_topic,
-                "message": BASE64.encode(&env),
-                "tag": 1108,
-                "ttl": 300
-            }
-        });
-        relay.send_text(serde_json::to_string(&pub_msg)?).await?;
+        self.send_encrypted(relay, pairing_topic, &sym_key, &approve_resp, &mut next_id).await?;
 
         let sub_msg = serde_json::json!({
             "id": next_id(),
@@ -476,6 +483,36 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         });
         relay.send_text(serde_json::to_string(&settle_pub)?).await?;
 
+        Ok(())
+    }
+
+    /// Encrypt a JSON-RPC response with the session's symKey and publish it on `topic`.
+    async fn send_encrypted(
+        &self,
+        relay: &mut RelayClient,
+        topic: &str,
+        sym_key: &WcSymKey,
+        resp: &JsonRpcResponse,
+        next_id: &mut impl FnMut() -> i64,
+    ) -> WcResult<()> {
+        let resp_bytes = serde_json::to_vec(resp)?;
+        let mut nonce = [0u8; 12];
+        rand::rng().fill(&mut nonce[..]);
+        let ciphertext = WcCipher::seal(sym_key, &nonce, WC_AAD, &resp_bytes)?;
+        let mut env = nonce.to_vec();
+        env.extend_from_slice(&ciphertext);
+        let pub_msg = serde_json::json!({
+            "id": next_id(),
+            "jsonrpc": "2.0",
+            "method": "publish",
+            "params": {
+                "topic": topic,
+                "message": BASE64.encode(&env),
+                "tag": 1108,
+                "ttl": 300
+            }
+        });
+        relay.send_text(serde_json::to_string(&pub_msg)?).await?;
         Ok(())
     }
 }

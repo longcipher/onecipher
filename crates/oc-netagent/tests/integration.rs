@@ -31,7 +31,11 @@ async fn wallet_dapp_round_trip_through_mock_relay() {
     let relay = Arc::new(MockRelay::new());
 
     let mut server = WcWalletServer::new(
-        WcWalletConfig { relay_url: "mock://integration".into(), relay_protocol: "waku".into() },
+        WcWalletConfig {
+            relay_url: "mock://integration".into(),
+            relay_protocol: "waku".into(),
+            trusted_origins: vec!["localhost".into(), "127.0.0.1".into()],
+        },
         EchoHandler,
     );
     server.attach_mock_relay(relay.clone());

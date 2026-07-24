@@ -4134,6 +4134,7 @@ dependencies = [
  "jiff",
  "k256 0.14.0",
  "oc-core",
+ "oc-policy",
  "oc-signer",
  "oc-vault",
  "prost",
@@ -4148,7 +4149,6 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "uuid",
- "zeroize",
 ]
 
 [[package]]

@@ -62,50 +62,20 @@ impl EvmSessionKeyProvider {
         merkle_root: &str,
         expiry_unix: u64,
     ) -> Vec<u8> {
-        let mut calldata = Vec::with_capacity(4 + 32 + 32 + 32);
-        // 4-byte selector (mock: placeholder for grantPermission(bytes32,bytes32,uint64)).
-        calldata.extend_from_slice(&[0xa1, 0xb2, 0xc3, 0xd4]);
-        // 32-byte session pubkey (left-padded).
-        let mut pk_padded = [0u8; 32];
-        let pk_len = session_pubkey.len().min(32);
-        pk_padded[32 - pk_len..].copy_from_slice(&session_pubkey[..pk_len]);
-        calldata.extend_from_slice(&pk_padded);
-        // 32-byte merkle root (decoded from hex, left-padded).
-        let root_bytes = hex::decode(merkle_root.trim_start_matches("0x")).unwrap_or_default();
-        let mut root_padded = [0u8; 32];
-        let root_len = root_bytes.len().min(32);
-        root_padded[32 - root_len..].copy_from_slice(&root_bytes[..root_len]);
-        calldata.extend_from_slice(&root_padded);
-        // 32-byte expiry (uint64 left-padded to 32 bytes).
-        calldata.extend_from_slice(&[0u8; 24]);
-        calldata.extend_from_slice(&expiry_unix.to_be_bytes());
-        calldata
+        const SELECTOR: [u8; 4] = [0xa1, 0xb2, 0xc3, 0xd4];
+        crate::abi::encode_grant_permission(SELECTOR, session_pubkey, merkle_root, expiry_unix)
     }
 
     /// Encode the `isPermissionGranted(bytes32 sessionKey)` view calldata (mock).
     fn encode_is_permission_granted(session_key_id: &str) -> Vec<u8> {
-        let mut calldata = Vec::with_capacity(4 + 32);
-        // Mock selector for isPermissionGranted(bytes32).
-        calldata.extend_from_slice(&[0xb3, 0xc4, 0xd5, 0xe6]);
-        let id_bytes = session_key_id.as_bytes();
-        let mut id_padded = [0u8; 32];
-        let id_len = id_bytes.len().min(32);
-        id_padded[32 - id_len..].copy_from_slice(&id_bytes[..id_len]);
-        calldata.extend_from_slice(&id_padded);
-        calldata
+        const SELECTOR: [u8; 4] = [0xb3, 0xc4, 0xd5, 0xe6];
+        crate::abi::encode_is_permission_granted(SELECTOR, session_key_id)
     }
 
     /// Encode the `revokePermission(bytes32 sessionKey)` calldata (mock).
     fn encode_revoke_permission(session_key_id: &str) -> Vec<u8> {
-        let mut calldata = Vec::with_capacity(4 + 32);
-        // Mock selector for revokePermission(bytes32).
-        calldata.extend_from_slice(&[0xc5, 0xd6, 0xe7, 0xf8]);
-        let id_bytes = session_key_id.as_bytes();
-        let mut id_padded = [0u8; 32];
-        let id_len = id_bytes.len().min(32);
-        id_padded[32 - id_len..].copy_from_slice(&id_bytes[..id_len]);
-        calldata.extend_from_slice(&id_padded);
-        calldata
+        const SELECTOR: [u8; 4] = [0xc5, 0xd6, 0xe7, 0xf8];
+        crate::abi::encode_revoke_permission(SELECTOR, session_key_id)
     }
 }
 

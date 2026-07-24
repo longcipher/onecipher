@@ -207,32 +207,20 @@ impl EvmSessionKeyProvider {
         merkle_root: &str,
         expiry_unix: u64,
     ) -> Vec<u8> {
-        let mut calldata = Vec::with_capacity(4 + 32 + 32 + 32);
-        // Selector (mock): installSessionKey(bytes32,bytes32,uint64).
-        calldata.extend_from_slice(&[0x7a, 0x8b, 0x9c, 0x0d]);
-        calldata.extend_from_slice(&pad32(session_pubkey));
-        let root_bytes = hex::decode(merkle_root.trim_start_matches("0x")).unwrap_or_default();
-        calldata.extend_from_slice(&pad32(&root_bytes));
-        // uint64 left-padded to 32 bytes.
-        calldata.extend_from_slice(&[0u8; 24]);
-        calldata.extend_from_slice(&expiry_unix.to_be_bytes());
-        calldata
+        const SELECTOR: [u8; 4] = [0x7a, 0x8b, 0x9c, 0x0d];
+        crate::abi::encode_grant_permission(SELECTOR, session_pubkey, merkle_root, expiry_unix)
     }
 
     /// Encode `isSessionKeyActive(bytes32)` view calldata (mock selector).
     fn encode_is_session_key_active(session_key_id: &str) -> Vec<u8> {
-        let mut calldata = Vec::with_capacity(4 + 32);
-        calldata.extend_from_slice(&[0x8b, 0x9c, 0x0d, 0x1e]);
-        calldata.extend_from_slice(&pad32(session_key_id.as_bytes()));
-        calldata
+        const SELECTOR: [u8; 4] = [0x8b, 0x9c, 0x0d, 0x1e];
+        crate::abi::encode_is_permission_granted(SELECTOR, session_key_id)
     }
 
     /// Encode `revokeSessionKey(bytes32)` calldata (mock selector).
     fn encode_revoke_session_key(session_key_id: &str) -> Vec<u8> {
-        let mut calldata = Vec::with_capacity(4 + 32);
-        calldata.extend_from_slice(&[0x9c, 0x0d, 0x1e, 0x2f]);
-        calldata.extend_from_slice(&pad32(session_key_id.as_bytes()));
-        calldata
+        const SELECTOR: [u8; 4] = [0x9c, 0x0d, 0x1e, 0x2f];
+        crate::abi::encode_revoke_permission(SELECTOR, session_key_id)
     }
 
     /// Build a simplified ERC-4337 UserOp blob from the SCA address + calldata.
@@ -488,19 +476,6 @@ impl SessionKeyProvider for SolanaSessionKeyProvider {
             )),
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Shared ABI helper
-// ---------------------------------------------------------------------------
-
-/// Left-pad a byte slice to 32 bytes (ABI encoding for `bytes32` args).
-/// Truncates to the last 32 bytes if longer.
-fn pad32(input: &[u8]) -> [u8; 32] {
-    let mut out = [0u8; 32];
-    let len = input.len().min(32);
-    out[32 - len..].copy_from_slice(&input[..len]);
-    out
 }
 
 // ---------------------------------------------------------------------------

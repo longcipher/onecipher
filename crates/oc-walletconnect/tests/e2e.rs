@@ -32,7 +32,11 @@ async fn end_to_end_request_response_loop() {
 
     // Set up wallet server with a pre-settled session on topic "e2e-1"
     let mut server = WcWalletServer::new(
-        WcWalletConfig { relay_url: "mock://e2e".into(), relay_protocol: "waku".into() },
+        WcWalletConfig {
+            relay_url: "mock://e2e".into(),
+            relay_protocol: "waku".into(),
+            trusted_origins: vec!["localhost".into(), "127.0.0.1".into()],
+        },
         EchoHandler::default(),
     );
     server.attach_mock_relay(relay.clone());
