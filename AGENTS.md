@@ -80,11 +80,21 @@ These are non-negotiable invariants verified by `cargo tree` inspection
   `oc-session-key` MUST NOT depend on `tokio`,
   `reqwest`, `tungstenite`, `hyper`, `async-std`, or `smol` — even as
   dev-deps. Verified via `cargo tree -p <crate>` inspection.
-- **R12 (no TCP in Key-Agent binary):** The `oc-keyagent` release binary
-  MUST NOT contain TCP-specific symbols (`TcpListener`, `TcpStream`,
-  `AF_INET`). Verified via `nm` symbol inspection of the release binary.
-  Generic libc symbols (`bind`, `socket`) are allowed — they're needed for
-  UDS, and T12 seccomp filtering enforces the network syscall ban at runtime.
+- **R12 (no TCP in isolated crates; loopback-only in daemon):** Revised from
+  the original `nm | grep -i tcp` check (which produces false negatives on
+  stripped binaries). Now verified via five sub-rules:
+  - **R12a (source isolation):** `oc-keyagent`, `oc-crypto`, `oc-policy`,
+    `oc-session-key` source MUST NOT contain `TcpListener` or `TcpStream`.
+    Verified via `rg -n 'TcpListener|TcpStream' crates/oc-keyagent/src/ ...`.
+  - **R12b (daemon may use TCP):** The `onecipher` daemon binary MAY contain
+    TCP symbols from axum/hyper for the Web UI HTTP server and WC relay.
+  - **R12c (loopback-only bind):** Any `TcpListener` in the daemon MUST bind
+    `127.0.0.1` exclusively. Verified via `lsof -iTCP -sTCP:LISTEN -P -n`.
+  - **R12d (T12 seccomp enforcement):** At runtime, the Key-Agent's seccomp
+    BPF filter denies `connect(2)` / `bind(2)` to non-UDS sockets.
+  - **R12e (non-loopback rejection):** If a non-loopback bind address is
+    configured for `[webui] listen`, the daemon MUST reject it and refuse
+    to start the Web UI server.
 - **R51/R52 (zero I/O in crypto):** `oc-crypto` MUST have zero I/O and zero
   network dependencies.
 - **R55 (no tokio in Key-Agent):** The Key-Agent main loop uses sync
@@ -136,9 +146,10 @@ cargo tree -p oc-crypto
 cargo tree -p oc-policy
 cargo tree -p oc-keyagent
 
-# R12 hard gate — verify no TCP symbols in the release binary (requires build first)
-cargo build --release --bin onecipher
-nm target/release/onecipher | grep -i tcp   # should return nothing
+# R12 hard gate — source-level isolation (replaces broken `nm` check)
+rg -n 'TcpListener|TcpStream' crates/oc-keyagent/src/ crates/oc-crypto/src/ \
+                             crates/oc-policy/src/ crates/oc-session-key/src/
+# Expected: no matches (exit code 1)
 ```
 
 ## Justfile Recipes
@@ -206,9 +217,9 @@ just setup     # install dev tools (cargo-sort, nightly toolchain)
 - **Property tests:** Use `proptest` for invariant checking (colocated).
 - **Integration tests:** Place in crate-level `tests/`.
 - **Hard-gate tests:** R56 (dependency isolation) is verified via
-  `cargo tree` inspection; R12 (no TCP symbols) via `nm` symbol analysis
-  of the release binary. Conformance tests exercise these in
-  `keyagent_sandbox.feature`.
+  `cargo tree` inspection; R12a (source-level isolation) via `rg` scan of
+  isolated crate sources; R12c (loopback-only) via `lsof` runtime check.
+  Conformance tests exercise these in `keyagent_sandbox.feature`.
 
 ### Common Pitfalls
 

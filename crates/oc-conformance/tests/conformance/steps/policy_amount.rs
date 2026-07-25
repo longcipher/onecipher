@@ -218,7 +218,7 @@ async fn agent_requests_pay_x402(world: &mut ConformanceWorld, amount_str: Strin
                 })
             }
         }
-        Decision::Allow => {
+        Decision::Allow | Decision::Warn(_) => {
             serde_json::json!({"status": "allowed", "amount_usd": amount})
         }
     };

@@ -38,6 +38,7 @@ oc-signer = { workspace = true }
 oc-vault = { workspace = true }
 oc-wallet = { workspace = true, features = ["rpc", "sui-grpc"] }
 oc-walletconnect = { workspace = true }
+oc-webui = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
 ratatui = { workspace = true }

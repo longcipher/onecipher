@@ -381,7 +381,7 @@ async fn agent_on_device_requests_pay_x402(world: &mut ConformanceWorld, amount_
                 "allocated_usd": allocated,
             })
         }
-        Decision::Allow => {
+        Decision::Allow | Decision::Warn(_) => {
             serde_json::json!({"status": "allowed", "amount_usd": amount})
         }
     };

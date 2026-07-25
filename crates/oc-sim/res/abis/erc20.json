@@ -1,0 +1,65 @@
+{
+  "contract_name": "ERC20",
+  "functions": [
+    {
+      "name": "transfer",
+      "selector": "0xa9059cbb",
+      "inputs": [
+        {"name": "to", "type": "address"},
+        {"name": "amount", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "approve",
+      "selector": "0x095ea7b3",
+      "inputs": [
+        {"name": "spender", "type": "address"},
+        {"name": "amount", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "transferFrom",
+      "selector": "0x23b872dd",
+      "inputs": [
+        {"name": "from", "type": "address"},
+        {"name": "to", "type": "address"},
+        {"name": "amount", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "balanceOf",
+      "selector": "0x70a08231",
+      "inputs": [
+        {"name": "account", "type": "address"}
+      ]
+    },
+    {
+      "name": "allowance",
+      "selector": "0xdd62ed3e",
+      "inputs": [
+        {"name": "owner", "type": "address"},
+        {"name": "spender", "type": "address"}
+      ]
+    },
+    {
+      "name": "totalSupply",
+      "selector": "0x18160ddd",
+      "inputs": []
+    },
+    {
+      "name": "decimals",
+      "selector": "0x313ce567",
+      "inputs": []
+    },
+    {
+      "name": "symbol",
+      "selector": "0x95d89b41",
+      "inputs": []
+    },
+    {
+      "name": "name",
+      "selector": "0x06fdde03",
+      "inputs": []
+    }
+  ]
+}

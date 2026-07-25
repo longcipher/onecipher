@@ -115,6 +115,11 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: WcCommands,
     },
+    /// Web UI operations
+    Webui {
+        #[command(subcommand)]
+        subcommand: WebUiCommands,
+    },
     /// Intent operations (Stage 2 — AI Agent Native)
     Intent {
         #[command(subcommand)]
@@ -300,6 +305,12 @@ pub(crate) enum WcCommands {
         /// Session topic to disconnect
         topic: String,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum WebUiCommands {
+    /// Open the Web UI in the default browser
+    Open,
 }
 
 #[derive(Subcommand)]

@@ -1,0 +1,78 @@
+{
+  "contract_name": "ERC721",
+  "functions": [
+    {
+      "name": "safeTransferFrom",
+      "selector": "0x42842e0e",
+      "inputs": [
+        {"name": "from", "type": "address"},
+        {"name": "to", "type": "address"},
+        {"name": "tokenId", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "safeTransferFrom",
+      "selector": "0xb88d4fde",
+      "inputs": [
+        {"name": "from", "type": "address"},
+        {"name": "to", "type": "address"},
+        {"name": "tokenId", "type": "uint256"},
+        {"name": "data", "type": "bytes"}
+      ]
+    },
+    {
+      "name": "transferFrom",
+      "selector": "0x23b872dd",
+      "inputs": [
+        {"name": "from", "type": "address"},
+        {"name": "to", "type": "address"},
+        {"name": "tokenId", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "approve",
+      "selector": "0x095ea7b3",
+      "inputs": [
+        {"name": "to", "type": "address"},
+        {"name": "tokenId", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "setApprovalForAll",
+      "selector": "0xa22cb465",
+      "inputs": [
+        {"name": "operator", "type": "address"},
+        {"name": "approved", "type": "bool"}
+      ]
+    },
+    {
+      "name": "getApproved",
+      "selector": "0x081812fc",
+      "inputs": [
+        {"name": "tokenId", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "isApprovedForAll",
+      "selector": "0xe985e9c5",
+      "inputs": [
+        {"name": "owner", "type": "address"},
+        {"name": "operator", "type": "address"}
+      ]
+    },
+    {
+      "name": "ownerOf",
+      "selector": "0x6352211e",
+      "inputs": [
+        {"name": "tokenId", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "balanceOf",
+      "selector": "0x70a08231",
+      "inputs": [
+        {"name": "owner", "type": "address"}
+      ]
+    }
+  ]
+}

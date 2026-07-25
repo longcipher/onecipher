@@ -16,7 +16,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 tap-caip = { workspace = true }
 thiserror = { workspace = true }
-uuid = { workspace = true, features = ["v4"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

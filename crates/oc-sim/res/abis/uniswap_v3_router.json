@@ -1,0 +1,55 @@
+{
+  "contract_name": "UniswapV3Router",
+  "functions": [
+    {
+      "name": "exactInputSingle",
+      "selector": "0x414bf389",
+      "inputs": [
+        {"name": "tokenIn", "type": "address"},
+        {"name": "tokenOut", "type": "address"},
+        {"name": "fee", "type": "uint24"},
+        {"name": "recipient", "type": "address"},
+        {"name": "deadline", "type": "uint256"},
+        {"name": "amountIn", "type": "uint256"},
+        {"name": "amountOutMinimum", "type": "uint256"},
+        {"name": "sqrtPriceLimitX96", "type": "uint160"}
+      ]
+    },
+    {
+      "name": "exactInput",
+      "selector": "0xc04b8d59",
+      "inputs": [
+        {"name": "path", "type": "bytes"},
+        {"name": "recipient", "type": "address"},
+        {"name": "deadline", "type": "uint256"},
+        {"name": "amountIn", "type": "uint256"},
+        {"name": "amountOutMinimum", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "exactOutputSingle",
+      "selector": "0xdb3e2198",
+      "inputs": [
+        {"name": "tokenIn", "type": "address"},
+        {"name": "tokenOut", "type": "address"},
+        {"name": "fee", "type": "uint24"},
+        {"name": "recipient", "type": "address"},
+        {"name": "deadline", "type": "uint256"},
+        {"name": "amountOut", "type": "uint256"},
+        {"name": "amountInMaximum", "type": "uint256"},
+        {"name": "sqrtPriceLimitX96", "type": "uint160"}
+      ]
+    },
+    {
+      "name": "exactOutput",
+      "selector": "0xf28c0498",
+      "inputs": [
+        {"name": "path", "type": "bytes"},
+        {"name": "recipient", "type": "address"},
+        {"name": "deadline", "type": "uint256"},
+        {"name": "amountOut", "type": "uint256"},
+        {"name": "amountInMaximum", "type": "uint256"}
+      ]
+    }
+  ]
+}

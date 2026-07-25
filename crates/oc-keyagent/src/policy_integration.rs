@@ -117,11 +117,11 @@ impl PolicyIntegration {
         // 4. Write ALLOW/DENY audit entry (R76 / C-07).
         let mut audit_guard = self.audit.lock().expect("audit mutex poisoned");
         let status = match &decision {
-            Decision::Allow => "ALLOWED",
+            Decision::Allow | Decision::Warn(_) => "ALLOWED",
             Decision::Deny(_) => "DENIED",
         };
         let deny_reason_value = match &decision {
-            Decision::Allow => serde_json::Value::Null,
+            Decision::Allow | Decision::Warn(_) => serde_json::Value::Null,
             Decision::Deny(r) => serde_json::to_value(r).unwrap_or(serde_json::Value::Null),
         };
         let payload = serde_json::json!({

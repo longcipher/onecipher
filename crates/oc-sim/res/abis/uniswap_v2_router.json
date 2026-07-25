@@ -1,0 +1,124 @@
+{
+  "contract_name": "UniswapV2Router02",
+  "functions": [
+    {
+      "name": "swapExactTokensForTokens",
+      "selector": "0x38ed1739",
+      "inputs": [
+        {"name": "amountIn", "type": "uint256"},
+        {"name": "amountOutMin", "type": "uint256"},
+        {"name": "path", "type": "address[]"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "swapTokensForExactTokens",
+      "selector": "0x8803dbee",
+      "inputs": [
+        {"name": "amountOut", "type": "uint256"},
+        {"name": "amountInMax", "type": "uint256"},
+        {"name": "path", "type": "address[]"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "swapExactETHForTokens",
+      "selector": "0x7ff36ab5",
+      "inputs": [
+        {"name": "amountOutMin", "type": "uint256"},
+        {"name": "path", "type": "address[]"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "swapTokensForExactETH",
+      "selector": "0x4a25d94a",
+      "inputs": [
+        {"name": "amountOut", "type": "uint256"},
+        {"name": "amountInMax", "type": "uint256"},
+        {"name": "path", "type": "address[]"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "swapExactTokensForETH",
+      "selector": "0x18cbafe5",
+      "inputs": [
+        {"name": "amountIn", "type": "uint256"},
+        {"name": "amountOutMin", "type": "uint256"},
+        {"name": "path", "type": "address[]"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "swapETHForExactTokens",
+      "selector": "0xfb3bdb41",
+      "inputs": [
+        {"name": "amountOut", "type": "uint256"},
+        {"name": "path", "type": "address[]"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "addLiquidity",
+      "selector": "0xe8e33700",
+      "inputs": [
+        {"name": "tokenA", "type": "address"},
+        {"name": "tokenB", "type": "address"},
+        {"name": "amountADesired", "type": "uint256"},
+        {"name": "amountBDesired", "type": "uint256"},
+        {"name": "amountAMin", "type": "uint256"},
+        {"name": "amountBMin", "type": "uint256"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "addLiquidityETH",
+      "selector": "0xf305d719",
+      "inputs": [
+        {"name": "token", "type": "address"},
+        {"name": "amountTokenDesired", "type": "uint256"},
+        {"name": "amountTokenMin", "type": "uint256"},
+        {"name": "amountETHMin", "type": "uint256"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "removeLiquidity",
+      "selector": "0xbaa2abde",
+      "inputs": [
+        {"name": "tokenA", "type": "address"},
+        {"name": "tokenB", "type": "address"},
+        {"name": "liquidity", "type": "uint256"},
+        {"name": "amountAMin", "type": "uint256"},
+        {"name": "amountBMin", "type": "uint256"},
+        {"name": "to", "type": "address"},
+        {"name": "deadline", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "getAmountsOut",
+      "selector": "0xd06ca61f",
+      "inputs": [
+        {"name": "amountIn", "type": "uint256"},
+        {"name": "path", "type": "address[]"}
+      ]
+    },
+    {
+      "name": "getAmountsIn",
+      "selector": "0x85f8c259",
+      "inputs": [
+        {"name": "amountOut", "type": "uint256"},
+        {"name": "path", "type": "address[]"}
+      ]
+    }
+  ]
+}

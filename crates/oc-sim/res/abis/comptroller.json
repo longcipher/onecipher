@@ -1,0 +1,33 @@
+{
+  "contract_name": "Comptroller",
+  "functions": [
+    {
+      "name": "enterMarkets",
+      "selector": "0xc2998238",
+      "inputs": [
+        {"name": "cTokens", "type": "address[]"}
+      ]
+    },
+    {
+      "name": "exitMarket",
+      "selector": "0xede4edd0",
+      "inputs": [
+        {"name": "cToken", "type": "address"}
+      ]
+    },
+    {
+      "name": "claimComp",
+      "selector": "0x1d58e7c4",
+      "inputs": [
+        {"name": "holder", "type": "address"}
+      ]
+    },
+    {
+      "name": "getAccountLiquidity",
+      "selector": "0x5ec88c79",
+      "inputs": [
+        {"name": "account", "type": "address"}
+      ]
+    }
+  ]
+}

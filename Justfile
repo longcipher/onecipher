@@ -97,3 +97,9 @@ setup:
 # Run cargo audit to check for known vulnerabilities.
 audit:
     cargo audit
+
+# R12 hard gate check — source-level isolation (no TcpListener/TcpStream in isolated crates).
+r12-check:
+    @echo "R12a: checking source-level TCP isolation..."
+    @! rg -n 'TcpListener|TcpStream' crates/oc-keyagent/src/ crates/oc-crypto/src/ crates/oc-policy/src/ crates/oc-session-key/src/ || (echo "R12a FAILED: TCP types found in isolated crates" && exit 1)
+    @echo "R12a: PASS — no TCP types in isolated crate sources"

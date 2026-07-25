@@ -1,0 +1,66 @@
+{
+  "contract_name": "AaveV3Pool",
+  "functions": [
+    {
+      "name": "supply",
+      "selector": "0x617ba037",
+      "inputs": [
+        {"name": "asset", "type": "address"},
+        {"name": "amount", "type": "uint256"},
+        {"name": "onBehalfOf", "type": "address"},
+        {"name": "referralCode", "type": "uint16"}
+      ]
+    },
+    {
+      "name": "withdraw",
+      "selector": "0x69328dec",
+      "inputs": [
+        {"name": "asset", "type": "address"},
+        {"name": "amount", "type": "uint256"},
+        {"name": "to", "type": "address"}
+      ]
+    },
+    {
+      "name": "borrow",
+      "selector": "0xa415bcad",
+      "inputs": [
+        {"name": "asset", "type": "address"},
+        {"name": "amount", "type": "uint256"},
+        {"name": "interestRateMode", "type": "uint256"},
+        {"name": "referralCode", "type": "uint16"},
+        {"name": "onBehalfOf", "type": "address"}
+      ]
+    },
+    {
+      "name": "repay",
+      "selector": "0x573ade81",
+      "inputs": [
+        {"name": "asset", "type": "address"},
+        {"name": "amount", "type": "uint256"},
+        {"name": "rateMode", "type": "uint256"},
+        {"name": "onBehalfOf", "type": "address"}
+      ]
+    },
+    {
+      "name": "flashLoan",
+      "selector": "0xab9c4b5d",
+      "inputs": [
+        {"name": "receiverAddress", "type": "address"},
+        {"name": "assets", "type": "address[]"},
+        {"name": "amounts", "type": "uint256[]"},
+        {"name": "interestRateModes", "type": "uint256[]"},
+        {"name": "onBehalfOf", "type": "address"},
+        {"name": "params", "type": "bytes"},
+        {"name": "referralCode", "type": "uint16"}
+      ]
+    },
+    {
+      "name": "setUserUseReserveAsCollateral",
+      "selector": "0x5c60e39a",
+      "inputs": [
+        {"name": "asset", "type": "address"},
+        {"name": "useAsCollateral", "type": "bool"}
+      ]
+    }
+  ]
+}

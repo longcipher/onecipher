@@ -94,7 +94,24 @@ pub enum DenyReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,
+    Warn(WarnReason),
     Deny(DenyReason),
+}
+
+/// Warning reasons (non-blocking risk signals that should be surfaced to the user).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WarnReason {
+    /// Transaction amount exceeds a configured threshold.
+    LargeApproval { token: String, amount: String },
+    /// Target contract has never been interacted with before.
+    NewContract { address: String },
+    /// Cross-chain bridge interaction detected.
+    CrossChainBridge { source_chain: String, dest_chain: String },
+    /// Gas usage estimate is abnormally high.
+    HighGasUsage { estimated_gas: u64, threshold: u64 },
+    /// dApp origin is not in the verified list.
+    UnverifiedDapp { origin: String },
 }
 
 // ---------------------------------------------------------------------------
