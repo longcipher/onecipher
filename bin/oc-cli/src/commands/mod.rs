@@ -29,6 +29,7 @@ pub(crate) mod update;
 pub(crate) mod vault;
 pub(crate) mod wallet;
 pub(crate) mod wc;
+pub(crate) mod webui;
 
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 

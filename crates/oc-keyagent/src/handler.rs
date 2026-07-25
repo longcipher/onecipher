@@ -589,7 +589,7 @@ fn handle_pay_x402(req: &crate::proto::PayX402Request) -> Result<KeyAgentRespons
     let decision = policy_integration.evaluate(&pay_request, &req.session_key_id);
 
     match decision {
-        oc_policy::v2::Decision::Allow => {
+        oc_policy::v2::Decision::Allow | oc_policy::v2::Decision::Warn(_) => {
             let resp = crate::proto::PayX402Response {
                 status: crate::proto::PaymentStatus::Ok as i32,
                 receipt: vec![],

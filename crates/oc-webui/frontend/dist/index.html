@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OneCipher</title>
+    
+<script type="module">
+import init, * as bindings from '/oc-webui-frontend-78cdc17a16d4c9b2.js';
+const wasm = await init({ module_or_path: '/oc-webui-frontend-78cdc17a16d4c9b2_bg.wasm' });
+
+
+window.wasmBindings = bindings;
+
+
+dispatchEvent(new CustomEvent("TrunkApplicationStarted", {detail: {wasm}}));
+
+</script>
+<link rel="modulepreload" href="/oc-webui-frontend-78cdc17a16d4c9b2.js" crossorigin="anonymous" integrity="sha384-IulIulFnk32mzUSqcUkep5hWPt7cKGMjf8f+e8zLaikhH4PTeaK+V4bS4nNgWXcs"><link rel="preload" href="/oc-webui-frontend-78cdc17a16d4c9b2_bg.wasm" crossorigin="anonymous" integrity="sha384-rwmPZAvtP+uv/vHxa4PcEwA1SJSoIfk9UlcvYjJML1GgzPMFk8QVukyPWlR/nneY" as="fetch" type="application/wasm"></head>
+<body></body>
+</html>

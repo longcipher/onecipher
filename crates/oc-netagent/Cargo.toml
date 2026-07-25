@@ -14,15 +14,21 @@ path = "src/lib.rs"
 [dependencies]
 hex = { workspace = true }
 hpx = { workspace = true }
+jiff = { workspace = true }
+oc-core = { workspace = true }
 oc-intent = { workspace = true }
 oc-keyagent = { workspace = true }
+oc-policy = { workspace = true }
+oc-sim = { workspace = true }
 oc-walletconnect = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]
 oc-walletconnect = { workspace = true, features = ["test-utils"] }

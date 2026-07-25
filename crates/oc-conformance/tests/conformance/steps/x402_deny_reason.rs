@@ -478,6 +478,7 @@ fn deny_of(dec: Decision) -> DenyReason {
     match dec {
         Decision::Deny(r) => r,
         Decision::Allow => panic!("expected Deny, got Allow"),
+        Decision::Warn(_) => panic!("expected Deny, got Warn"),
     }
 }
 

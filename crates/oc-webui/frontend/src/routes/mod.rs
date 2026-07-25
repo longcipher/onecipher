@@ -1,0 +1,11 @@
+pub mod approvals;
+pub mod dashboard;
+pub mod history;
+pub mod no_address;
+pub mod send;
+pub mod sessions;
+pub mod settings;
+pub mod sort_hat;
+pub mod unlock;
+pub mod wallets;
+pub mod welcome;

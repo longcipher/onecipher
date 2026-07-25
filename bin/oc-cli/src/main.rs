@@ -232,6 +232,9 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             cli::WcCommands::Sessions => commands::wc::sessions(),
             cli::WcCommands::Disconnect { topic } => commands::wc::disconnect(&topic),
         },
+        Commands::Webui { subcommand } => match subcommand {
+            cli::WebUiCommands::Open => commands::webui::open(),
+        },
         Commands::Intent { subcommand } => {
             if !cli.experimental {
                 return Err(CliError::InvalidArgs(
@@ -424,6 +427,42 @@ fn run_daemon() -> Result<(), CliError> {
             }
         });
 
+        // --- Web UI server (conditionally spawned) ---
+        let webui_handle: Option<tokio::task::JoinHandle<()>> = {
+            let config = oc_core::Config::load_or_default();
+            if config.webui.enabled {
+                let (approval_tx, approval_rx) = tokio::sync::mpsc::channel(64);
+                // Store approval_tx for later injection into WcMethodRouter (W1.9 plumbing).
+                // For now, the channel exists but isn't connected to the router yet.
+                let _ = approval_tx;
+
+                match oc_webui::run_webui_server(&config.webui, state_dir.clone(), approval_rx)
+                    .await
+                {
+                    Ok((handle, port)) => {
+                        // Persist bound port for CLI `onecipher webui open`
+                        let port_file = state_dir.join("webui.port");
+                        let _ = std::fs::write(&port_file, port.to_string());
+                        #[cfg(unix)]
+                        {
+                            let _ = std::fs::set_permissions(
+                                &port_file,
+                                std::fs::Permissions::from_mode(0o600),
+                            );
+                        }
+                        eprintln!("Web UI listening on http://127.0.0.1:{port}");
+                        Some(handle)
+                    }
+                    Err(e) => {
+                        eprintln!("Web UI server failed to start: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        };
+
         eprintln!("daemon running (Ctrl+C to stop)");
 
         // Monitor the Key-Agent thread: bridge the sync mpsc receiver into the
@@ -443,6 +482,15 @@ fn run_daemon() -> Result<(), CliError> {
             }
             _ = wc_task => {
                 eprintln!("WC server exited");
+                Ok(())
+            }
+            () = async {
+                match webui_handle {
+                    Some(h) => { let _ = h.await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                eprintln!("Web UI server exited");
                 Ok(())
             }
             ka_err = ka_monitor => {

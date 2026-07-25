@@ -1,0 +1,59 @@
+{
+  "contract_name": "ERC1155",
+  "functions": [
+    {
+      "name": "safeTransferFrom",
+      "selector": "0xf242432a",
+      "inputs": [
+        {"name": "from", "type": "address"},
+        {"name": "to", "type": "address"},
+        {"name": "id", "type": "uint256"},
+        {"name": "amount", "type": "uint256"},
+        {"name": "data", "type": "bytes"}
+      ]
+    },
+    {
+      "name": "safeBatchTransferFrom",
+      "selector": "0x2eb2c2d6",
+      "inputs": [
+        {"name": "from", "type": "address"},
+        {"name": "to", "type": "address"},
+        {"name": "ids", "type": "uint256[]"},
+        {"name": "amounts", "type": "uint256[]"},
+        {"name": "data", "type": "bytes"}
+      ]
+    },
+    {
+      "name": "balanceOf",
+      "selector": "0x00fdd58e",
+      "inputs": [
+        {"name": "account", "type": "address"},
+        {"name": "id", "type": "uint256"}
+      ]
+    },
+    {
+      "name": "balanceOfBatch",
+      "selector": "0x4e1273f4",
+      "inputs": [
+        {"name": "accounts", "type": "address[]"},
+        {"name": "ids", "type": "uint256[]"}
+      ]
+    },
+    {
+      "name": "setApprovalForAll",
+      "selector": "0xa22cb465",
+      "inputs": [
+        {"name": "operator", "type": "address"},
+        {"name": "approved", "type": "bool"}
+      ]
+    },
+    {
+      "name": "isApprovedForAll",
+      "selector": "0xe985e9c5",
+      "inputs": [
+        {"name": "account", "type": "address"},
+        {"name": "operator", "type": "address"}
+      ]
+    }
+  ]
+}

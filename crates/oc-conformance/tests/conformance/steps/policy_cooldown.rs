@@ -146,7 +146,7 @@ async fn agent_triggers_denied_payx402(world: &mut ConformanceWorld) {
                 "cooldown_duration_sec": cooldown_duration_sec,
             })
         }
-        Decision::Allow => {
+        Decision::Allow | Decision::Warn(_) => {
             panic!("expected a DENY decision to trigger cooldown, got Allow");
         }
     };
@@ -285,7 +285,7 @@ async fn agent_makes_another_payx402_now(world: &mut ConformanceWorld) {
                 "cooldown_active": true,
             })
         }
-        Decision::Allow => {
+        Decision::Allow | Decision::Warn(_) => {
             panic!("expected Deny(Cooldown), got Allow");
         }
     };

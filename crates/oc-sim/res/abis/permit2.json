@@ -1,0 +1,43 @@
+{
+  "contract_name": "Permit2",
+  "functions": [
+    {
+      "name": "permit",
+      "selector": "0x3644e515",
+      "inputs": [
+        {"name": "owner", "type": "address"},
+        {"name": "permitSingle", "type": "tuple"},
+        {"name": "signature", "type": "bytes"}
+      ]
+    },
+    {
+      "name": "permitBatch",
+      "selector": "0x26dd72e2",
+      "inputs": [
+        {"name": "owner", "type": "address"},
+        {"name": "permitBatch", "type": "tuple"},
+        {"name": "signature", "type": "bytes"}
+      ]
+    },
+    {
+      "name": "transferFrom",
+      "selector": "0x36c78516",
+      "inputs": [
+        {"name": "from", "type": "address"},
+        {"name": "to", "type": "address"},
+        {"name": "amount", "type": "uint160"},
+        {"name": "token", "type": "address"}
+      ]
+    },
+    {
+      "name": "batchTransferFrom",
+      "selector": "0x7a01be13",
+      "inputs": [
+        {"name": "from", "type": "address"},
+        {"name": "tos", "type": "address[]"},
+        {"name": "amounts", "type": "uint160[]"},
+        {"name": "tokens", "type": "address[]"}
+      ]
+    }
+  ]
+}

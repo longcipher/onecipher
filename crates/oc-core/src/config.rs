@@ -12,6 +12,61 @@ pub struct BackupConfig {
     pub max_backups: Option<u32>,
 }
 
+/// Web UI configuration section.
+///
+/// Controls the local browser-based approval surface served by the daemon.
+/// All fields have sensible defaults so that existing config files without
+/// this section continue to parse (backward compatibility).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebuiConfig {
+    /// Whether the Web UI HTTP server is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Whether signing requests require explicit browser approval.
+    #[serde(default)]
+    pub approval_mode: bool,
+    /// Seconds before an unanswered approval times out.
+    #[serde(default = "WebuiConfig::default_approval_timeout_secs")]
+    pub approval_timeout_secs: u64,
+    /// Loopback listen address (e.g. "127.0.0.1:0" for random port).
+    #[serde(default = "WebuiConfig::default_listen")]
+    pub listen: String,
+    /// Session inactivity timeout in seconds.
+    #[serde(default = "WebuiConfig::default_session_timeout_secs")]
+    pub session_timeout_secs: u64,
+    /// ISO-8601 or unix timestamp at which sessions auto-lock.
+    /// Empty string means no deadline set.
+    #[serde(default)]
+    pub auto_lock_at: String,
+}
+
+impl Default for WebuiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            approval_mode: false,
+            approval_timeout_secs: Self::default_approval_timeout_secs(),
+            listen: Self::default_listen(),
+            session_timeout_secs: Self::default_session_timeout_secs(),
+            auto_lock_at: String::new(),
+        }
+    }
+}
+
+impl WebuiConfig {
+    fn default_approval_timeout_secs() -> u64 {
+        300
+    }
+
+    fn default_listen() -> String {
+        "127.0.0.1:0".to_string()
+    }
+
+    fn default_session_timeout_secs() -> u64 {
+        1800
+    }
+}
+
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -22,6 +77,9 @@ pub struct Config {
     pub plugins: HashMap<String, serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup: Option<BackupConfig>,
+    /// Web UI configuration. Defaults to disabled if absent.
+    #[serde(default)]
+    pub webui: WebuiConfig,
 }
 
 impl Config {
@@ -69,6 +127,7 @@ impl Default for Config {
             rpc: Self::default_rpc(),
             plugins: HashMap::new(),
             backup: None,
+            webui: WebuiConfig::default(),
         }
     }
 }
@@ -112,6 +171,7 @@ impl Config {
             }
             config.plugins = user_config.plugins;
             config.backup = user_config.backup;
+            config.webui = user_config.webui;
             if user_config.vault_path.as_path() != std::path::Path::new("/tmp/.onecipher") &&
                 user_config.vault_path.to_string_lossy() != ""
             {
@@ -143,6 +203,7 @@ mod tests {
             rpc,
             plugins: HashMap::new(),
             backup: None,
+            webui: WebuiConfig::default(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let config2: Config = serde_json::from_str(&json).unwrap();
@@ -205,6 +266,7 @@ mod tests {
                 auto_backup: Some(true),
                 max_backups: Some(5),
             }),
+            webui: WebuiConfig::default(),
         };
         let json = serde_json::to_value(&config).unwrap();
         assert!(json.get("backup").is_some());
@@ -249,5 +311,45 @@ mod tests {
         assert_eq!(config.rpc_url("eip155:137"), Some("https://polygon-rpc.com"));
         // Custom vault path
         assert_eq!(config.vault_path, PathBuf::from("/tmp/custom-vault"));
+    }
+
+    #[test]
+    fn test_config_without_webui_parses_to_defaults() {
+        // A config JSON without a "webui" key must still parse and yield defaults.
+        let json = r#"{"vault_path": "/tmp/.onecipher", "rpc": {}}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.webui, WebuiConfig::default());
+        assert!(!config.webui.enabled);
+        assert!(!config.webui.approval_mode);
+        assert_eq!(config.webui.approval_timeout_secs, 300);
+        assert_eq!(config.webui.listen, "127.0.0.1:0");
+        assert_eq!(config.webui.session_timeout_secs, 1800);
+        assert_eq!(config.webui.auto_lock_at, "");
+    }
+
+    #[test]
+    fn test_webui_config_roundtrip() {
+        let webui = WebuiConfig {
+            enabled: true,
+            approval_mode: true,
+            approval_timeout_secs: 600,
+            listen: "127.0.0.1:8080".to_string(),
+            session_timeout_secs: 3600,
+            auto_lock_at: "2025-01-01T00:00:00Z".to_string(),
+        };
+        let json = serde_json::to_string(&webui).unwrap();
+        let parsed: WebuiConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(webui, parsed);
+    }
+
+    #[test]
+    fn test_webui_config_partial_fields() {
+        // Only some fields provided; rest default.
+        let json = r#"{"enabled": true}"#;
+        let webui: WebuiConfig = serde_json::from_str(json).unwrap();
+        assert!(webui.enabled);
+        assert!(!webui.approval_mode);
+        assert_eq!(webui.approval_timeout_secs, 300);
+        assert_eq!(webui.listen, "127.0.0.1:0");
     }
 }

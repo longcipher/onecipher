@@ -10,6 +10,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod approval;
+pub mod approval_log;
 pub mod error;
 pub mod key_agent_client;
 pub mod rpc_client;
@@ -17,6 +19,10 @@ pub mod wc_method_router;
 pub mod wc_pairing;
 pub mod wc_session_store;
 
+pub use approval::{
+    ApprovalChannel, ApprovalDecision, DecodedAction, PendingApproval, RiskLevel, RiskReason,
+    RiskSource, TokenDelta, TokenDirection, TxSimulation,
+};
 pub use error::NetAgentError;
 pub use key_agent_client::KeyAgentClient;
 pub use rpc_client::HpxRpcClient;

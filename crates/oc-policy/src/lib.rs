@@ -25,7 +25,7 @@ pub use secret::{Effect, PolicyDecision, SecretOperation, SecretPolicyRule, chec
 pub use v1::{evaluate_executable, evaluate_one, evaluate_policies, evaluate_rule};
 pub use v2::{
     AlertSink, BudgetAllocation, Decision, DenyReason, HumanAlert, LogAlertSink, PayRequest,
-    PolicyRulesV2, PolicyState, PolicyV2, evaluate_11_step,
+    PolicyRulesV2, PolicyState, PolicyV2, WarnReason, evaluate_11_step,
 };
 pub use v3::{
     ComparisonOp, PolicyRule, PolicyV3, RuleCondition, RuleEffect, evaluate_v3, parse_policy_v3,

@@ -434,7 +434,7 @@ async fn agent_calls_pay_x402(world: &mut ConformanceWorld) {
                 )
                 .expect("audit append for denied PayX402 must succeed");
         }
-        Decision::Allow => {
+        Decision::Allow | Decision::Warn(_) => {
             world.last_audit_event = Some(EventType::PayX402);
             audit
                 .append(

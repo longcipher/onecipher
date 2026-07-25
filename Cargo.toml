@@ -13,9 +13,11 @@ members = [
     "crates/oc-secret",
     "crates/oc-session-key",
     "crates/oc-signer",
+    "crates/oc-sim",
     "crates/oc-vault",
     "crates/oc-wallet",
     "crates/oc-walletconnect",
+    "crates/oc-webui",
 ]
 exclude = ["examples", "fuzz"]
 
@@ -38,9 +40,15 @@ oc-policy = { path = "crates/oc-policy" }
 oc-secret = { path = "crates/oc-secret" }
 oc-session-key = { path = "crates/oc-session-key" }
 oc-signer = { path = "crates/oc-signer" }
+oc-sim = { path = "crates/oc-sim" }
 oc-vault = { path = "crates/oc-vault" }
 oc-wallet = { path = "crates/oc-wallet", default-features = false }
 oc-walletconnect = { path = "crates/oc-walletconnect" }
+oc-webui = { path = "crates/oc-webui" }
+
+alloy-eips = "2.0.4"
+alloy-primitives = "1.5.7"
+evm2 = { git = "https://github.com/alloy-rs/evm2", rev = "f85cf2657362c742ce7f6e4e6d39d4ac14823cb3", default-features = false }
 
 # external crates
 aes-gcm-siv = "0.11.0"
