@@ -7,13 +7,8 @@ repository.workspace = true
 publish.workspace = true
 description = "EVM transaction simulation via evm2"
 
-[lints]
-workspace = true
-
 [dependencies]
-alloy-eips = { workspace = true }
 alloy-primitives = { workspace = true }
-evm2 = { workspace = true, features = ["std", "parse", "asm-keccak"] }
 hex = { workspace = true }
 oc-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -24,3 +19,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

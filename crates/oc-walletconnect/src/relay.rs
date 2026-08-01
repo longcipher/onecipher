@@ -53,7 +53,7 @@ impl RelayClient {
         loop {
             match self.ws.next().await {
                 Some(frame) => match frame.opcode() {
-                    OpCode::Text => return Ok(frame.as_str().to_owned()),
+                    OpCode::Text => return Ok(frame.as_str()?.to_owned()),
                     OpCode::Binary => {
                         return Ok(String::from_utf8_lossy(frame.payload()).into_owned());
                     }

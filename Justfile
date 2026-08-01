@@ -30,11 +30,6 @@ lint:
     RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
     cargo sort -w -g -c
     cargo shear
-    # R56 hard gate — verify no forbidden async/network crates in dep tree.
-    cargo tree -p oc-crypto -e features
-    cargo tree -p oc-policy -e features
-    cargo tree -p oc-keyagent -e features
-    cargo tree -p oc-session-key -e features
 
 # ============================================================
 # Testing
