@@ -150,6 +150,21 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: AgentSecretCommands,
     },
+    /// Run a command with secrets injected as environment variables
+    Env {
+        /// Secret names to inject (repeatable, or directory prefix for batch)
+        #[arg(long = "name")]
+        names: Vec<String>,
+        /// Keep original key case (default: uppercase)
+        #[arg(long)]
+        keep_case: bool,
+        /// Use exec(3) to replace current process
+        #[arg(long)]
+        exec: bool,
+        /// Command to run
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
     /// Migrate legacy keystore v3 wallets to age-encrypted secrets
     Migrate {
         /// Dry run: report what would be migrated without writing any files
@@ -160,8 +175,68 @@ pub(crate) enum Commands {
         #[arg(long)]
         rollback: bool,
     },
+    /// Search inside decrypted secret content
+    Grep {
+        /// Search pattern (case-insensitive substring, or regex with --regex)
+        pattern: String,
+        /// Use regex matching
+        #[arg(long, short)]
+        regex: bool,
+        /// Output as JSON
+        #[arg(long, short)]
+        json: bool,
+    },
+    /// Search secrets with fuzzy matching
+    Find {
+        /// Search query
+        query: Option<String>,
+        /// Use regex matching
+        #[arg(long, short)]
+        regex: bool,
+        /// Output as JSON
+        #[arg(long, short)]
+        json: bool,
+        /// Filter by item type
+        #[arg(long)]
+        r#type: Option<String>,
+    },
     /// Launch interactive TUI for browsing/copying/deleting secrets
     Tui,
+    /// Run diagnostics to check system health
+    Doctor {
+        /// Show passing checks too
+        #[arg(long, short)]
+        verbose: bool,
+    },
+    /// Generate shell completion scripts
+    Completion {
+        /// Shell to generate completions for (bash, zsh, fish, powershell, elvish)
+        shell: String,
+    },
+    /// Check and repair secret store integrity
+    Fsck {
+        /// Automatically fix issues
+        #[arg(long)]
+        fix: bool,
+        /// Decrypt and re-encrypt all secrets (for key rotation validation)
+        #[arg(long)]
+        decrypt: bool,
+    },
+    /// Show version history of a secret (H3)
+    #[cfg(feature = "git")]
+    History {
+        /// Secret name
+        name: String,
+        /// Show password in history output
+        #[arg(long, short)]
+        password: bool,
+        /// Maximum number of entries to show
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Output as JSON
+        #[arg(long, short)]
+        json: bool,
+    },
     /// Git sync operations for the secrets vault (Stage 5)
     #[cfg(feature = "git")]
     Git {
@@ -187,6 +262,18 @@ pub(crate) enum AuditCommands {
         /// Filter by status (ALLOWED/DENIED)
         #[arg(long)]
         status: Option<String>,
+    },
+    /// Audit secrets for security issues (weak, duplicate, old passwords)
+    Secrets {
+        /// Output format: text, json
+        #[arg(long, default_value = "text")]
+        format: String,
+        /// Maximum password age in days
+        #[arg(long, default_value_t = 365)]
+        max_age: u64,
+        /// Skip breach detection (HaveIBeenPwned k-anonymity API)
+        #[arg(long)]
+        skip_hibp: bool,
     },
 }
 
@@ -388,6 +475,9 @@ pub(crate) enum SecretCommands {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+        /// Display secret as QR code in terminal
+        #[arg(long)]
+        qr: bool,
     },
     /// Add a new secret
     Add {
@@ -426,6 +516,34 @@ pub(crate) enum SecretCommands {
         /// New name
         new: String,
     },
+    /// Edit a secret in $EDITOR
+    Edit {
+        /// Secret name
+        name: String,
+        /// Editor to use (overrides $EDITOR)
+        #[arg(long)]
+        editor: Option<String>,
+    },
+    /// Copy a secret to a new name
+    Copy {
+        /// Source secret name
+        src: String,
+        /// Destination secret name
+        dst: String,
+        /// Overwrite if destination exists
+        #[arg(long, short)]
+        force: bool,
+    },
+    /// Move a secret to a new name
+    Move {
+        /// Source secret name
+        src: String,
+        /// Destination secret name
+        dst: String,
+        /// Overwrite if destination exists
+        #[arg(long, short)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -457,6 +575,9 @@ pub(crate) enum PasswordCommands {
         /// Copy to clipboard
         #[arg(long)]
         copy: bool,
+        /// Clipboard auto-clear timeout in seconds (default 45, 0 = never clear)
+        #[arg(long, default_value_t = 45)]
+        timeout: u64,
     },
     /// Generate a random password
     Generate {
@@ -466,6 +587,18 @@ pub(crate) enum PasswordCommands {
         /// Include symbols
         #[arg(long)]
         symbols: bool,
+        /// Generator strategy: cryptic (default), memorable, xkcd
+        #[arg(long, default_value = "cryptic")]
+        generator: String,
+        /// XKCD word separator (xkcd generator only)
+        #[arg(long, default_value = "-")]
+        xkcd_sep: String,
+        /// Number of XKCD words
+        #[arg(long, default_value_t = 4)]
+        xkcd_words: usize,
+        /// Display password as QR code in terminal
+        #[arg(long)]
+        qr: bool,
     },
 }
 
@@ -492,11 +625,25 @@ pub(crate) enum TotpCommands {
     Generate {
         /// Secret name
         name: String,
+        /// Display TOTP code as QR code in terminal
+        #[arg(long)]
+        qr: bool,
     },
     /// Output otpauth URI for a secret
     Uris {
         /// Secret name
         name: String,
+    },
+    /// Generate HOTP code
+    Hotp {
+        /// Secret name
+        name: String,
+        /// Counter value
+        #[arg(long)]
+        counter: u64,
+        /// Increment counter after generation
+        #[arg(long)]
+        increment: bool,
     },
 }
 
@@ -863,6 +1010,13 @@ pub(crate) enum KeyCommands {
 pub(crate) enum ConfigCommands {
     /// Show current configuration and RPC endpoints
     Show,
+    /// Set a configuration value
+    Set {
+        /// Configuration key (e.g. "webui.enabled", "rpc.eip155:1")
+        key: String,
+        /// Value to set
+        value: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]

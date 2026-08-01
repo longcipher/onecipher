@@ -22,6 +22,7 @@ git = ["oc-secret/git"]
 [dependencies]
 arboard = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
+clap_complete = { workspace = true }
 crossterm = { workspace = true }
 dirs = "6"
 eyre = { workspace = true }
@@ -40,10 +41,14 @@ oc-wallet = { workspace = true, features = ["rpc", "sui-grpc"] }
 oc-walletconnect = { workspace = true }
 oc-webui = { workspace = true }
 prost = { workspace = true }
+qr2term = { workspace = true }
 rand = { workspace = true }
 ratatui = { workspace = true }
+regex-lite = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
