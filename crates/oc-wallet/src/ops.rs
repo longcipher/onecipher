@@ -156,8 +156,11 @@ pub(crate) fn secret_to_signing_key(
 pub fn generate_mnemonic(words: u32) -> Result<String, OcWalletError> {
     let strength = match words {
         12 => MnemonicStrength::Words12,
+        15 => MnemonicStrength::Words15,
+        18 => MnemonicStrength::Words18,
+        21 => MnemonicStrength::Words21,
         24 => MnemonicStrength::Words24,
-        _ => return Err(OcWalletError::InvalidInput("words must be 12 or 24".into())),
+        _ => return Err(OcWalletError::InvalidInput("words must be 12, 15, 18, 21, or 24".into())),
     };
 
     let mnemonic = Mnemonic::generate(strength)?;
@@ -195,8 +198,11 @@ pub fn create_wallet(
     let words = words.unwrap_or(12);
     let strength = match words {
         12 => MnemonicStrength::Words12,
+        15 => MnemonicStrength::Words15,
+        18 => MnemonicStrength::Words18,
+        21 => MnemonicStrength::Words21,
         24 => MnemonicStrength::Words24,
-        _ => return Err(OcWalletError::InvalidInput("words must be 12 or 24".into())),
+        _ => return Err(OcWalletError::InvalidInput("words must be 12, 15, 18, 21, or 24".into())),
     };
 
     if oc_vault::wallet_name_exists(name, vault_path)? {
@@ -748,9 +754,10 @@ mod tests {
 
     #[test]
     fn mnemonic_invalid_word_count() {
-        assert!(generate_mnemonic(15).is_err());
         assert!(generate_mnemonic(0).is_err());
         assert!(generate_mnemonic(13).is_err());
+        assert!(generate_mnemonic(16).is_err());
+        assert!(generate_mnemonic(25).is_err());
     }
 
     #[test]

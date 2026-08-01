@@ -301,6 +301,67 @@ impl ChainSigner for EvmSigner {
     fn default_derivation_path(&self, index: u32) -> String {
         format!("m/44'/60'/0'/0/{}", index)
     }
+
+    fn verify_message(
+        &self,
+        address: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, SignerError> {
+        // EIP-191 personal_sign: keccak256("\x19Ethereum Signed Message:\n" + len + msg)
+        let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
+        let mut prefixed = Vec::new();
+        prefixed.extend_from_slice(prefix.as_bytes());
+        prefixed.extend_from_slice(message);
+        let hash = Keccak256::digest(&prefixed);
+        self.verify_hash(address, &hash, signature)
+    }
+
+    fn verify_hash(
+        &self,
+        address: &str,
+        hash: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, SignerError> {
+        if hash.len() != 32 {
+            return Err(SignerError::InvalidMessage(format!(
+                "expected 32-byte hash, got {} bytes",
+                hash.len()
+            )));
+        }
+        if signature.len() != 65 {
+            return Err(SignerError::InvalidMessage(format!(
+                "expected 65-byte signature (r+s+v), got {} bytes",
+                signature.len()
+            )));
+        }
+
+        let r_bytes: [u8; 32] =
+            signature[..32].try_into().map_err(|_| SignerError::InvalidMessage("bad r".into()))?;
+        let s_bytes: [u8; 32] = signature[32..64]
+            .try_into()
+            .map_err(|_| SignerError::InvalidMessage("bad s".into()))?;
+        let v = signature[64];
+
+        // v must be 27 or 28 for EIP-191/EIP-712
+        let recovery_id = if v >= 27 { v - 27 } else { v };
+        let recid = k256::ecdsa::RecoveryId::try_from(recovery_id)
+            .map_err(|e| SignerError::InvalidMessage(format!("bad recovery id: {e}")))?;
+        let ecdsa_sig = k256::ecdsa::Signature::from_scalars(r_bytes, s_bytes)
+            .map_err(|e| SignerError::InvalidMessage(format!("bad signature: {e}")))?;
+
+        let recovered_key =
+            k256::ecdsa::VerifyingKey::recover_from_prehash(hash, &ecdsa_sig, recid)
+                .map_err(|e| SignerError::InvalidMessage(format!("recovery failed: {e}")))?;
+
+        // Derive address from recovered key
+        let pubkey_bytes = recovered_key.to_sec1_point(false);
+        let pubkey_hash = Keccak256::digest(&pubkey_bytes.as_bytes()[1..]);
+        let recovered_addr = Self::eip55_checksum(&hex::encode(&pubkey_hash[12..]));
+
+        // Compare case-insensitively
+        Ok(recovered_addr.to_lowercase() == address.to_lowercase())
+    }
 }
 
 #[cfg(test)]
@@ -535,6 +596,48 @@ mod tests {
         // Verify structure
         assert_eq!(signed_tx[0], 0x02, "should preserve type byte");
         assert!(signed_tx.len() > unsigned_tx.len(), "signed tx should be larger than unsigned tx");
+    }
+
+    #[test]
+    fn test_verify_message_eip191() {
+        let privkey =
+            hex::decode("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318")
+                .unwrap();
+        let signer = EvmSigner;
+        let address = signer.derive_address(&privkey).unwrap();
+        let result = signer.sign_message(&privkey, b"Hello World").unwrap();
+        let valid = signer.verify_message(&address, b"Hello World", &result.signature).unwrap();
+        assert!(valid, "signature should verify against the correct address");
+    }
+
+    #[test]
+    fn test_verify_message_wrong_address() {
+        let privkey =
+            hex::decode("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318")
+                .unwrap();
+        let signer = EvmSigner;
+        let result = signer.sign_message(&privkey, b"Hello World").unwrap();
+        let valid = signer
+            .verify_message(
+                "0x0000000000000000000000000000000000000000",
+                b"Hello World",
+                &result.signature,
+            )
+            .unwrap();
+        assert!(!valid, "signature should not verify against wrong address");
+    }
+
+    #[test]
+    fn test_verify_hash_roundtrip() {
+        let privkey =
+            hex::decode("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318")
+                .unwrap();
+        let signer = EvmSigner;
+        let address = signer.derive_address(&privkey).unwrap();
+        let hash = Keccak256::digest(b"test data for verify");
+        let result = signer.sign(&privkey, &hash).unwrap();
+        let valid = signer.verify_hash(&address, &hash, &result.signature).unwrap();
+        assert!(valid, "raw hash signature should verify");
     }
 
     #[test]

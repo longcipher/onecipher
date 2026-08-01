@@ -166,7 +166,7 @@ fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
         }
     }
 
-    if qi == query_lower.len() { Some(score) } else { None }
+    (qi == query_lower.len()).then_some(score)
 }
 
 fn is_separator(c: char) -> bool {
@@ -260,8 +260,8 @@ fn run_selector(
     loop {
         render_selector(stdout, entries, &filtered, selected, &query)?;
 
-        match event::read()? {
-            Event::Key(KeyEvent { code, modifiers, .. }) => match code {
+        if let Event::Key(KeyEvent { code, modifiers, .. }) = event::read()? {
+            match code {
                 KeyCode::Up => {
                     if selected > 0 {
                         selected -= 1;
@@ -299,8 +299,7 @@ fn run_selector(
                     update_filtered(entries, &query, &mut filtered, &mut selected);
                 }
                 _ => {}
-            },
-            _ => {}
+            }
         }
     }
 }
@@ -368,7 +367,7 @@ fn render_selector(
                     "{} {} {}",
                     style::PrintStyledContent("▸".with(Color::Green).bold()),
                     style::PrintStyledContent(
-                        name.to_string().with(Color::White).attribute(Attribute::Bold)
+                        name.clone().with(Color::White).attribute(Attribute::Bold)
                     ),
                     style::PrintStyledContent(type_str.with(Color::DarkGrey))
                 )?;
@@ -376,7 +375,7 @@ fn render_selector(
                 writeln!(
                     stdout,
                     "  {} {}",
-                    style::PrintStyledContent(name.to_string().with(Color::White)),
+                    style::PrintStyledContent(name.clone().with(Color::White)),
                     style::PrintStyledContent(type_str.with(Color::DarkGrey))
                 )?;
             }

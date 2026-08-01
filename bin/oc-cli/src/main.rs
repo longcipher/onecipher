@@ -93,10 +93,27 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             cli::WalletCommands::Create { name, words, show_mnemonic } => {
                 commands::wallet::create(&name, words, show_mnemonic)
             }
-            cli::WalletCommands::Import { name, mnemonic, private_key, chain, index } => {
-                commands::wallet::import(&name, mnemonic, private_key, chain.as_deref(), index)
+            cli::WalletCommands::Import {
+                name,
+                mnemonic,
+                private_key,
+                chain,
+                index,
+                interactive,
+            } => {
+                if interactive {
+                    commands::wallet::import_interactive(&name, chain.as_deref())
+                } else {
+                    commands::wallet::import(&name, mnemonic, private_key, chain.as_deref(), index)
+                }
             }
-            cli::WalletCommands::Export { wallet } => commands::wallet::export(&wallet),
+            cli::WalletCommands::Export { wallet, public_key, chain, compressed } => {
+                if public_key {
+                    commands::wallet::export_public_key(&wallet, chain.as_deref(), compressed)
+                } else {
+                    commands::wallet::export(&wallet)
+                }
+            }
             cli::WalletCommands::Delete { wallet, confirm } => {
                 commands::wallet::delete(&wallet, confirm)
             }
@@ -105,6 +122,9 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             }
             cli::WalletCommands::List => commands::wallet::list(),
             cli::WalletCommands::Info => commands::info::run(),
+            cli::WalletCommands::ChangePassword { wallet } => {
+                commands::wallet::change_password(&wallet)
+            }
         },
         Commands::Sign { subcommand } => match subcommand {
             cli::SignCommands::Message {
@@ -137,7 +157,65 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
                     rpc_url.as_deref(),
                 )
             }
+            cli::SignCommands::Auth { chain, wallet, address, nonce, index, json } => {
+                commands::sign_auth::run(&chain, &wallet, &address, &nonce, index, json)
+            }
         },
+        Commands::Vanity { starts_with, ends_with, count, jobs, save_path, save_to_vault } => {
+            commands::vanity::run(
+                starts_with.as_deref(),
+                ends_with.as_deref(),
+                count,
+                jobs,
+                save_path.as_deref(),
+                save_to_vault,
+            )
+        }
+        Commands::Verify {
+            address,
+            message,
+            typed_data: _,
+            typed_data_file: _,
+            hash,
+            no_hash,
+            signature,
+            chain,
+        } => {
+            // Verify command implementation
+            let chain_parsed = oc_core::parse_chain(&chain)
+                .map_err(|e| CliError::InvalidArgs(format!("invalid chain: {e}")))?;
+            if chain_parsed.chain_type != oc_core::ChainType::Evm {
+                return Err(CliError::InvalidArgs(
+                    "verify is currently only supported for EVM chains".into(),
+                ));
+            }
+            let sig_bytes = hex::decode(signature.strip_prefix("0x").unwrap_or(&signature))
+                .map_err(|e| CliError::InvalidArgs(format!("invalid signature hex: {e}")))?;
+            let signer = oc_signer::signer_for_chain(chain_parsed.chain_type);
+            let valid = if let Some(hash_hex) = hash {
+                let hash_bytes = hex::decode(hash_hex.strip_prefix("0x").unwrap_or(&hash_hex))
+                    .map_err(|e| CliError::InvalidArgs(format!("invalid hash hex: {e}")))?;
+                if no_hash {
+                    signer.verify_hash(&address, &hash_bytes, &sig_bytes)?
+                } else {
+                    signer.verify_message(&address, &hash_bytes, &sig_bytes)?
+                }
+            } else if let Some(msg) = message {
+                signer.verify_message(&address, msg.as_bytes(), &sig_bytes)?
+            } else {
+                return Err(CliError::InvalidArgs(
+                    "one of --message, --typed-data, --typed-data-file, or --hash is required"
+                        .into(),
+                ));
+            };
+            if valid {
+                println!("Signature is valid.");
+                Ok(())
+            } else {
+                println!("Signature is INVALID.");
+                Err(CliError::InvalidArgs("signature verification failed".into()))
+            }
+        }
         Commands::Fund { subcommand } => match subcommand {
             cli::FundCommands::Deposit { wallet, chain, token } => {
                 commands::fund::run(&wallet, Some(&chain), Some(&token))
@@ -156,8 +234,14 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         },
         Commands::Mnemonic { subcommand } => match subcommand {
             cli::MnemonicCommands::Generate { words } => commands::generate::run(words),
-            cli::MnemonicCommands::Derive { chain, index } => {
-                commands::derive::run(chain.as_deref(), index)
+            cli::MnemonicCommands::Derive { chain, index, path, count, show_private_key } => {
+                commands::derive::run(
+                    chain.as_deref(),
+                    index,
+                    path.as_deref(),
+                    count,
+                    show_private_key,
+                )
             }
         },
         Commands::Policy { subcommand } => match subcommand {

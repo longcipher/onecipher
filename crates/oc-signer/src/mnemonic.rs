@@ -7,6 +7,12 @@ use crate::SecretBytes;
 pub enum MnemonicStrength {
     /// 12 words (128 bits of entropy)
     Words12,
+    /// 15 words (160 bits of entropy)
+    Words15,
+    /// 18 words (192 bits of entropy)
+    Words18,
+    /// 21 words (224 bits of entropy)
+    Words21,
     /// 24 words (256 bits of entropy)
     Words24,
 }
@@ -24,6 +30,18 @@ impl Mnemonic {
         let mnemonic = match strength {
             MnemonicStrength::Words12 => {
                 let entropy: [u8; 16] = rand::random();
+                Bip39Mnemonic::<English>::new_from_entropy(entropy.into())
+            }
+            MnemonicStrength::Words15 => {
+                let entropy: [u8; 20] = rand::random();
+                Bip39Mnemonic::<English>::new_from_entropy(entropy.into())
+            }
+            MnemonicStrength::Words18 => {
+                let entropy: [u8; 24] = rand::random();
+                Bip39Mnemonic::<English>::new_from_entropy(entropy.into())
+            }
+            MnemonicStrength::Words21 => {
+                let entropy: [u8; 28] = rand::random();
                 Bip39Mnemonic::<English>::new_from_entropy(entropy.into())
             }
             MnemonicStrength::Words24 => {
@@ -94,6 +112,24 @@ mod tests {
     fn test_generate_24_words() {
         let mnemonic = Mnemonic::generate(MnemonicStrength::Words24).unwrap();
         assert_eq!(mnemonic.word_count(), 24);
+    }
+
+    #[test]
+    fn test_generate_15_words() {
+        let mnemonic = Mnemonic::generate(MnemonicStrength::Words15).unwrap();
+        assert_eq!(mnemonic.word_count(), 15);
+    }
+
+    #[test]
+    fn test_generate_18_words() {
+        let mnemonic = Mnemonic::generate(MnemonicStrength::Words18).unwrap();
+        assert_eq!(mnemonic.word_count(), 18);
+    }
+
+    #[test]
+    fn test_generate_21_words() {
+        let mnemonic = Mnemonic::generate(MnemonicStrength::Words21).unwrap();
+        assert_eq!(mnemonic.word_count(), 21);
     }
 
     #[test]

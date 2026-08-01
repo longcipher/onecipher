@@ -64,7 +64,7 @@ pub(crate) fn run(name: &str, password: bool, limit: usize, json: bool) -> Resul
         for e in &entries {
             let short: &str = e.oid.get(..7).unwrap_or(&e.oid);
             let date = format_timestamp(e.time);
-            println!("{short}  {date}  {author}  {msg}", author = e.author, msg = e.message.trim(),);
+            println!("{short}  {date}  {author}  {msg}", author = e.author, msg = e.message.trim());
         }
     }
 
@@ -73,10 +73,11 @@ pub(crate) fn run(name: &str, password: bool, limit: usize, json: bool) -> Resul
 
 /// Format a Unix timestamp as a human-readable UTC date string.
 fn format_timestamp(ts: i64) -> String {
-    jiff::Timestamp::from_second(ts)
-        .map(|t| {
+    jiff::Timestamp::from_second(ts).map_or_else(
+        |_| format!("t:{ts}"),
+        |t| {
             let zoned = t.to_zoned(jiff::tz::TimeZone::UTC);
             zoned.strftime("%Y-%m-%d %H:%M:%S").to_string()
-        })
-        .unwrap_or_else(|_| format!("t:{ts}"))
+        },
+    )
 }

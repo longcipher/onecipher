@@ -80,6 +80,37 @@ pub trait ChainSigner: Send + Sync {
 
     /// Returns the default BIP-44 derivation path template for this chain.
     fn default_derivation_path(&self, index: u32) -> String;
+
+    /// Verify a message signature. Returns `Ok(true)` if valid, `Ok(false)` if
+    /// the signature does not match the expected address. Default returns an
+    /// error — chains must opt in.
+    fn verify_message(
+        &self,
+        address: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, SignerError> {
+        let _ = (address, message, signature);
+        Err(SignerError::InvalidMessage(format!(
+            "verify_message not implemented for {}",
+            self.chain_type()
+        )))
+    }
+
+    /// Verify a raw pre-hash signature. Returns `Ok(true)` if valid.
+    /// Default returns an error — chains must opt in.
+    fn verify_hash(
+        &self,
+        address: &str,
+        hash: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, SignerError> {
+        let _ = (address, hash, signature);
+        Err(SignerError::InvalidMessage(format!(
+            "verify_hash not implemented for {}",
+            self.chain_type()
+        )))
+    }
 }
 
 /// Errors that can occur during signing operations.

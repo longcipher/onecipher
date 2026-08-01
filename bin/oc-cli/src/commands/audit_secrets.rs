@@ -79,7 +79,7 @@ pub(crate) fn run(format: &str, max_age: u64, skip_hibp: bool) -> Result<(), Cli
 
         // HIBP breach check.
         if !skip_hibp {
-            if let Ok(true) = check_hibp(password) {
+            if matches!(check_hibp(password), Ok(true)) {
                 breached.push(idx_entry.name.clone());
             }
         }
