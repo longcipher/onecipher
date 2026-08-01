@@ -13,10 +13,6 @@ pub(crate) struct Cli {
     #[arg(long)]
     pub(crate) daemon: bool,
 
-    /// Enable experimental commands (Intent, TUI secret creation).
-    #[arg(long, global = true)]
-    pub(crate) experimental: bool,
-
     #[command(subcommand)]
     pub(crate) command: Option<Commands>,
 }

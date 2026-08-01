@@ -101,7 +101,7 @@ mod tests {
     use crate::approval_queue::ApprovalQueue;
 
     fn test_state() -> AppState {
-        AppState { queue: ApprovalQueue::new(16) }
+        AppState { queue: ApprovalQueue::new(16), state_dir: std::path::PathBuf::from("/tmp") }
     }
 
     fn json_body(value: serde_json::Value) -> Body {
