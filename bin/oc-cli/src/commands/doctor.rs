@@ -32,41 +32,39 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
     // 1. Home directory exists and has mode 0700.
     {
         let mut cx = check!("Home directory");
-        if !home.exists() {
-            cx.fail(&format!("{} does not exist", home.display()));
-        } else {
+        if home.exists() {
             cx.ok(&format!("{}", home.display()));
             #[cfg(unix)]
             {
-                let mode =
-                    std::fs::metadata(&home).map(|m| m.permissions().mode() & 0o777).unwrap_or(0);
+                let mode = std::fs::metadata(&home).map_or(0, |m| m.permissions().mode() & 0o777);
                 if mode != 0o700 {
                     cx.warn(&format!("permissions are {mode:04o}, expected 0700"));
                 } else if verbose {
                     cx.ok("permissions are 0700");
                 }
             }
+        } else {
+            cx.fail(&format!("{} does not exist", home.display()));
         }
     }
 
     // 2. Secret store directory exists.
     {
         let mut cx = check!("Secret store");
-        if !store_root.exists() {
-            cx.fail(&format!("{} does not exist", store_root.display()));
-        } else {
+        if store_root.exists() {
             cx.ok(&format!("{}", store_root.display()));
             #[cfg(unix)]
             {
-                let mode = std::fs::metadata(&store_root)
-                    .map(|m| m.permissions().mode() & 0o777)
-                    .unwrap_or(0);
+                let mode =
+                    std::fs::metadata(&store_root).map_or(0, |m| m.permissions().mode() & 0o777);
                 if mode != 0o700 {
                     cx.warn(&format!("permissions are {mode:04o}, expected 0700"));
                 } else if verbose {
                     cx.ok("permissions are 0700");
                 }
             }
+        } else {
+            cx.fail(&format!("{} does not exist", store_root.display()));
         }
     }
 
@@ -94,12 +92,7 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
     // 4. Age recipients file exists and has at least 1 recipient.
     {
         let mut cx = check!("Age recipients");
-        if !recipients_path.exists() {
-            cx.fail(&format!(
-                "{} does not exist — run `onecipher age init`",
-                recipients_path.display()
-            ));
-        } else {
+        if recipients_path.exists() {
             match RecipientsFile::load(&recipients_path) {
                 Err(e) => {
                     cx.fail(&format!("parse error: {e}"));
@@ -112,6 +105,11 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
                     }
                 }
             }
+        } else {
+            cx.fail(&format!(
+                "{} does not exist — run `onecipher age init`",
+                recipients_path.display()
+            ));
         }
     }
 
@@ -119,9 +117,7 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
     {
         let mut cx = check!("Index (index.jsonl)");
         let index_path = store_root.join("index.jsonl");
-        if !index_path.exists() {
-            cx.fail(&format!("{} does not exist", index_path.display()));
-        } else {
+        if index_path.exists() {
             match std::fs::read_to_string(&index_path) {
                 Err(e) => {
                     cx.fail(&format!("cannot read: {e}"));
@@ -153,6 +149,8 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
                     }
                 }
             }
+        } else {
+            cx.fail(&format!("{} does not exist", index_path.display()));
         }
     }
 
@@ -160,9 +158,7 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
     {
         let mut cx = check!("Secret file permissions");
         let secrets_dir = store_root.join("secrets");
-        if !secrets_dir.exists() {
-            cx.warn(&format!("{} does not exist", secrets_dir.display()));
-        } else {
+        if secrets_dir.exists() {
             #[cfg(unix)]
             {
                 let mut bad_perms = Vec::new();
@@ -174,10 +170,8 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
                         for entry in entries.flatten() {
                             let path = entry.path();
                             if path.extension().is_some_and(|ext| ext == "age") {
-                                let mode = entry
-                                    .metadata()
-                                    .map(|m| m.permissions().mode() & 0o777)
-                                    .unwrap_or(0);
+                                let mode =
+                                    entry.metadata().map_or(0, |m| m.permissions().mode() & 0o777);
                                 if mode != 0o600 {
                                     bad_perms.push((
                                         path.file_name()
@@ -203,6 +197,8 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
             {
                 cx.ok("(permission check skipped on non-Unix)");
             }
+        } else {
+            cx.warn(&format!("{} does not exist", secrets_dir.display()));
         }
     }
 
@@ -265,9 +261,7 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
     {
         let mut cx = check!("Config file");
         let config_path = home.join("config.json");
-        if !config_path.exists() {
-            cx.warn(&format!("{} does not exist (using defaults)", config_path.display()));
-        } else {
+        if config_path.exists() {
             match Config::load(&config_path) {
                 Err(e) => {
                     cx.fail(&format!("parse error: {e}"));
@@ -276,6 +270,8 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
                     cx.ok(&format!("{}", config_path.display()));
                 }
             }
+        } else {
+            cx.warn(&format!("{} does not exist (using defaults)", config_path.display()));
         }
     }
 
@@ -324,7 +320,7 @@ struct CheckCx<'a> {
     failures: &'a mut u32,
 }
 
-impl<'a> CheckCx<'a> {
+impl CheckCx<'_> {
     fn ok(&self, detail: &str) {
         if self.verbose {
             eprintln!("  [OK]   {}: {}", self.label, detail);

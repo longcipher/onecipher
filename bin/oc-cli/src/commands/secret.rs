@@ -387,7 +387,7 @@ pub(crate) fn copy(src: &str, dst: &str, force: bool) -> Result<(), CliError> {
         dst,
         src_entry.item_type,
         &payload,
-        src_entry.metadata.clone(),
+        src_entry.metadata,
         &recipients,
     )
     .map_err(|e| CliError::InvalidArgs(format!("failed to create entry: {e}")))?;

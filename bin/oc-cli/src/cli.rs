@@ -34,6 +34,54 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: MnemonicCommands,
     },
+    /// Generate vanity addresses by brute-force matching
+    Vanity {
+        /// Address must start with this hex pattern
+        #[arg(long)]
+        starts_with: Option<String>,
+        /// Address must end with this hex pattern
+        #[arg(long)]
+        ends_with: Option<String>,
+        /// Number of matching wallets to generate
+        #[arg(long, default_value = "1")]
+        count: usize,
+        /// Number of parallel threads
+        #[arg(long)]
+        jobs: Option<usize>,
+        /// Save results to JSON file (append mode)
+        #[arg(long)]
+        save_path: Option<std::path::PathBuf>,
+        /// Encrypt and save to vault
+        #[arg(long)]
+        save_to_vault: bool,
+    },
+    /// Verify a cryptographic signature
+    Verify {
+        /// Signer address (hex)
+        #[arg(long)]
+        address: String,
+        /// Message to verify (personal_sign by default)
+        #[arg(long, group = "input")]
+        message: Option<String>,
+        /// EIP-712 typed data JSON string
+        #[arg(long, group = "input")]
+        typed_data: Option<String>,
+        /// Path to EIP-712 typed data JSON file
+        #[arg(long, group = "input")]
+        typed_data_file: Option<String>,
+        /// Raw 32-byte hash (use with --no-hash)
+        #[arg(long, group = "input")]
+        hash: Option<String>,
+        /// Treat --hash as pre-hashed value (no EIP-191 prefix)
+        #[arg(long, requires = "hash")]
+        no_hash: bool,
+        /// Signature to verify (hex)
+        #[arg(long)]
+        signature: String,
+        /// Chain type (default: evm)
+        #[arg(long, default_value = "evm")]
+        chain: String,
+    },
     /// Fund a wallet with USDC via MoonPay
     Fund {
         #[command(subcommand)]
@@ -733,7 +781,7 @@ pub(crate) enum WalletCommands {
         /// Wallet name
         #[arg(long)]
         name: String,
-        /// Number of words (12 or 24)
+        /// Number of words (12, 15, 18, 21, or 24)
         #[arg(long, default_value = "12")]
         words: u32,
         /// Display the generated mnemonic (DANGEROUS — only for backup)
@@ -758,12 +806,24 @@ pub(crate) enum WalletCommands {
         /// Account index for HD derivation (mnemonic only)
         #[arg(long, default_value = "0")]
         index: u32,
+        /// Interactive import mode (prompts for mnemonic or private key)
+        #[arg(long)]
+        interactive: bool,
     },
     /// Export wallet secret (mnemonic or private key) to stdout
     Export {
         /// Wallet name or ID
         #[arg(long)]
         wallet: String,
+        /// Export the public key instead of the secret
+        #[arg(long)]
+        public_key: bool,
+        /// Chain for public key derivation (default: evm)
+        #[arg(long)]
+        chain: Option<String>,
+        /// Export compressed public key (secp256k1 only)
+        #[arg(long)]
+        compressed: bool,
     },
     /// Delete a wallet from the vault
     Delete {
@@ -787,6 +847,12 @@ pub(crate) enum WalletCommands {
     List,
     /// Show vault path and supported chains
     Info,
+    /// Change wallet encryption passphrase
+    ChangePassword {
+        /// Wallet name or ID
+        #[arg(long)]
+        wallet: String,
+    },
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -868,13 +934,34 @@ pub(crate) enum SignCommands {
         #[arg(long)]
         rpc_url: Option<String>,
     },
+    /// Sign an EIP-7702 authorization (delegate address + chain ID + nonce)
+    Auth {
+        /// Chain name or CAIP-2 ID (e.g. "ethereum", "eip155:1")
+        #[arg(long)]
+        chain: String,
+        /// Wallet name or ID
+        #[arg(long, env = "ONECIPHER_WALLET")]
+        wallet: String,
+        /// Delegate address to authorize (hex)
+        #[arg(long)]
+        address: String,
+        /// Authorization nonce
+        #[arg(long)]
+        nonce: String,
+        /// Account index
+        #[arg(long, default_value = "0")]
+        index: u32,
+        /// Output structured JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
 pub(crate) enum MnemonicCommands {
     /// Generate a new BIP-39 mnemonic phrase
     Generate {
-        /// Number of words (12 or 24)
+        /// Number of words (12, 15, 18, 21, or 24)
         #[arg(long, default_value = "12")]
         words: u32,
     },
@@ -887,6 +974,15 @@ pub(crate) enum MnemonicCommands {
         /// Account index
         #[arg(long, default_value = "0")]
         index: u32,
+        /// Custom BIP-32 derivation path (e.g. "m/44'/60'/0'/0/5")
+        #[arg(long)]
+        path: Option<String>,
+        /// Number of consecutive addresses to derive (single chain only)
+        #[arg(long)]
+        count: Option<u32>,
+        /// Also show the private key (DANGEROUS)
+        #[arg(long)]
+        show_private_key: bool,
     },
 }
 

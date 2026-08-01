@@ -185,7 +185,7 @@ pub(crate) fn run(fix: bool, decrypt: bool) -> Result<(), CliError> {
         if let Some(ref id) = identity {
             eprintln!();
             eprintln!("decrypt validation (this may take a while)...");
-            let store = SecretStore::open(config.clone())
+            let store = SecretStore::open(config)
                 .map_err(|e| CliError::InvalidArgs(format!("failed to open store: {e}")))?;
             for entry in &index_entries {
                 if !age_file_names.contains(&entry.name) {
@@ -350,7 +350,9 @@ fn check_dir_permissions(
             return;
         }
     };
-    if mode != expected {
+    if mode == expected {
+        report(Status::Ok, &format!("{label} permissions {:04o}", expected), warnings);
+    } else {
         let msg = format!(
             "{label} has mode {:04o} (expected {:04o}): {}",
             mode,
@@ -369,8 +371,6 @@ fn check_dir_permissions(
         } else {
             report(Status::Fail, &msg, errors);
         }
-    } else {
-        report(Status::Ok, &format!("{label} permissions {:04o}", expected), warnings);
     }
 }
 
@@ -407,7 +407,9 @@ fn check_file_permissions(
             return;
         }
     };
-    if mode != expected {
+    if mode == expected {
+        report(Status::Ok, &format!("{label} permissions {:04o}", expected), warnings);
+    } else {
         let msg = format!("{label} has mode {:04o} (expected {:04o})", mode, expected);
         if fix {
             match std::fs::set_permissions(path, std::fs::Permissions::from_mode(expected)) {
@@ -421,8 +423,6 @@ fn check_file_permissions(
         } else {
             report(Status::Fail, &msg, errors);
         }
-    } else {
-        report(Status::Ok, &format!("{label} permissions {:04o}", expected), warnings);
     }
 }
 

@@ -25,10 +25,12 @@ clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 crossterm = { workspace = true }
 dirs = "6"
+ed25519-dalek = { workspace = true }
 eyre = { workspace = true }
 hex = { workspace = true }
 hpx = { workspace = true }
 jiff = { workspace = true }
+k256 = { workspace = true }
 oc-core = { workspace = true }
 oc-intent = { workspace = true }
 oc-keyagent = { workspace = true }
@@ -45,10 +47,12 @@ qr2term = { workspace = true }
 rand = { workspace = true }
 ratatui = { workspace = true }
 regex-lite = { workspace = true }
+rpassword = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
+sha3 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
