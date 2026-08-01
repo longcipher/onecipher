@@ -120,7 +120,8 @@ pub(crate) fn hotp(name: &str, counter: u64, increment: bool) -> Result<(), CliE
         .map_err(|e| CliError::InvalidArgs(format!("HOTP generation failed: {e}")))?;
 
     if increment {
-        let mut extra = payload.extra.unwrap_or(serde_json::Value::Object(Default::default()));
+        let mut extra =
+            payload.extra.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
         extra["hotp_counter"] = serde_json::json!(counter + 1);
 
         let updated_payload =

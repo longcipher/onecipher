@@ -276,7 +276,6 @@ impl ChainSigner for EvmSigner {
             .map_err(|_| SignerError::InvalidTransaction("bad s".into()))?;
 
         crate::rlp::encode_signed_typed_tx(tx_bytes, v, &r, &s)
-            .map_err(|e| SignerError::InvalidTransaction(e.to_string()))
     }
 
     fn sign_message(&self, private_key: &[u8], message: &[u8]) -> Result<SignOutput, SignerError> {

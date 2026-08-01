@@ -21,6 +21,8 @@ pub enum OcPayHttpErrorCode {
     DiscoveryFailed,
     /// Invalid input (e.g. unsupported HTTP method).
     InvalidInput,
+    /// Internal error (e.g. system clock not available).
+    Internal,
 }
 
 #[derive(Debug, Error)]

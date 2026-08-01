@@ -28,7 +28,7 @@ pub use method::{
     SESSION_REQUEST, SESSION_SETTLE, SESSION_UPDATE, SessionProposeParams, SessionSettleParams,
 };
 pub use relay::{RelayClient, RelayConfig};
-pub use session::{WcSession, WcSessionState, WcSessionTable};
+pub use session::{WcSession, WcSessionState, WcSessionTable, WcSymKeyHex};
 pub use uri::PairingUri;
 pub use wallet_server::{WalletMethodHandler, WcServerHandle, WcWalletConfig, WcWalletServer};
 

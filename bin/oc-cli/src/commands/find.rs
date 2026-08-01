@@ -178,7 +178,7 @@ fn fuzzy_search(query: &str, entries: &[SecretIndexEntry]) -> Vec<SecretIndexEnt
     let mut scored: Vec<(u32, &SecretIndexEntry)> =
         entries.iter().filter_map(|e| fuzzy_score(query, &e.name).map(|s| (s, e))).collect();
 
-    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    scored.sort_by_key(|a| std::cmp::Reverse(a.0));
     scored.into_iter().take(10).map(|(_, e)| e.clone()).collect()
 }
 
@@ -321,7 +321,7 @@ fn update_filtered(
             .enumerate()
             .filter_map(|(i, e)| fuzzy_score(query, &e.name).map(|s| (s, i)))
             .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|a| std::cmp::Reverse(a.0));
         *filtered = scored.into_iter().map(|(_, i)| i).collect();
     }
     if *selected >= filtered.len() {

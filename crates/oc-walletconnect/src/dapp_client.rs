@@ -66,7 +66,7 @@ impl WcDappClient {
         let sub_msg = serde_json::json!({
             "id": 1,
             "jsonrpc": "2.0",
-            "method": "subscribe",
+            "method": "irn_subscribe",
             "params": { "topic": uri.topic }
         });
         relay.send_text(serde_json::to_string(&sub_msg)?).await?;
@@ -204,7 +204,7 @@ impl WcDappClient {
         let pub_msg = serde_json::json!({
             "id": id,
             "jsonrpc": "2.0",
-            "method": "publish",
+            "method": "irn_publish",
             "params": {
                 "topic": topic,
                 "message": BASE64.encode(&envelope),
@@ -325,7 +325,7 @@ impl WcDappClient {
         let pub_msg = serde_json::json!({
             "id": id,
             "jsonrpc": "2.0",
-            "method": "publish",
+            "method": "irn_publish",
             "params": {
                 "topic": topic,
                 "message": BASE64.encode(&envelope),

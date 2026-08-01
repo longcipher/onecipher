@@ -1,10 +1,13 @@
 //! WebSocket endpoint for real-time approval events.
 //!
-//! `GET /ws` upgrades to WebSocket. Unauthenticated connections are closed with 4401.
+//! `GET /ws?token=<session_id>` upgrades to WebSocket.
+//! Unauthenticated connections are rejected with 401 Unauthorized.
+
+use std::collections::HashMap;
 
 use axum::{
     extract::{
-        State, WebSocketUpgrade,
+        Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     response::IntoResponse,
@@ -15,10 +18,21 @@ use crate::{approval_queue::WsEvent, routes::approvals::AppState};
 
 /// WebSocket upgrade handler.
 ///
-/// TODO(W1.6): Add auth check — reject unauthenticated with close code 4401.
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let rx = state.queue.subscribe();
-    ws.on_upgrade(move |socket| handle_ws(socket, rx))
+/// Validates the session token from the `token` query parameter before
+/// allowing the upgrade. Returns 401 for unauthenticated requests.
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String, std::hash::RandomState>>,
+) -> impl IntoResponse {
+    let token = params.get("token").or_else(|| params.get("session"));
+    if let Some(_session) = token.and_then(|t| state.session_store.validate(t)) {
+        let rx = state.queue.subscribe();
+        ws.on_upgrade(move |socket| handle_ws(socket, rx))
+    } else {
+        tracing::warn!("WebSocket connection rejected: missing or invalid session token");
+        (axum::http::StatusCode::UNAUTHORIZED, "WebSocket authentication required").into_response()
+    }
 }
 
 async fn handle_ws(mut socket: WebSocket, mut rx: broadcast::Receiver<WsEvent>) {

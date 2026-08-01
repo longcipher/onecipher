@@ -14,8 +14,6 @@
 //! - Pure Rust implementations — zero C deps.
 //! - Zero I/O, zero network deps (R51/R52 compliant).
 
-use zeroize::Zeroize;
-
 use crate::{HardenedBytes, MemGuardError};
 
 /// Errors from post-quantum operations.
@@ -25,6 +23,8 @@ pub enum PqcError {
     SignFailed(String),
     #[error("ML-DSA verification failed: {0}")]
     VerifyFailed(String),
+    #[error("ML-DSA key generation failed: {0}")]
+    KeyGenFailed(String),
     #[error("memory hardening failed: {0}")]
     MemGuard(#[from] MemGuardError),
 }
@@ -41,26 +41,20 @@ pub struct MlDsa65Keypair {
     pub signing_key: MlDsaSigningKey,
 }
 
-/// Wrapper around the ML-DSA signing key seed that zeroizes on drop.
+/// Wrapper around the ML-DSA signing key seed that is mlock'd and zeroized on drop.
 pub struct MlDsaSigningKey {
-    inner: Box<[u8]>,
+    inner: HardenedBytes,
 }
 
 impl MlDsaSigningKey {
-    pub fn from_bytes(bytes: &[u8]) -> Self {
-        let mut inner = vec![0u8; bytes.len()].into_boxed_slice();
-        inner.copy_from_slice(bytes);
-        Self { inner }
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, PqcError> {
+        let inner = HardenedBytes::from_slice(bytes)
+            .map_err(|e| PqcError::KeyGenFailed(format!("mlock failed: {e}")))?;
+        Ok(Self { inner })
     }
 
     pub fn expose(&self) -> &[u8] {
-        &self.inner
-    }
-}
-
-impl Drop for MlDsaSigningKey {
-    fn drop(&mut self) {
-        self.inner.zeroize();
+        self.inner.as_ref()
     }
 }
 
@@ -74,7 +68,7 @@ pub fn ml_dsa_65_keygen() -> Result<MlDsa65Keypair, PqcError> {
     let verifying_key = signing_key.verifying_key();
     Ok(MlDsa65Keypair {
         verifying_key: verifying_key.encode().to_vec(),
-        signing_key: MlDsaSigningKey::from_bytes(&seed),
+        signing_key: MlDsaSigningKey::from_bytes(&seed)?,
     })
 }
 

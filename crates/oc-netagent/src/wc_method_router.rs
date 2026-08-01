@@ -36,6 +36,14 @@ use crate::{
     key_agent_client::KeyAgentClient,
 };
 
+/// Common parameters extracted from WC method params.
+#[allow(clippy::struct_field_names)]
+struct CommonParams {
+    wallet_id: String,
+    chain_id: String,
+    session_key_id: Option<String>,
+}
+
 pub struct WcMethodRouter {
     key_agent: KeyAgentClient,
     /// Optional approval channel for Web UI flow.
@@ -210,6 +218,22 @@ impl WcMethodRouter {
         }))
     }
 
+    /// Common parameters extracted from WC method params.
+    fn extract_common_params(params: &Value) -> Result<CommonParams, (JsonRpcErrorCode, String)> {
+        let wallet_id = params
+            .get("wallet_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into()))?
+            .to_string();
+        let chain_id = params
+            .get("chain_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into()))?
+            .to_string();
+        let session_key_id = params.get("session_key_id").and_then(Value::as_str).map(String::from);
+        Ok(CommonParams { wallet_id, chain_id, session_key_id })
+    }
+
     /// Pre-signing policy evaluation (W2.1).
     ///
     /// Evaluates the signing request against the loaded `PolicyV2` rules.
@@ -341,32 +365,28 @@ impl WcMethodRouter {
         match resp.kind {
             Some(KeyAgentResponseKind::Ok(b)) => Ok(b),
             Some(KeyAgentResponseKind::Deny(d)) => {
-                let code = match oc_keyagent::proto::DenyReason::try_from(d.reason)
-                    .unwrap_or(oc_keyagent::proto::DenyReason::Unknown)
-                {
-                    oc_keyagent::proto::DenyReason::RateLimitMinute => {
-                        JsonRpcErrorCode::PolicyRateLimit
-                    }
-                    oc_keyagent::proto::DenyReason::RateLimitHour => {
-                        JsonRpcErrorCode::PolicyRateLimit
-                    }
-                    oc_keyagent::proto::DenyReason::BudgetExceeded => {
-                        JsonRpcErrorCode::PolicyBudgetExceeded
-                    }
-                    oc_keyagent::proto::DenyReason::Whitelist => JsonRpcErrorCode::PolicyWhitelist,
-                    oc_keyagent::proto::DenyReason::Expired => JsonRpcErrorCode::PolicyExpired,
-                    oc_keyagent::proto::DenyReason::PasskeyForged => JsonRpcErrorCode::Unauthorized,
-                    oc_keyagent::proto::DenyReason::PolicyMissing => {
-                        JsonRpcErrorCode::PolicyMissing
-                    }
-                    oc_keyagent::proto::DenyReason::Cooldown => JsonRpcErrorCode::PolicyCooldown,
-                    oc_keyagent::proto::DenyReason::Unknown => JsonRpcErrorCode::Internal,
-                };
+                let code = deny_reason_to_rpc_code_from_proto(d.reason);
                 Err((code, "policy denied".into()))
             }
             Some(KeyAgentResponseKind::Error(msg)) => Err((JsonRpcErrorCode::Signer, msg)),
             None => Err((JsonRpcErrorCode::Internal, "empty key-agent response".into())),
         }
+    }
+}
+
+/// Convert a proto `DenyReason` integer to a `JsonRpcErrorCode`.
+fn deny_reason_to_rpc_code_from_proto(reason: i32) -> JsonRpcErrorCode {
+    use oc_keyagent::proto::DenyReason as ProtoDenyReason;
+    match ProtoDenyReason::try_from(reason) {
+        Ok(ProtoDenyReason::RateLimitMinute) => JsonRpcErrorCode::PolicyRateLimit,
+        Ok(ProtoDenyReason::RateLimitHour) => JsonRpcErrorCode::PolicyRateLimit,
+        Ok(ProtoDenyReason::BudgetExceeded) => JsonRpcErrorCode::PolicyBudgetExceeded,
+        Ok(ProtoDenyReason::Whitelist) => JsonRpcErrorCode::PolicyWhitelist,
+        Ok(ProtoDenyReason::Expired) => JsonRpcErrorCode::PolicyExpired,
+        Ok(ProtoDenyReason::PasskeyForged) => JsonRpcErrorCode::Unauthorized,
+        Ok(ProtoDenyReason::PolicyMissing) => JsonRpcErrorCode::PolicyMissing,
+        Ok(ProtoDenyReason::Cooldown) => JsonRpcErrorCode::PolicyCooldown,
+        Ok(ProtoDenyReason::Unknown) | Err(_) => JsonRpcErrorCode::Internal,
     }
 }
 
@@ -405,31 +425,15 @@ impl WalletMethodHandler for WcMethodRouter {
                     let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
                         (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
                     })?;
-                    let wallet_id = params
-                        .get("wallet_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
-                        })?
-                        .to_string();
-                    let chain_id = params
-                        .get("chain_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
-                        })?
-                        .to_string();
+                    let CommonParams { wallet_id, chain_id, session_key_id } =
+                        Self::extract_common_params(&params)?;
+                    let session_key_id = session_key_id.unwrap_or_default();
                     let raw_tx_hex = params
                         .get("raw_tx_hex")
                         .and_then(Value::as_str)
                         .ok_or_else(|| {
                             (JsonRpcErrorCode::UnsupportedMethod, "missing raw_tx_hex".into())
                         })?
-                        .to_string();
-                    let session_key_id = params
-                        .get("session_key_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
                         .to_string();
 
                     // W2.1: Pre-signing policy evaluation
@@ -483,13 +487,9 @@ impl WalletMethodHandler for WcMethodRouter {
                     let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
                         (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
                     })?;
-                    let wallet_id = params
-                        .get("wallet_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
-                        })?
-                        .to_string();
+                    let CommonParams { wallet_id, session_key_id, .. } =
+                        Self::extract_common_params(&params)?;
+                    let session_key_id = session_key_id.unwrap_or_default();
                     let message = params
                         .get("message")
                         .and_then(Value::as_str)
@@ -498,11 +498,6 @@ impl WalletMethodHandler for WcMethodRouter {
                         })?
                         .as_bytes()
                         .to_vec();
-                    let session_key_id = params
-                        .get("session_key_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
 
                     // W2.1: Pre-signing policy evaluation
                     let (risk, risk_reasons) =
@@ -535,24 +530,15 @@ impl WalletMethodHandler for WcMethodRouter {
                     let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
                         (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
                     })?;
-                    let wallet_id = params
-                        .get("wallet_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
-                        })?
-                        .to_string();
+                    let CommonParams { wallet_id, session_key_id, .. } =
+                        Self::extract_common_params(&params)?;
+                    let session_key_id = session_key_id.unwrap_or_default();
                     let typed_data_json = params
                         .get("typed_data_json")
                         .and_then(Value::as_str)
                         .ok_or_else(|| {
                             (JsonRpcErrorCode::UnsupportedMethod, "missing typed_data_json".into())
                         })?
-                        .to_string();
-                    let session_key_id = params
-                        .get("session_key_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
                         .to_string();
 
                     // W2.1: Pre-signing policy evaluation
@@ -590,31 +576,15 @@ impl WalletMethodHandler for WcMethodRouter {
                     let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
                         (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
                     })?;
-                    let wallet_id = params
-                        .get("wallet_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
-                        })?
-                        .to_string();
-                    let chain_id = params
-                        .get("chain_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
-                        })?
-                        .to_string();
+                    let CommonParams { wallet_id, chain_id, session_key_id } =
+                        Self::extract_common_params(&params)?;
+                    let session_key_id = session_key_id.unwrap_or_default();
                     let user_op_hex = params
                         .get("user_op_hex")
                         .and_then(Value::as_str)
                         .ok_or_else(|| {
                             (JsonRpcErrorCode::UnsupportedMethod, "missing user_op_hex".into())
                         })?
-                        .to_string();
-                    let session_key_id = params
-                        .get("session_key_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
                         .to_string();
 
                     // W2.1: Pre-signing policy evaluation
@@ -670,20 +640,8 @@ impl WalletMethodHandler for WcMethodRouter {
                 }
 
                 "onecipher_getBalance" => {
-                    let wallet_id = params
-                        .get("wallet_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            (JsonRpcErrorCode::UnsupportedMethod, "missing wallet_id".into())
-                        })?
-                        .to_string();
-                    let chain_id = params
-                        .get("chain_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
-                        })?
-                        .to_string();
+                    let CommonParams { wallet_id, chain_id, .. } =
+                        Self::extract_common_params(&params)?;
                     let req = GetBalanceRequest { wallet_id, chain_id };
                     let bytes = self.forward(KeyAgentRequestKind::GetBalance(req)).await?;
                     let resp: oc_keyagent::proto::BalanceResponse =
@@ -984,36 +942,37 @@ mod tests {
 
     #[test]
     fn deny_reason_to_rpc_code_mapping() {
+        use oc_keyagent::proto::DenyReason as ProtoDenyReason;
         assert_eq!(
-            WcMethodRouter::deny_reason_to_rpc_code(&oc_policy::DenyReason::RateLimitMinute),
+            deny_reason_to_rpc_code_from_proto(ProtoDenyReason::RateLimitMinute as i32),
             JsonRpcErrorCode::PolicyRateLimit
         );
         assert_eq!(
-            WcMethodRouter::deny_reason_to_rpc_code(&oc_policy::DenyReason::BudgetExceeded),
+            deny_reason_to_rpc_code_from_proto(ProtoDenyReason::BudgetExceeded as i32),
             JsonRpcErrorCode::PolicyBudgetExceeded
         );
         assert_eq!(
-            WcMethodRouter::deny_reason_to_rpc_code(&oc_policy::DenyReason::Whitelist),
+            deny_reason_to_rpc_code_from_proto(ProtoDenyReason::Whitelist as i32),
             JsonRpcErrorCode::PolicyWhitelist
         );
         assert_eq!(
-            WcMethodRouter::deny_reason_to_rpc_code(&oc_policy::DenyReason::Expired),
+            deny_reason_to_rpc_code_from_proto(ProtoDenyReason::Expired as i32),
             JsonRpcErrorCode::PolicyExpired
         );
         assert_eq!(
-            WcMethodRouter::deny_reason_to_rpc_code(&oc_policy::DenyReason::Cooldown),
+            deny_reason_to_rpc_code_from_proto(ProtoDenyReason::Cooldown as i32),
             JsonRpcErrorCode::PolicyCooldown
         );
         assert_eq!(
-            WcMethodRouter::deny_reason_to_rpc_code(&oc_policy::DenyReason::PolicyMissing),
+            deny_reason_to_rpc_code_from_proto(ProtoDenyReason::PolicyMissing as i32),
             JsonRpcErrorCode::PolicyMissing
         );
         assert_eq!(
-            WcMethodRouter::deny_reason_to_rpc_code(&oc_policy::DenyReason::PasskeyForged),
+            deny_reason_to_rpc_code_from_proto(ProtoDenyReason::PasskeyForged as i32),
             JsonRpcErrorCode::Unauthorized
         );
         assert_eq!(
-            WcMethodRouter::deny_reason_to_rpc_code(&oc_policy::DenyReason::Unknown),
+            deny_reason_to_rpc_code_from_proto(ProtoDenyReason::Unknown as i32),
             JsonRpcErrorCode::Internal
         );
     }

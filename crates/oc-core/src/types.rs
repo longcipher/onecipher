@@ -96,16 +96,26 @@ impl std::fmt::Debug for Passphrase {
 ///
 /// The token is bound to a specific wallet ID and must not be reused after
 /// expiry ([`UnlockToken::is_valid`]).
-#[derive(Clone)]
 pub struct UnlockToken {
-    /// Derived key material (32 bytes).
-    key: [u8; 32],
+    /// Derived key material (32 bytes, page-locked, zeroized on drop).
+    key: HardenedBytes,
     /// When the token was issued.
     issued_at: Instant,
     /// Token TTL (default 30 seconds).
     ttl: Duration,
     /// Wallet ID this token is bound to.
     wallet_id: String,
+}
+
+impl Clone for UnlockToken {
+    fn clone(&self) -> Self {
+        Self {
+            key: HardenedBytes::from_slice(self.key.as_ref()).expect("clone unlock token key"),
+            issued_at: self.issued_at,
+            ttl: self.ttl,
+            wallet_id: self.wallet_id.clone(),
+        }
+    }
 }
 
 impl UnlockToken {
@@ -123,7 +133,10 @@ impl UnlockToken {
         hasher.update(b"onecipher-unlock-token");
         hasher.update(key_material);
         hasher.update(wallet_id.as_bytes());
-        let key: [u8; 32] = hasher.finalize().into();
+        let hash: [u8; 32] = hasher.finalize().into();
+        let key = HardenedBytes::from_slice(&hash).map_err(|e| OcError::InvalidInput {
+            message: format!("failed to harden unlock token: {e}"),
+        })?;
         Ok(Self { key, issued_at: Instant::now(), ttl: Self::DEFAULT_TTL, wallet_id })
     }
 
@@ -142,7 +155,7 @@ impl UnlockToken {
     /// The passphrase bytes are copied into a new hardened buffer; the token
     /// retains its own key material.
     pub fn to_passphrase(&self) -> Result<Passphrase, OcError> {
-        Passphrase::from_bytes(self.key.to_vec())
+        Passphrase::from_bytes(self.key.as_ref().to_vec())
     }
 
     /// Access the raw 32-byte key material.
@@ -150,8 +163,8 @@ impl UnlockToken {
     /// Used when transporting the token over IPC (e.g. returning it in an
     /// `UnlockVaultResponse`). The caller is responsible for not logging or
     /// persisting these bytes.
-    pub fn key_bytes(&self) -> &[u8; 32] {
-        &self.key
+    pub fn key_bytes(&self) -> &[u8] {
+        self.key.as_ref()
     }
 }
 
@@ -295,9 +308,7 @@ mod tests {
     fn test_unlock_token_clone_preserves_key() {
         let token = UnlockToken::new("wallet-clone".to_string(), &[0x55; 32]).unwrap();
         let cloned = token.clone();
-        let p1 = token.to_passphrase().unwrap();
-        let p2 = cloned.to_passphrase().unwrap();
-        assert_eq!(p1.as_bytes(), p2.as_bytes(), "clone must preserve derived key");
+        assert_eq!(token.key_bytes(), cloned.key_bytes(), "clone must preserve key material");
         assert_eq!(token.wallet_id(), cloned.wallet_id());
     }
 }

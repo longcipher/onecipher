@@ -13,6 +13,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{WcError, WcResult};
 
+/// Wrapper for WC symmetric keys that zeroizes on drop and redacts in Debug.
+/// Note: uses String internally for serde compatibility but zeroizes on drop.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct WcSymKeyHex(String);
+
+impl WcSymKeyHex {
+    pub fn new(hex_key: String) -> Self {
+        Self(hex_key)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn decode_bytes(&self) -> Option<Vec<u8>> {
+        hex::decode(&self.0).ok()
+    }
+}
+
+impl std::fmt::Debug for WcSymKeyHex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WcSymKeyHex([REDACTED])")
+    }
+}
+
+impl Drop for WcSymKeyHex {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WcSessionState {
     Propose,
@@ -24,7 +56,7 @@ pub enum WcSessionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WcSession {
     pub topic: String,
-    pub sym_key: String,
+    pub sym_key: WcSymKeyHex,
     pub state: WcSessionState,
     pub expiry_unix: u64,
     pub namespaces: Vec<String>,
@@ -38,7 +70,7 @@ impl WcSession {
     pub fn new_pairing(topic: String, sym_key: String, expiry_unix: u64) -> Self {
         Self {
             topic,
-            sym_key,
+            sym_key: WcSymKeyHex::new(sym_key),
             state: WcSessionState::Propose,
             expiry_unix,
             namespaces: Vec::new(),

@@ -30,7 +30,7 @@ fn set_dir_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let perms = fs::Permissions::from_mode(0o700);
     if let Err(e) = fs::set_permissions(path, perms) {
-        eprintln!("warning: failed to set permissions on {}: {e}", path.display());
+        tracing::warn!(path = %path.display(), error = %e, "failed to set permissions");
     }
 }
 
@@ -42,7 +42,7 @@ fn set_file_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let perms = fs::Permissions::from_mode(0o600);
     if let Err(e) = fs::set_permissions(path, perms) {
-        eprintln!("warning: failed to set permissions on {}: {e}", path.display());
+        tracing::warn!(path = %path.display(), error = %e, "failed to set permissions");
     }
 }
 
@@ -124,9 +124,9 @@ pub fn list_api_keys(vault_path: Option<&Path>) -> Result<Vec<ApiKeyFile>, OcWal
         match fs::read_to_string(&path) {
             Ok(contents) => match serde_json::from_str::<ApiKeyFile>(&contents) {
                 Ok(k) => keys.push(k),
-                Err(e) => eprintln!("warning: skipping {}: {e}", path.display()),
+                Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping key file"),
             },
-            Err(e) => eprintln!("warning: skipping {}: {e}", path.display()),
+            Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping key file"),
         }
     }
 

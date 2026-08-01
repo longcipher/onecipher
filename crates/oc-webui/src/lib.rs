@@ -26,6 +26,7 @@ pub mod routes;
 pub mod submit_actions;
 
 pub use approval_queue::ApprovalQueue;
+pub use auth::SessionStore;
 pub use routes::approvals::AppState;
 
 /// Run the Web UI HTTP server on a loopback-only address.
@@ -66,7 +67,10 @@ pub async fn run_webui_server(
     let queue = ApprovalQueue::new(64);
     queue.spawn_receiver(approval_rx);
 
-    let state = AppState { queue, state_dir };
+    // Session store for WebAuthn sessions (default 30-minute idle timeout)
+    let session_store = SessionStore::new(1800);
+
+    let state = AppState { queue, state_dir, session_store };
 
     let app = axum::Router::new()
         .route("/api/health", axum::routing::get(health_handler))

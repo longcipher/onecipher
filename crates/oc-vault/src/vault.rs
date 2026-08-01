@@ -38,12 +38,11 @@ fn set_dir_permissions(path: &Path) {
 
 /// Set file permissions to 0o600 (owner read/write only).
 #[cfg(unix)]
-fn set_file_permissions(path: &Path) {
+fn set_file_permissions(path: &Path) -> Result<(), OcVaultError> {
     use std::os::unix::fs::PermissionsExt;
     let perms = fs::Permissions::from_mode(0o600);
-    if let Err(e) = fs::set_permissions(path, perms) {
-        warn!(target: "oc-vault", "failed to set permissions on {}: {e}", path.display());
-    }
+    fs::set_permissions(path, perms)?;
+    Ok(())
 }
 
 /// Check that a directory has permissions of exactly 0o700 (owner-only).
@@ -65,7 +64,9 @@ pub fn check_vault_permissions(path: &Path) -> Result<(), OcVaultError> {
 fn set_dir_permissions(_path: &Path) {}
 
 #[cfg(not(unix))]
-fn set_file_permissions(_path: &Path) {}
+fn set_file_permissions(_path: &Path) -> Result<(), OcVaultError> {
+    Ok(())
+}
 
 #[cfg(not(unix))]
 pub fn check_vault_permissions(_path: &Path) -> Result<(), OcVaultError> {
@@ -91,15 +92,29 @@ pub fn wallets_dir(vault_path: Option<&Path>) -> Result<PathBuf, OcVaultError> {
 }
 
 /// Save an encrypted wallet file with strict permissions.
+///
+/// Uses an atomic write-to-tmp + rename pattern to prevent partial writes
+/// and TOCTOU permission races. The tmp file gets 0600 permissions before
+/// the rename, so the final file is never readable by others even briefly.
 pub fn save_encrypted_wallet(
     wallet: &EncryptedWallet,
     vault_path: Option<&Path>,
 ) -> Result<(), OcVaultError> {
+    // Validate wallet ID to prevent path traversal
+    if wallet.id.contains('/') || wallet.id.contains('\\') || wallet.id.contains("..") {
+        return Err(OcVaultError::InvalidInput(format!(
+            "wallet ID contains path separator or '..': {}",
+            wallet.id
+        )));
+    }
     let dir = wallets_dir(vault_path)?;
     let path = dir.join(format!("{}.json", wallet.id));
+    let tmp_path = dir.join(format!("{}.json.tmp", wallet.id));
     let json = serde_json::to_string_pretty(wallet)?;
-    fs::write(&path, json)?;
-    set_file_permissions(&path);
+    // Atomic write: write to tmp file, set permissions, then rename
+    fs::write(&tmp_path, &json)?;
+    set_file_permissions(&tmp_path)?;
+    fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 
@@ -168,6 +183,12 @@ pub fn load_wallet_by_name_or_id(
 
 /// Delete a wallet file from the vault by ID.
 pub fn delete_wallet_file(id: &str, vault_path: Option<&Path>) -> Result<(), OcVaultError> {
+    // Validate wallet ID to prevent path traversal
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(OcVaultError::InvalidInput(format!(
+            "wallet ID contains path separator or '..': {id}"
+        )));
+    }
     let dir = wallets_dir(vault_path)?;
     let path = dir.join(format!("{id}.json"));
     if !path.exists() {
@@ -449,7 +470,7 @@ mod tests {
 
     #[test]
     fn char_path_traversal_in_save_rejected() {
-        // Wallet IDs with path traversal components should be rejected or sanitized
+        // Wallet IDs with path traversal components must be rejected
         let dir = tempfile::tempdir().unwrap();
         let vault = dir.path().to_path_buf();
 
@@ -461,30 +482,15 @@ mod tests {
             KeyType::Mnemonic,
         );
 
-        // The file should be saved within the wallets dir only
-        // Even if save succeeds, verify the file doesn't escape the vault
         let result = save_encrypted_wallet(&wallet, Some(&vault));
-        if result.is_ok() {
-            // If it doesn't error, verify no file was written outside the vault
-            let wallets_dir_path = vault.join("wallets");
-            let _escaped_path = vault.join("wallets").join("../../../etc/passwd.json");
-            let canonical_wallets = wallets_dir_path.canonicalize().unwrap();
+        assert!(result.is_err(), "path traversal wallet ID must be rejected");
 
-            // List what's actually in the wallets dir
-            let entries: Vec<_> =
-                std::fs::read_dir(&wallets_dir_path).unwrap().filter_map(|e| e.ok()).collect();
-
-            // Check that any file written is within the wallets directory
-            for entry in &entries {
-                let path = entry.path().canonicalize().unwrap();
-                assert!(
-                    path.starts_with(&canonical_wallets),
-                    "wallet file {:?} escaped the vault directory",
-                    path
-                );
-            }
-        }
-        // If it errors, that's also acceptable (more secure)
+        // No tmp files should be left behind
+        let wallets_dir_path = vault.join("wallets");
+        assert!(
+            !wallets_dir_path.join("../../../etc/passwd.json.tmp").exists(),
+            "tmp file must not be created for path traversal IDs"
+        );
     }
 
     #[test]
@@ -502,10 +508,13 @@ mod tests {
         );
         save_encrypted_wallet(&wallet, Some(&vault)).unwrap();
 
-        // Attempt to delete with path traversal
+        // Attempt to delete with path traversal — must be rejected with InvalidInput
         let result = delete_wallet_file("../../../etc/passwd", Some(&vault));
-        // Should either error (ideal) or find no matching file
         assert!(result.is_err());
+        assert!(
+            matches!(result.unwrap_err(), OcVaultError::InvalidInput(_)),
+            "path traversal in delete must return InvalidInput"
+        );
 
         // Original wallet should still exist
         assert_eq!(list_encrypted_wallets(Some(&vault)).unwrap().len(), 1);

@@ -4803,6 +4803,7 @@ dependencies = [
  "tokio",
  "tonic",
  "tonic-prost",
+ "tracing",
  "uuid",
 ]
 
@@ -4825,6 +4826,7 @@ dependencies = [
  "sha2 0.11.0",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
  "url",
  "x25519-dalek 3.0.0",
  "zeroize",

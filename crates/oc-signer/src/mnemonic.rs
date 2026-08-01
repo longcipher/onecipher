@@ -60,16 +60,20 @@ impl Mnemonic {
     }
 
     /// Get the mnemonic phrase as SecretBytes.
-    pub fn phrase(&self) -> SecretBytes {
+    pub fn phrase(&self) -> Result<SecretBytes, MnemonicError> {
         let phrase_str = self.inner.to_phrase();
-        SecretBytes::from_vec(phrase_str.into_bytes()).expect("mlock failed for mnemonic phrase")
+        SecretBytes::from_vec(phrase_str.into_bytes())
+            .map_err(|e| MnemonicError::MlockFailed(e.to_string()))
     }
 
     /// Derive a BIP-39 seed from this mnemonic with an optional passphrase.
-    pub fn to_seed(&self, passphrase: &str) -> SecretBytes {
+    pub fn to_seed(&self, passphrase: &str) -> Result<SecretBytes, MnemonicError> {
         let pass = if passphrase.is_empty() { None } else { Some(passphrase) };
-        let seed = self.inner.to_seed(pass).expect("seed derivation should not fail");
-        SecretBytes::from_vec(seed.to_vec()).expect("mlock failed for seed")
+        let seed = self
+            .inner
+            .to_seed(pass)
+            .map_err(|e| MnemonicError::SeedDerivationFailed(e.to_string()))?;
+        SecretBytes::from_vec(seed.to_vec()).map_err(|e| MnemonicError::MlockFailed(e.to_string()))
     }
 
     /// Returns the number of words in this mnemonic.
@@ -96,6 +100,12 @@ pub enum MnemonicError {
 
     #[error("invalid mnemonic phrase: {0}")]
     InvalidPhrase(String),
+
+    #[error("seed derivation failed: {0}")]
+    SeedDerivationFailed(String),
+
+    #[error("mlock failed: {0}")]
+    MlockFailed(String),
 }
 
 #[cfg(test)]
@@ -137,7 +147,7 @@ mod tests {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let mnemonic = Mnemonic::from_phrase(phrase).unwrap();
         assert_eq!(mnemonic.word_count(), 12);
-        let recovered = String::from_utf8(mnemonic.phrase().expose().to_vec()).unwrap();
+        let recovered = String::from_utf8(mnemonic.phrase().unwrap().expose().to_vec()).unwrap();
         assert_eq!(recovered, phrase);
     }
 
@@ -162,7 +172,7 @@ mod tests {
     fn test_seed_vector_no_passphrase() {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let mnemonic = Mnemonic::from_phrase(phrase).unwrap();
-        let seed = mnemonic.to_seed("");
+        let seed = mnemonic.to_seed("").unwrap();
         let seed_hex = hex::encode(seed.expose());
         assert_eq!(
             seed_hex,
@@ -174,8 +184,8 @@ mod tests {
     fn test_seed_with_passphrase_trezor() {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let mnemonic = Mnemonic::from_phrase(phrase).unwrap();
-        let seed_no_pass = mnemonic.to_seed("");
-        let seed_with_pass = mnemonic.to_seed("TREZOR");
+        let seed_no_pass = mnemonic.to_seed("").unwrap();
+        let seed_with_pass = mnemonic.to_seed("TREZOR").unwrap();
         // Seeds should differ with different passphrases
         assert_ne!(seed_no_pass.expose(), seed_with_pass.expose());
         // Known BIP-39 test vector for "TREZOR" passphrase

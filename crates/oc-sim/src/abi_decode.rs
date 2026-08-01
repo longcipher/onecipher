@@ -26,6 +26,17 @@ pub fn decode_calldata(calldata: &[u8]) -> Option<DecodedAction> {
     })
 }
 
+/// Decode ABI-encoded parameters from fixed 32-byte slots.
+///
+/// # Limitations
+///
+/// This decoder only supports **static ABI types** (address, uint256, bool,
+/// etc.).  Dynamic types (`bytes`, `string`, `T[]`) are NOT supported because
+/// they use offset pointers in the encoding.  For the current use case
+/// (ERC-20 `transfer` / `approve`), all parameters are static types.
+///
+/// If you need to decode dynamic types, use a full ABI decoder (e.g.
+/// `ethabi`).
 fn decode_params(data: &[u8], inputs: &[abi_cache::AbiParam]) -> serde_json::Value {
     let mut args = serde_json::Map::new();
     for (i, input) in inputs.iter().enumerate() {
@@ -41,6 +52,12 @@ fn decode_params(data: &[u8], inputs: &[abi_cache::AbiParam]) -> serde_json::Val
 }
 
 fn decode_single(data: &[u8], offset: usize, ty: &str) -> serde_json::Value {
+    if offset + 32 > data.len() {
+        return serde_json::Value::String(format!(
+            "error: insufficient data for {ty}: need 32 bytes at offset {offset}, have {}",
+            data.len().saturating_sub(offset)
+        ));
+    }
     let word = &data[offset..offset + 32];
     match ty {
         "address" => {

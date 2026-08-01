@@ -57,14 +57,14 @@ impl SessionStore {
 
 #[cfg(test)]
 mod tests {
-    use oc_walletconnect::WcSessionState;
+    use oc_walletconnect::{WcSessionState, WcSymKeyHex};
 
     use super::*;
 
     fn sample_session(topic: &str) -> WcSession {
         WcSession {
             topic: topic.to_string(),
-            sym_key: "0xabcdef".to_string(),
+            sym_key: WcSymKeyHex::new("0xabcdef".to_string()),
             state: WcSessionState::Propose,
             expiry_unix: 9999999999,
             namespaces: Vec::new(),

@@ -1,6 +1,6 @@
 use crate::{
     error::IntentError,
-    rpc::{CallData, RpcClient},
+    rpc::RpcClient,
     schema::{Intent, IntentKind, IntentSummary},
 };
 
@@ -10,7 +10,7 @@ pub async fn simulate_intent(
     rpc: &dyn RpcClient,
 ) -> Result<IntentSummary, IntentError> {
     // 1. Build call data from intent
-    let call_data = build_call_data(intent)?;
+    let call_data = crate::build_call_data(&intent.kind, &intent.chain_id)?;
 
     // 2. Estimate gas
     let gas_estimate = rpc.estimate_gas(&call_data).await.map_err(IntentError::Rpc)?;
@@ -49,56 +49,6 @@ pub async fn simulate_intent(
         simulation_tx_hash: None,
     })
 }
-
-fn build_call_data(intent: &Intent) -> Result<CallData, IntentError> {
-    match &intent.kind {
-        // M5/H12: Pay uses the real recipient (native) or the token contract
-        // address (ERC-20). The placeholder "0x0000...0000" was a bug — it's
-        // not a valid 20-byte EVM address and caused `eth_call` / gas
-        // estimation to target a non-existent contract.
-        IntentKind::Pay { recipient, token, amount, .. } => {
-            let value = token.as_ref().map_or_else(|| amount.clone(), |_| "0x0".to_string());
-            Ok(CallData {
-                from: None,
-                to: token.clone().unwrap_or_else(|| recipient.clone()),
-                value: Some(value),
-                data: None,
-            })
-        }
-        IntentKind::SignTransaction { tx_hex, .. } => Ok(CallData {
-            from: None,
-            to: ZERO_ADDRESS_EVM.to_string(),
-            value: None,
-            data: Some(
-                hex::decode(tx_hex.trim_start_matches("0x"))
-                    .map_err(|e| IntentError::InvalidInput(format!("invalid hex: {e}")))?,
-            ),
-        }),
-        IntentKind::SignMessage { .. } => {
-            Ok(CallData { from: None, to: ZERO_ADDRESS_EVM.to_string(), value: None, data: None })
-        }
-        // M5: CrossChainTransfer is kept distinct from Pay so the bridge
-        // routing logic can be layered in later.
-        //
-        // TODO: bridge logic is unimplemented — currently simulates a direct
-        // transfer to `recipient` on the source chain, which is NOT what a
-        // cross-chain transfer should do.
-        IntentKind::CrossChainTransfer { recipient, .. } => Ok(CallData {
-            from: None,
-            to: recipient.clone(),
-            value: Some("0x0".to_string()),
-            data: None,
-        }),
-    }
-}
-
-/// The canonical 20-byte zero EVM address (`address(0)`).
-///
-/// H12: previously this was the placeholder `"0x0000...0000"` which is not a
-/// valid EVM address (it's 9 bytes, not 20, with literal `..` characters).
-/// Using the full 40-hex-character form ensures `eth_call` and `estimateGas`
-/// target `address(0)` correctly when no real target is applicable.
-const ZERO_ADDRESS_EVM: &str = "0x0000000000000000000000000000000000000000";
 
 fn intent_amount_usd(intent: &Intent) -> f64 {
     match &intent.kind {
@@ -182,7 +132,7 @@ mod tests {
         // M5/H12 regression: native Pay (token == None) must target the
         // recipient, not the placeholder "0x0000...0000".
         let intent = make_pay_intent();
-        let cd = build_call_data(&intent).expect("build_call_data");
+        let cd = crate::build_call_data(&intent.kind, &intent.chain_id).expect("build_call_data");
         assert_eq!(cd.to, "0xabcdef1234567890");
         // Native transfer carries the amount as value.
         assert_eq!(cd.value.as_deref(), Some("10.5 USDC"));
@@ -201,7 +151,7 @@ mod tests {
             "eip155:8453".to_string(),
             "sk-test".to_string(),
         );
-        let cd = build_call_data(&intent).expect("build_call_data");
+        let cd = crate::build_call_data(&intent.kind, &intent.chain_id).expect("build_call_data");
         assert_eq!(cd.to, "0x833589fcd6edb6e08f4c7c32d4f71b54cda0ed66");
         assert_eq!(cd.value.as_deref(), Some("0x0"));
     }
@@ -217,7 +167,7 @@ mod tests {
             "eip155:1".to_string(),
             "sk-test".to_string(),
         );
-        let cd = build_call_data(&intent).expect("build_call_data");
+        let cd = crate::build_call_data(&intent.kind, &intent.chain_id).expect("build_call_data");
         assert_eq!(cd.to, "0x0000000000000000000000000000000000000000");
         assert!(!cd.to.contains(".."), "placeholder must not leak: {}", cd.to);
     }
@@ -229,7 +179,7 @@ mod tests {
             "eip155:1".to_string(),
             "sk-test".to_string(),
         );
-        let cd = build_call_data(&intent).expect("build_call_data");
+        let cd = crate::build_call_data(&intent.kind, &intent.chain_id).expect("build_call_data");
         assert_eq!(cd.to, "0x0000000000000000000000000000000000000000");
     }
 
@@ -247,7 +197,7 @@ mod tests {
             "eip155:8453".to_string(),
             "sk-test".to_string(),
         );
-        let cd = build_call_data(&intent).expect("build_call_data");
+        let cd = crate::build_call_data(&intent.kind, &intent.chain_id).expect("build_call_data");
         assert_eq!(cd.to, "0xfeedfeed");
         assert_ne!(cd.to, "0x0000000000000000000000000000000000000000");
     }
@@ -262,7 +212,7 @@ mod tests {
             "eip155:1".to_string(),
             "sk-test".to_string(),
         );
-        let cd = build_call_data(&intent).expect("build_call_data");
+        let cd = crate::build_call_data(&intent.kind, &intent.chain_id).expect("build_call_data");
         assert_eq!(cd.data, Some(vec![0xde, 0xad, 0xbe, 0xef]));
     }
 
@@ -276,7 +226,7 @@ mod tests {
             "eip155:1".to_string(),
             "sk-test".to_string(),
         );
-        assert!(build_call_data(&intent).is_err());
+        assert!(crate::build_call_data(&intent.kind, &intent.chain_id).is_err());
     }
 
     #[tokio::test]

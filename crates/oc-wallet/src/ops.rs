@@ -164,7 +164,7 @@ pub fn generate_mnemonic(words: u32) -> Result<String, OcWalletError> {
     };
 
     let mnemonic = Mnemonic::generate(strength)?;
-    let phrase = mnemonic.phrase();
+    let phrase = mnemonic.phrase()?;
     String::from_utf8(phrase.expose().to_vec())
         .map_err(|e| OcWalletError::InvalidInput(format!("invalid UTF-8 in mnemonic: {e}")))
 }
@@ -212,7 +212,7 @@ pub fn create_wallet(
     let mnemonic = Mnemonic::generate(strength)?;
     let accounts = derive_all_accounts(&mnemonic, 0)?;
 
-    let phrase = mnemonic.phrase();
+    let phrase = mnemonic.phrase()?;
     let crypto_envelope = encrypt(phrase.expose(), passphrase.as_bytes())?;
     let crypto_json = serde_json::to_value(&crypto_envelope)?;
 
@@ -243,7 +243,7 @@ pub fn import_wallet_mnemonic(
     let mnemonic = Mnemonic::from_phrase(mnemonic_phrase)?;
     let accounts = derive_all_accounts(&mnemonic, index)?;
 
-    let phrase = mnemonic.phrase();
+    let phrase = mnemonic.phrase()?;
     let crypto_envelope = encrypt(phrase.expose(), passphrase.as_bytes())?;
     let crypto_json = serde_json::to_value(&crypto_envelope)?;
 
