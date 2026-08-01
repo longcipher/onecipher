@@ -121,7 +121,12 @@ pub fn evaluate_executable(
     ctx: &PolicyContext,
 ) -> PolicyResult {
     // Build stdin payload: context + policy_config
-    let mut payload = serde_json::to_value(ctx).unwrap_or_default();
+    let mut payload = match serde_json::to_value(ctx) {
+        Ok(v) => v,
+        Err(e) => {
+            return PolicyResult::denied(policy_id, format!("failed to serialize context: {e}"))
+        }
+    };
     if let Some(cfg) = config {
         payload.as_object_mut().map(|m| m.insert("policy_config".to_string(), cfg.clone()));
     }
@@ -147,7 +152,10 @@ pub fn evaluate_executable(
 
     // Write stdin
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(&stdin_bytes);
+        if let Err(e) = stdin.write_all(&stdin_bytes) {
+            tracing::warn!("failed to write stdin to policy executable: {e}");
+            return PolicyResult::denied(policy_id, format!("failed to write stdin: {e}"));
+        }
     }
 
     // Wait with timeout (5 seconds)
@@ -194,11 +202,15 @@ fn wait_with_timeout(
                 let mut stderr = Vec::new();
                 if let Some(mut out) = child.stdout.take() {
                     use std::io::Read;
-                    let _ = out.read_to_end(&mut stdout);
+                    if let Err(e) = out.read_to_end(&mut stdout) {
+                        tracing::warn!("failed to read stdout from policy executable: {e}");
+                    }
                 }
                 if let Some(mut err) = child.stderr.take() {
                     use std::io::Read;
-                    let _ = err.read_to_end(&mut stderr);
+                    if let Err(e) = err.read_to_end(&mut stderr) {
+                        tracing::warn!("failed to read stderr from policy executable: {e}");
+                    }
                 }
                 let status = child.wait().map_err(|e| e.to_string())?;
                 return Ok(std::process::Output { status, stdout, stderr });

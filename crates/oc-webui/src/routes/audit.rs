@@ -86,10 +86,14 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::approval_queue::ApprovalQueue;
+    use crate::{approval_queue::ApprovalQueue, auth::SessionStore};
 
     fn test_state() -> AppState {
-        AppState { queue: ApprovalQueue::new(16), state_dir: std::path::PathBuf::from("/tmp") }
+        AppState {
+            queue: ApprovalQueue::new(16),
+            state_dir: std::path::PathBuf::from("/tmp"),
+            session_store: SessionStore::new(1800),
+        }
     }
 
     #[tokio::test]

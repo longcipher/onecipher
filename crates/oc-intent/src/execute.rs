@@ -1,8 +1,9 @@
 use oc_core::ChainIdExt;
 
 use crate::{
+    build_call_data,
     error::IntentError,
-    rpc::{CallData, RpcClient},
+    rpc::RpcClient,
     schema::{Intent, IntentKind, IntentResult, IntentStatus},
 };
 
@@ -107,45 +108,7 @@ fn parse_chain_id(chain_id: &str) -> Result<u64, IntentError> {
         .ok_or_else(|| IntentError::InvalidChain(format!("not a numeric EVM chain id: {chain_id}")))
 }
 
-fn build_call_data(kind: &IntentKind, _chain: &str) -> Result<CallData, IntentError> {
-    match kind {
-        // M5: Pay now distinguishes native ETH transfers (token == None) from
-        // ERC-20 transfers (token == Some). For native transfers, `value` is
-        // set to the amount string (the caller is responsible for hex-encoding
-        // it; `build_unsigned_eip1559_tx` will fall back to zero bytes on a
-        // non-hex value — see TODO below). For ERC-20, `to` is the token
-        // contract and `value` is "0x0" (the actual transfer happens via the
-        // ERC-20 `transfer(address,uint256)` selector, which is not yet built
-        // here).
-        //
-        // TODO: parse `amount` into a wei denominated hex string and build the
-        // ERC-20 `transfer(recipient, amount)` calldata when `token` is set.
-        IntentKind::Pay { recipient, token, amount, .. } => {
-            let value = token.as_ref().map_or_else(|| amount.clone(), |_| "0x0".to_string());
-            Ok(CallData {
-                from: None,
-                to: token.clone().unwrap_or_else(|| recipient.clone()),
-                value: Some(value),
-                data: None,
-            })
-        }
-        // M5: CrossChainTransfer is kept distinct from Pay so the bridge logic
-        // can be layered in later without touching the Pay path.
-        //
-        // TODO: bridge logic is unimplemented — currently this builds a direct
-        // transfer to `recipient` on the source chain, which is NOT what a
-        // cross-chain transfer should do. A real implementation would route
-        // through the bridge contract (e.g. Across, Hop, LayerZero) and build
-        // the appropriate calldata.
-        IntentKind::CrossChainTransfer { recipient, .. } => Ok(CallData {
-            from: None,
-            to: recipient.clone(),
-            value: Some("0x0".to_string()),
-            data: None,
-        }),
-        _ => Err(IntentError::InvalidInput("unsupported intent kind for tx building".into())),
-    }
-}
+// `build_call_data` is now shared in `lib.rs` — used by both simulate and execute.
 
 /// Minimal unsigned EIP-1559 transaction RLP. ponytail: manual RLP, add oc-signer dep if signing
 /// lands here.

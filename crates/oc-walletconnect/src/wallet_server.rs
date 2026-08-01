@@ -15,6 +15,7 @@ use rand::RngExt;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use zeroize::Zeroize;
 
 #[cfg(any(test, feature = "test-utils"))]
 use crate::mock_relay::MockRelay;
@@ -177,7 +178,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             let sub_msg = serde_json::json!({
                 "id": req_id - 1,
                 "jsonrpc": "2.0",
-                "method": "subscribe",
+                "method": "irn_subscribe",
                 "params": { "topic": topic }
             });
             relay.send_text(serde_json::to_string(&sub_msg)?).await?;
@@ -192,7 +193,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                         let sub_msg = serde_json::json!({
                             "id": req_id - 1,
                             "jsonrpc": "2.0",
-                            "method": "subscribe",
+                            "method": "irn_subscribe",
                             "params": { "topic": s.topic }
                         });
                         let _ = relay.send_text(serde_json::to_string(&sub_msg)?).await;
@@ -216,7 +217,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                         let sub_msg = serde_json::json!({
                             "id": req_id - 1,
                             "jsonrpc": "2.0",
-                            "method": "subscribe",
+                            "method": "irn_subscribe",
                             "params": { "topic": topic }
                         });
                         relay.send_text(serde_json::to_string(&sub_msg)?).await?;
@@ -228,7 +229,10 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
 
             let envelope: RelayEnvelope = match serde_json::from_str(&raw) {
                 Ok(e) => e,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::debug!(error = %e, "failed to parse relay envelope");
+                    continue;
+                }
             };
 
             if envelope.method.as_deref() != Some("subscription") {
@@ -259,7 +263,10 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
 
             let encrypted_bytes = match BASE64.decode(&data.message) {
                 Ok(b) => b,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::debug!(error = %e, "failed to base64 decode message");
+                    continue;
+                }
             };
             if encrypted_bytes.len() < 12 {
                 continue;
@@ -267,20 +274,28 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             let nonce: [u8; 12] = encrypted_bytes[..12].try_into().unwrap();
             let ciphertext = &encrypted_bytes[12..];
 
-            let sym_key_bytes = match hex::decode(&session.sym_key) {
-                Ok(b) => b,
-                Err(_) => continue,
+            let mut sym_key_bytes = if let Some(b) = session.sym_key.decode_bytes() {
+                b
+            } else {
+                tracing::debug!("failed to decode sym_key hex");
+                continue;
             };
             if sym_key_bytes.len() != 32 {
+                tracing::debug!(len = sym_key_bytes.len(), "sym_key must be 32 bytes");
+                sym_key_bytes.zeroize();
                 continue;
             }
             let mut key_arr = [0u8; 32];
             key_arr.copy_from_slice(&sym_key_bytes);
+            sym_key_bytes.zeroize();
             let sym_key = WcSymKey::from_bytes(key_arr);
 
             let plaintext = match WcCipher::open(&sym_key, &nonce, WC_AAD, ciphertext) {
                 Ok(p) => p,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to decrypt WC message");
+                    continue;
+                }
             };
 
             if let Ok(req) = serde_json::from_slice::<JsonRpcRequest>(&plaintext) {
@@ -331,7 +346,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             let pub_msg = serde_json::json!({
                 "id": req_id - 1,
                 "jsonrpc": "2.0",
-                "method": "publish",
+                "method": "irn_publish",
                 "params": {
                     "topic": topic,
                     "message": BASE64.encode(&envelope_out),
@@ -359,19 +374,22 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         let propose_params: SessionProposeParams = serde_json::from_value(req.params.clone())
             .map_err(|e| WcError::InvalidMessage(format!("bad sessionPropose params: {e}")))?;
 
-        let sym_key_bytes = hex::decode(&session.sym_key)
-            .map_err(|_| WcError::InvalidMessage("bad sym_key hex".into()))?;
+        let mut sym_key_bytes = session
+            .sym_key
+            .decode_bytes()
+            .ok_or_else(|| WcError::InvalidMessage("bad sym_key hex".into()))?;
         if sym_key_bytes.len() != 32 {
             return Err(WcError::InvalidMessage("sym_key must be 32 bytes".into()));
         }
         let mut key_arr = [0u8; 32];
         key_arr.copy_from_slice(&sym_key_bytes);
+        sym_key_bytes.zeroize();
         let sym_key = WcSymKey::from_bytes(key_arr);
 
         // Origin allowlist check
         let dapp_origin = &propose_params.proposer.metadata.url;
         if self.cfg.trusted_origins.is_empty() ||
-            !self.cfg.trusted_origins.iter().any(|o| dapp_origin.contains(o.as_str()))
+            !origin_matches_trusted(dapp_origin, &self.cfg.trusted_origins)
         {
             let reason = if self.cfg.trusted_origins.is_empty() {
                 "no trusted origins configured; session proposal rejected"
@@ -412,13 +430,16 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         let sub_msg = serde_json::json!({
             "id": next_id(),
             "jsonrpc": "2.0",
-            "method": "subscribe",
+            "method": "irn_subscribe",
             "params": { "topic": session_topic }
         });
         relay.send_text(serde_json::to_string(&sub_msg)?).await?;
 
         let new_session = WcSession {
             topic: session_topic.clone(),
+            // TODO(security): WC v2 requires X25519 DH-derived session key, not pairing key reuse.
+            // Current implementation reuses the pairing symKey which breaks forward secrecy.
+            // See: https://specs.walletconnect.com/2.0/specs/clients/core/pairing/README
             sym_key: session.sym_key.clone(),
             state: WcSessionState::Active,
             expiry_unix: session.expiry_unix,
@@ -469,7 +490,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         let settle_pub = serde_json::json!({
             "id": next_id(),
             "jsonrpc": "2.0",
-            "method": "publish",
+            "method": "irn_publish",
             "params": {
                 "topic": session_topic,
                 "message": BASE64.encode(&settle_env),
@@ -500,7 +521,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         let pub_msg = serde_json::json!({
             "id": next_id(),
             "jsonrpc": "2.0",
-            "method": "publish",
+            "method": "irn_publish",
             "params": {
                 "topic": topic,
                 "message": BASE64.encode(&env),
@@ -589,4 +610,27 @@ struct RelaySubParams {
 struct RelaySubData {
     topic: String,
     message: String,
+}
+
+/// Check if `origin` matches any trusted domain, supporting subdomain matching
+/// with dot-boundary check (e.g., "walletconnect.com" matches "app.walletconnect.com"
+/// but NOT "evil-walletconnect.com").
+fn origin_matches_trusted(origin: &str, trusted_origins: &[String]) -> bool {
+    // Extract host from origin URL
+    let origin_host = origin
+        .strip_prefix("https://")
+        .or_else(|| origin.strip_prefix("http://"))
+        .unwrap_or(origin)
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':') // strip port
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+
+    trusted_origins.iter().any(|trusted| {
+        let trusted = trusted.to_lowercase();
+        origin_host == trusted || origin_host.ends_with(&format!(".{trusted}"))
+    })
 }

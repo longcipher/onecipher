@@ -57,9 +57,11 @@ pub fn list_policies(vault_path: Option<&Path>) -> Result<Vec<Policy>, OcWalletE
         match fs::read_to_string(&path) {
             Ok(contents) => match serde_json::from_str::<Policy>(&contents) {
                 Ok(p) => policies.push(p),
-                Err(e) => eprintln!("warning: skipping {}: {e}", path.display()),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "skipping policy file");
+                }
             },
-            Err(e) => eprintln!("warning: skipping {}: {e}", path.display()),
+            Err(e) => tracing::warn!(path = %path.display(), error = %e, "skipping policy file"),
         }
     }
 

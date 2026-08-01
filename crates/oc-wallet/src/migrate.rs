@@ -18,8 +18,8 @@ pub fn migrate_vault_if_needed() {
     if lws_dir.exists() && !ows_dir.exists() {
         migrate_single_dir(&lws_dir, &ows_dir, ".lws", ".ows");
     } else if lws_dir.exists() && ows_dir.exists() {
-        eprintln!(
-            "warning: Both ~/.lws and ~/.ows exist. Using ~/.ows. Remove ~/.lws manually if no longer needed."
+        tracing::warn!(
+            "both ~/.lws and ~/.ows exist; using ~/.ows; remove ~/.lws manually if no longer needed"
         );
     }
 
@@ -27,8 +27,8 @@ pub fn migrate_vault_if_needed() {
     if ows_dir.exists() && !oc_dir.exists() {
         migrate_single_dir(&ows_dir, &oc_dir, ".ows", ".onecipher");
     } else if ows_dir.exists() && oc_dir.exists() {
-        eprintln!(
-            "warning: Both ~/.ows and ~/.onecipher exist. Using ~/.onecipher. Remove ~/.ows manually if no longer needed."
+        tracing::warn!(
+            "both ~/.ows and ~/.onecipher exist; using ~/.onecipher; remove ~/.ows manually if no longer needed"
         );
     }
 }
@@ -43,7 +43,7 @@ pub fn migrate_single_dir(
     dst_marker: &str,
 ) -> bool {
     if let Err(e) = std::fs::rename(src, dst) {
-        eprintln!("warning: failed to migrate {} to {}: {e}", src.display(), dst.display());
+        tracing::warn!(src = %src.display(), dst = %dst.display(), error = %e, "failed to migrate vault directory");
         return false;
     }
 
@@ -55,6 +55,6 @@ pub fn migrate_single_dir(
         }
     }
 
-    eprintln!("Migrated wallet vault from ~/{} to ~/{}", src_marker, dst_marker);
+    tracing::info!(from = src_marker, to = dst_marker, "migrated wallet vault");
     true
 }

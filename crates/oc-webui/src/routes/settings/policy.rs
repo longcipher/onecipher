@@ -184,10 +184,14 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::approval_queue::ApprovalQueue;
+    use crate::{approval_queue::ApprovalQueue, auth::SessionStore};
 
     fn test_state_with_dir(dir: &std::path::Path) -> AppState {
-        AppState { queue: ApprovalQueue::new(16), state_dir: dir.to_path_buf() }
+        AppState {
+            queue: ApprovalQueue::new(16),
+            state_dir: dir.to_path_buf(),
+            session_store: SessionStore::new(1800),
+        }
     }
 
     fn json_body(value: serde_json::Value) -> Body {

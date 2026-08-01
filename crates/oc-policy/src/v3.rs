@@ -150,9 +150,16 @@ pub fn evaluate_v3(policy: &PolicyV3, request: &PayRequest, state: &mut PolicySt
         if !any_permit_matched {
             // No Permit rule matched. R80 has no Cedar-specific deny reason,
             // so log the context before returning Unknown.
+            let permit_rule_ids: Vec<&str> = policy
+                .rules
+                .iter()
+                .filter(|r| r.effect == RuleEffect::Permit)
+                .map(|r| r.id.as_str())
+                .collect();
             tracing::warn!(
                 target: "oc-policy::v3",
-                "No matching Cedar Permit rule; denying"
+                permit_rule_ids = ?permit_rule_ids,
+                "No matching Cedar Permit rule; denying (R80 cap)"
             );
             return Decision::Deny(DenyReason::Unknown);
         }

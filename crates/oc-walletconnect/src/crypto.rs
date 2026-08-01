@@ -127,11 +127,12 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
 }
 
 /// HKDF-SHA256 — returns `len`-byte derived key.
-pub fn hkdf_sha256(salt: &[u8], ikm: &[u8], info: &[u8], len: usize) -> Vec<u8> {
+pub fn hkdf_sha256(salt: &[u8], ikm: &[u8], info: &[u8], len: usize) -> WcResult<Vec<u8>> {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = vec![0u8; len];
-    hk.expand(info, &mut okm).expect("hkdf expand within max");
-    okm
+    hk.expand(info, &mut okm)
+        .map_err(|_| WcError::Crypto("hkdf expand failed: output too long".into()))?;
+    Ok(okm)
 }
 
 #[cfg(test)]

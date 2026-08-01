@@ -13,7 +13,7 @@ pub(crate) fn run(words: u32) -> Result<(), CliError> {
     };
 
     let mnemonic = Mnemonic::generate(strength)?;
-    let phrase = mnemonic.phrase();
+    let phrase = mnemonic.phrase()?;
     let phrase_str = String::from_utf8(phrase.expose().to_vec())
         .map_err(|e| CliError::InvalidArgs(format!("invalid UTF-8 in mnemonic: {e}")))?;
 

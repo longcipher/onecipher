@@ -20,6 +20,10 @@ use oc_signer::{
 
 use crate::{error::OcWalletError, key_store, policy_store};
 
+// ============================================================================
+// Section: API Key Creation
+// ============================================================================
+
 /// Create an API key for agent access to one or more wallets.
 ///
 /// 1. Authenticates with the owner's passphrase
@@ -101,6 +105,10 @@ pub fn create_api_key_with_secret_permissions(
 
     Ok((token, key_file))
 }
+
+// ============================================================================
+// Section: Signing with API Keys
+// ============================================================================
 
 /// Sign a transaction using an API token (agent mode).
 ///
@@ -367,9 +375,9 @@ fn enforce_policy_and_decrypt_key_with_raw_hex(
     Ok((key, key_file))
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section: Shared Helpers
+// ============================================================================
 
 /// Parse a serde_json Value as a u64 chain ID.
 /// Handles both string ("8453") and number (8453) representations.

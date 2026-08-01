@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+use crate::{
+    types::{Caip19Asset, PaymentScheme},
+    x402,
+};
+
 // ===========================================================================
 // Unified public types
 // ===========================================================================
@@ -104,6 +109,29 @@ fn default_timeout() -> u64 {
 
 fn is_json_null(value: &serde_json::Value) -> bool {
     value.is_null()
+}
+
+impl PaymentRequirements {
+    /// Convert to the strongly-typed [`x402::PaymentRequirements`].
+    ///
+    /// Validates `amount` as a decimal and `scheme` as a known
+    /// [`PaymentScheme`].  The `asset` field is stored unchecked because
+    /// wire-format x402 responses may send bare contract addresses rather
+    /// than full CAIP-19 identifiers.
+    pub fn to_typed(&self) -> Result<x402::PaymentRequirements, String> {
+        let amount: rust_decimal::Decimal =
+            self.amount.parse().map_err(|e| format!("invalid amount: {e}"))?;
+        let asset = Caip19Asset::unchecked(&self.asset);
+        let scheme: PaymentScheme =
+            self.scheme.parse().map_err(|e: crate::PayError| format!("unknown scheme: {e}"))?;
+        Ok(x402::PaymentRequirements {
+            asset,
+            amount,
+            scheme,
+            payee: self.pay_to.clone(),
+            facilitator_url: None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

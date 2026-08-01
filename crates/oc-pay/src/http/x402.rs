@@ -78,7 +78,12 @@ fn build_evm_exact(
 ) -> Result<(PaymentPayload, PaymentInfo), OcPayHttpError> {
     let account = wallet.account(network)?;
 
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| {
+            OcPayHttpError::new(OcPayHttpErrorCode::Internal, format!("system clock error: {e}"))
+        })?
+        .as_secs();
     let valid_after = now.saturating_sub(5);
     let valid_before = now + req.max_timeout_seconds;
 

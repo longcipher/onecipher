@@ -402,6 +402,14 @@ fn slide_all_windows(state: &mut PolicyState, now_ms: u64) {
 }
 
 // ---------------------------------------------------------------------------
+// Epsilon for f64 budget comparisons (M-01)
+// ---------------------------------------------------------------------------
+
+/// Tolerance for floating-point USD budget comparisons to avoid false denials
+/// from accumulated rounding errors (M-01).
+const USD_EPSILON: f64 = 1e-9;
+
+// ---------------------------------------------------------------------------
 // 11-step evaluation — each step is a named function (Readability Priorities)
 // ---------------------------------------------------------------------------
 
@@ -496,7 +504,8 @@ fn step_8_check_budget(
     policy: &PolicyV2,
     req: &PayRequest,
 ) -> Result<(), DenyReason> {
-    if state.local_spent_usd + req.amount_usd > policy.budget_allocation.allocated_usd {
+    if state.local_spent_usd + req.amount_usd > policy.budget_allocation.allocated_usd + USD_EPSILON
+    {
         return Err(DenyReason::BudgetExceeded);
     }
     Ok(())
@@ -510,7 +519,7 @@ fn step_8a_check_daily_cumulative(
     req: &PayRequest,
 ) -> Result<(), DenyReason> {
     let daily_spent: f64 = state.daily_window.iter().map(|(_, a)| a).sum();
-    if daily_spent + req.amount_usd > policy.rules.max_daily_amount_usd {
+    if daily_spent + req.amount_usd > policy.rules.max_daily_amount_usd + USD_EPSILON {
         return Err(DenyReason::BudgetExceeded);
     }
     Ok(())
@@ -524,7 +533,7 @@ fn step_8b_check_monthly_cumulative(
     req: &PayRequest,
 ) -> Result<(), DenyReason> {
     let monthly_spent: f64 = state.monthly_window.iter().map(|(_, a)| a).sum();
-    if monthly_spent + req.amount_usd > policy.rules.max_monthly_amount_usd {
+    if monthly_spent + req.amount_usd > policy.rules.max_monthly_amount_usd + USD_EPSILON {
         return Err(DenyReason::BudgetExceeded);
     }
     Ok(())

@@ -2,7 +2,11 @@ use digest::KeyInit;
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 
-use crate::{SecretBytes, curve::Curve, mnemonic::Mnemonic};
+use crate::{
+    SecretBytes,
+    curve::Curve,
+    mnemonic::{Mnemonic, MnemonicError},
+};
 
 /// Errors from HD key derivation.
 #[derive(Debug, thiserror::Error)]
@@ -23,6 +27,12 @@ pub enum HdError {
 impl From<oc_crypto::MemGuardError> for HdError {
     fn from(e: oc_crypto::MemGuardError) -> Self {
         Self::DerivationFailed(format!("memory hardening failed: {e}"))
+    }
+}
+
+impl From<MnemonicError> for HdError {
+    fn from(e: MnemonicError) -> Self {
+        Self::DerivationFailed(e.to_string())
     }
 }
 
@@ -52,7 +62,7 @@ impl HdDeriver {
         path: &str,
         curve: Curve,
     ) -> Result<SecretBytes, HdError> {
-        let seed = mnemonic.to_seed(passphrase);
+        let seed = mnemonic.to_seed(passphrase)?;
         Self::derive(seed.expose(), path, curve)
     }
 
@@ -67,7 +77,7 @@ impl HdDeriver {
         use digest::Digest;
 
         // Build a cache key by hashing all inputs (avoids storing sensitive material in the key).
-        let phrase = mnemonic.phrase();
+        let phrase = mnemonic.phrase()?;
         let mut hasher = sha2::Sha256::new();
         hasher.update(phrase.expose());
         hasher.update(b":");
@@ -117,6 +127,7 @@ impl HdDeriver {
         use std::str::FromStr;
 
         use coins_bip32::{derived::DerivedXPriv, prelude::SigningKey, xkeys::Parent};
+        use zeroize::Zeroize;
 
         let xpriv = DerivedXPriv::root_from_seed(seed, None)
             .map_err(|e| HdError::DerivationFailed(e.to_string()))?;
@@ -129,8 +140,10 @@ impl HdDeriver {
             .map_err(|e: coins_bip32::Bip32Error| HdError::DerivationFailed(e.to_string()))?;
 
         let signing_key: &SigningKey = derived.as_ref();
-        let key_bytes = signing_key.to_bytes();
-        Ok(SecretBytes::from_vec(key_bytes.to_vec())?)
+        let mut key_bytes = signing_key.to_bytes();
+        let result = SecretBytes::from_vec(key_bytes.to_vec()).map_err(HdError::from);
+        key_bytes.zeroize();
+        result
     }
 
     /// SLIP-10 derivation for ed25519 (hardened-only, HMAC-SHA512 chain).
@@ -161,10 +174,11 @@ impl HdDeriver {
         let mut mac =
             HmacSha512::new_from_slice(b"ed25519 seed").expect("HMAC can take key of any size");
         mac.update(seed);
-        let result = mac.finalize().into_bytes();
+        let mut result = mac.finalize().into_bytes();
 
         let mut key = result[..32].to_vec();
         let mut chain_code = result[32..].to_vec();
+        result.zeroize();
 
         // Derive each component (hardened only)
         let mut data = Vec::new();
@@ -178,12 +192,13 @@ impl HdDeriver {
             let mut mac =
                 HmacSha512::new_from_slice(&chain_code).expect("HMAC can take key of any size");
             mac.update(&data);
-            let result = mac.finalize().into_bytes();
+            let mut derived = mac.finalize().into_bytes();
 
             key.zeroize();
             chain_code.zeroize();
-            key = result[..32].to_vec();
-            chain_code = result[32..].to_vec();
+            key = derived[..32].to_vec();
+            chain_code = derived[32..].to_vec();
+            derived.zeroize();
         }
 
         data.zeroize();
@@ -200,7 +215,7 @@ mod tests {
 
     fn test_seed() -> SecretBytes {
         let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
-        mnemonic.to_seed("")
+        mnemonic.to_seed("").unwrap()
     }
 
     #[test]
@@ -241,7 +256,7 @@ mod tests {
     #[test]
     fn test_convenience_matches_two_step() {
         let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
-        let seed = mnemonic.to_seed("");
+        let seed = mnemonic.to_seed("").unwrap();
 
         let key1 = HdDeriver::derive(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
         let key2 =

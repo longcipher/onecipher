@@ -1,6 +1,6 @@
 //! Pairing URI generation + Passkey confirmation gate.
 
-use oc_walletconnect::{PairingUri, WcSession, WcSessionState};
+use oc_walletconnect::{PairingUri, WcSession, WcSessionState, WcSymKeyHex};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,7 +19,7 @@ pub enum PairingError {
 pub fn generate_pairing_uri(ttl_secs: u64) -> (PairingUri, WcSession) {
     let topic = hex::encode(rand::random::<[u8; 32]>());
 
-    let sym_key = format!("0x{}", hex::encode(rand::random::<[u8; 32]>()));
+    let sym_key = hex::encode(rand::random::<[u8; 32]>());
 
     let uri = PairingUri::new(topic.clone(), sym_key.clone());
     let now = std::time::SystemTime::now()
@@ -27,7 +27,7 @@ pub fn generate_pairing_uri(ttl_secs: u64) -> (PairingUri, WcSession) {
         .map_or(0, |d| d.as_secs());
     let session = WcSession {
         topic,
-        sym_key,
+        sym_key: WcSymKeyHex::new(sym_key),
         state: WcSessionState::Propose,
         expiry_unix: now + ttl_secs,
         namespaces: Vec::new(),
@@ -57,11 +57,11 @@ mod tests {
     }
 
     #[test]
-    fn generate_sym_key_starts_with_0x() {
+    fn generate_sym_key_is_64_hex_chars() {
         let (_uri, session) = generate_pairing_uri(3600);
-        assert!(session.sym_key.starts_with("0x"));
-        // 0x + 64 hex chars = 66 total
-        assert_eq!(session.sym_key.len(), 66);
+        // 32 bytes → 64 hex chars (no 0x prefix)
+        assert_eq!(session.sym_key.as_str().len(), 64);
+        assert!(session.sym_key.as_str().chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
