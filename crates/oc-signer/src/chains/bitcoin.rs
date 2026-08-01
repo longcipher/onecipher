@@ -4,7 +4,8 @@ use bitcoin::{
     Network, PrivateKey, PublicKey,
     base64::Engine,
     psbt::Psbt,
-    script::{ScriptBufExt, ScriptPubKeyBuf},
+    script::ScriptBuf,
+    secp256k1::Secp256k1,
     sighash::{EcdsaSighashType, SighashCache},
 };
 use k256::ecdsa::SigningKey;
@@ -53,23 +54,23 @@ impl BitcoinSigner {
 
     fn bitcoin_private_key(private_key: &[u8]) -> Result<PrivateKey, SignerError> {
         let signing_key = Self::signing_key(private_key)?;
-        let secret_key =
-            bitcoin::secp256k1::SecretKey::from_secret_bytes(signing_key.to_bytes().into())
-                .map_err(|e| SignerError::InvalidPrivateKey(e.to_string()))?;
-        Ok(PrivateKey::from_secp(secret_key, Network::Bitcoin))
+        let secret_key = bitcoin::secp256k1::SecretKey::from_slice(&signing_key.to_bytes())
+            .map_err(|e| SignerError::InvalidPrivateKey(e.to_string()))?;
+        Ok(PrivateKey::new(secret_key, Network::Bitcoin))
     }
 
     fn public_keys(private_key: &[u8]) -> Result<(PrivateKey, PublicKey), SignerError> {
         let private_key = Self::bitcoin_private_key(private_key)?;
-        let public_key = private_key.public_key();
+        let secp = Secp256k1::new();
+        let public_key = private_key.public_key(&secp);
         Ok((private_key, public_key))
     }
 
-    fn p2wpkh_script_pubkey(public_key: &PublicKey) -> Result<ScriptPubKeyBuf, SignerError> {
+    fn p2wpkh_script_pubkey(public_key: &PublicKey) -> Result<ScriptBuf, SignerError> {
         let wpkh = public_key.wpubkey_hash().map_err(|_| {
             SignerError::AddressDerivationFailed("bitcoin public key must be compressed".into())
         })?;
-        Ok(ScriptPubKeyBuf::new_p2wpkh(wpkh))
+        Ok(ScriptBuf::new_p2wpkh(&wpkh))
     }
 
     fn previous_output(psbt: &Psbt, index: usize) -> Result<bitcoin::TxOut, SignerError> {
@@ -84,7 +85,7 @@ impl BitcoinSigner {
         if let Some(non_witness_utxo) = &input.non_witness_utxo {
             let prevout = psbt
                 .unsigned_tx
-                .inputs
+                .input
                 .get(index)
                 .ok_or_else(|| {
                     SignerError::InvalidTransaction(format!(
@@ -99,7 +100,7 @@ impl BitcoinSigner {
                 )));
             }
 
-            return non_witness_utxo.outputs.get(prevout.vout as usize).cloned().ok_or_else(|| {
+            return non_witness_utxo.output.get(prevout.vout as usize).cloned().ok_or_else(|| {
                 SignerError::InvalidTransaction(format!(
                     "missing prevout {} for input {index}",
                     prevout.vout
@@ -141,7 +142,7 @@ impl BitcoinSigner {
                 .unwrap_or(EcdsaSighashType::All);
 
             let sighash = SighashCache::new(&psbt.unsigned_tx)
-                .p2wpkh_signature_hash(index, &prevout.script_pubkey, prevout.amount, sighash_type)
+                .p2wpkh_signature_hash(index, &prevout.script_pubkey, prevout.value, sighash_type)
                 .map_err(|e| {
                     SignerError::SigningFailed(format!(
                         "failed to compute sighash for input {index}: {e}"
@@ -150,7 +151,8 @@ impl BitcoinSigner {
 
             let msg = bitcoin::secp256k1::Message::from(sighash);
 
-            let signature = bitcoin::secp256k1::ecdsa::sign(msg, priv_key.as_inner());
+            let secp = Secp256k1::new();
+            let signature = secp.sign_ecdsa(&msg, &priv_key.inner);
 
             psbt.inputs[index]
                 .partial_sigs
