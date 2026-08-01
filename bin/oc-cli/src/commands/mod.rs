@@ -1,13 +1,23 @@
 pub(crate) mod age_cmd;
 pub(crate) mod agent_secret;
 pub(crate) mod audit;
+pub(crate) mod audit_secrets;
 pub(crate) mod backup;
+pub(crate) mod clipboard;
+pub(crate) mod completion;
 pub(crate) mod config;
 pub(crate) mod derive;
+pub(crate) mod doctor;
+pub(crate) mod env_cmd;
+pub(crate) mod find;
+pub(crate) mod fsck;
 pub(crate) mod fund;
 pub(crate) mod generate;
 #[cfg(feature = "git")]
 pub(crate) mod git_cmd;
+pub(crate) mod grep;
+#[cfg(feature = "git")]
+pub(crate) mod history;
 pub(crate) mod info;
 pub(crate) mod intent;
 pub(crate) mod key;
@@ -394,4 +404,9 @@ pub(crate) fn parse_metadata(meta: &[String]) -> Result<SecretMetadata, CliError
         }
     }
     Ok(metadata)
+}
+
+/// Print data as a QR code in the terminal.
+pub(crate) fn print_qr(data: &str) -> Result<(), CliError> {
+    qr2term::print_qr(data).map_err(|e| CliError::InvalidArgs(format!("QR generation failed: {e}")))
 }

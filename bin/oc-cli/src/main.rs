@@ -175,6 +175,7 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         },
         Commands::Config { subcommand } => match subcommand {
             cli::ConfigCommands::Show => commands::config::show(),
+            cli::ConfigCommands::Set { key, value } => commands::config::set(&key, &value),
         },
         Commands::Update { force } => commands::update::run(force),
         Commands::Uninstall { purge } => commands::uninstall::run(purge),
@@ -182,6 +183,9 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         Commands::Audit { subcommand } => match subcommand {
             cli::AuditCommands::List { since, agent, status } => {
                 commands::audit::list(since.as_deref(), agent.as_deref(), status.as_deref())
+            }
+            cli::AuditCommands::Secrets { format, max_age, skip_hibp } => {
+                commands::audit_secrets::run(&format, max_age, skip_hibp)
             }
         },
         Commands::SessionKey { subcommand } => match subcommand {
@@ -263,8 +267,8 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
                 let item_type = r#type.as_deref().map(commands::parse_item_type).transpose()?;
                 commands::secret::list(item_type, json)
             }
-            cli::SecretCommands::Get { name, field, json } => {
-                commands::secret::get(&name, field.as_deref(), json)
+            cli::SecretCommands::Get { name, field, json, qr } => {
+                commands::secret::get(&name, field.as_deref(), json, qr)
             }
             cli::SecretCommands::Add { name, r#type, meta, stdin } => {
                 let item_type = commands::parse_item_type(&r#type)?;
@@ -275,14 +279,32 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             }
             cli::SecretCommands::Delete { name } => commands::secret::delete(&name),
             cli::SecretCommands::Rename { old, new } => commands::secret::rename(&old, &new),
+            cli::SecretCommands::Edit { name, editor } => {
+                commands::secret::edit(&name, editor.as_deref())
+            }
+            cli::SecretCommands::Copy { src, dst, force } => {
+                commands::secret::copy(&src, &dst, force)
+            }
+            cli::SecretCommands::Move { src, dst, force } => {
+                commands::secret::mv(&src, &dst, force)
+            }
         },
         Commands::Password { subcommand } => match subcommand {
             cli::PasswordCommands::Add { name, url, username, generate, length, symbols } => {
                 commands::password::add(&name, &url, &username, generate, length, symbols)
             }
-            cli::PasswordCommands::Get { name, copy } => commands::password::get(&name, copy),
-            cli::PasswordCommands::Generate { length, symbols } => {
-                commands::password::generate(length, symbols)
+            cli::PasswordCommands::Get { name, copy, timeout } => {
+                commands::password::get(&name, copy, timeout)
+            }
+            cli::PasswordCommands::Generate {
+                length,
+                symbols,
+                generator,
+                xkcd_sep,
+                xkcd_words,
+                qr,
+            } => {
+                commands::password::generate(length, symbols, &generator, &xkcd_sep, xkcd_words, qr)
             }
         },
         Commands::Totp { subcommand } => match subcommand {
@@ -295,8 +317,11 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
                     account.as_deref(),
                 )
             }
-            cli::TotpCommands::Generate { name } => commands::totp::generate(&name),
+            cli::TotpCommands::Generate { name, qr } => commands::totp::generate(&name, qr),
             cli::TotpCommands::Uris { name } => commands::totp::uris(&name),
+            cli::TotpCommands::Hotp { name, counter, increment } => {
+                commands::totp::hotp(&name, counter, increment)
+            }
         },
         Commands::Age { subcommand } => match subcommand {
             cli::AgeCommands::Init => commands::age_cmd::init(),
@@ -313,9 +338,20 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             cli::AgeCommands::Reencrypt => commands::age_cmd::reencrypt(),
         },
         Commands::Migrate { dry_run, rollback } => commands::migrate::run(dry_run, rollback),
+        Commands::Grep { pattern, regex, json } => commands::grep::run(&pattern, regex, json),
+        Commands::Find { query, regex, json, r#type } => {
+            commands::find::run(query.as_deref(), regex, json, r#type.as_deref())
+        }
         Commands::Tui => {
             let store = commands::open_secret_store()?;
             tui::run(store).map_err(|e| CliError::InvalidArgs(e.to_string()))
+        }
+        Commands::Doctor { verbose } => commands::doctor::run(verbose),
+        Commands::Fsck { fix, decrypt } => commands::fsck::run(fix, decrypt),
+        Commands::Completion { shell } => commands::completion::run(&shell),
+        #[cfg(feature = "git")]
+        Commands::History { name, password, limit, json } => {
+            commands::history::run(&name, password, limit, json)
         }
         Commands::AgentSecret { subcommand } => match subcommand {
             cli::AgentSecretCommands::Get { name, json } => {
@@ -328,6 +364,9 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
                 commands::agent_secret::agent_totp_generate(&name)
             }
         },
+        Commands::Env { names, keep_case, exec, command } => {
+            commands::env_cmd::run(&names, keep_case, exec, &command)
+        }
         #[cfg(feature = "git")]
         Commands::Git { subcommand } => match subcommand {
             cli::GitCommands::Init { remote } => commands::git_cmd::init(remote.as_deref()),

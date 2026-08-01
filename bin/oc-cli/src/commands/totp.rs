@@ -62,11 +62,12 @@ pub(crate) fn add(
     Ok(())
 }
 
-/// Entry point for `onecipher totp generate <name>`.
+/// Entry point for `onecipher totp generate <name> [--qr]`.
 ///
 /// Decrypts the stored otpauth URI and generates the current TOTP code.
+/// When `--qr` is set, the otpauth URI is displayed as a QR code.
 #[allow(dead_code)]
-pub(crate) fn generate(name: &str) -> Result<(), CliError> {
+pub(crate) fn generate(name: &str, qr: bool) -> Result<(), CliError> {
     let store = super::open_secret_store()?;
     let entry = store.get(name).map_err(super::secret::map_store_error)?;
     let identity = super::load_age_identity()?;
@@ -76,6 +77,10 @@ pub(crate) fn generate(name: &str) -> Result<(), CliError> {
 
     let code = oc_secret::totp::generate_totp(&payload.secret)
         .map_err(|e| CliError::InvalidArgs(format!("TOTP generation failed: {e}")))?;
+
+    if qr {
+        return super::print_qr(&code);
+    }
 
     println!("{code}");
     Ok(())
@@ -94,6 +99,53 @@ pub(crate) fn uris(name: &str) -> Result<(), CliError> {
         .map_err(|e| CliError::InvalidArgs(format!("decryption failed: {e}")))?;
 
     println!("{}", payload.secret);
+    Ok(())
+}
+
+/// Entry point for `onecipher totp hotp <name> --counter <n> [--increment]`.
+///
+/// Decrypts the stored otpauth URI and generates an HOTP code using the
+/// given counter. When `--increment` is set, the counter stored in the
+/// entry's `extra` field is bumped and re-encrypted.
+#[allow(dead_code)]
+pub(crate) fn hotp(name: &str, counter: u64, increment: bool) -> Result<(), CliError> {
+    let store = super::open_secret_store()?;
+    let entry = store.get(name).map_err(super::secret::map_store_error)?;
+    let identity = super::load_age_identity()?;
+    let payload = entry
+        .decrypt(&identity)
+        .map_err(|e| CliError::InvalidArgs(format!("decryption failed: {e}")))?;
+
+    let code = oc_secret::totp::generate_hotp(&payload.secret, counter)
+        .map_err(|e| CliError::InvalidArgs(format!("HOTP generation failed: {e}")))?;
+
+    if increment {
+        let mut extra = payload.extra.unwrap_or(serde_json::Value::Object(Default::default()));
+        extra["hotp_counter"] = serde_json::json!(counter + 1);
+
+        let updated_payload =
+            SecretPayload { secret: payload.secret, notes: payload.notes, extra: Some(extra) };
+
+        let recipients = super::load_recipients()?;
+        if recipients.is_empty() {
+            return Err(CliError::InvalidArgs(
+                "no recipients found — run `onecipher age init` first".into(),
+            ));
+        }
+
+        let updated_entry = oc_secret::SecretEntry::new(
+            name,
+            ItemType::Totp,
+            &updated_payload,
+            entry.metadata,
+            &recipients,
+        )
+        .map_err(|e| CliError::InvalidArgs(format!("failed to re-encrypt entry: {e}")))?;
+
+        store.put(&updated_entry).map_err(super::secret::map_store_error)?;
+    }
+
+    println!("{code}");
     Ok(())
 }
 
