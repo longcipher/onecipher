@@ -27,17 +27,54 @@ fn default_limit() -> usize {
 
 /// GET /api/audit — read audit log entries with pagination.
 pub async fn get_audit(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Query(params): Query<AuditQuery>,
 ) -> impl IntoResponse {
     tracing::debug!(offset = ?params.offset, limit = params.limit, "get_audit called");
-    // ponytail: stub, read ~/.onecipher/logs/audit.jsonl later
+
+    let audit_path = state.state_dir.join("logs").join("audit.jsonl");
+    let offset = params.offset.unwrap_or(0);
+
+    // Read the audit log file. If it doesn't exist, return empty.
+    let content = match tokio::fs::read_to_string(&audit_path).await {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "entries": [],
+                    "total": 0,
+                    "offset": offset,
+                    "limit": params.limit,
+                })),
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to read audit log");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("failed to read audit log: {e}")})),
+            );
+        }
+    };
+
+    // Parse JSONL entries.
+    let all_entries: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+
+    let total = all_entries.len();
+    let entries: Vec<&serde_json::Value> =
+        all_entries.iter().skip(offset).take(params.limit).collect();
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "entries": [],
-            "total": 0,
-            "offset": params.offset.unwrap_or(0),
+            "entries": entries,
+            "total": total,
+            "offset": offset,
             "limit": params.limit,
         })),
     )
@@ -52,7 +89,7 @@ mod tests {
     use crate::approval_queue::ApprovalQueue;
 
     fn test_state() -> AppState {
-        AppState { queue: ApprovalQueue::new(16) }
+        AppState { queue: ApprovalQueue::new(16), state_dir: std::path::PathBuf::from("/tmp") }
     }
 
     #[tokio::test]

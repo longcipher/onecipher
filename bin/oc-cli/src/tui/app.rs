@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use oc_core::{ItemType, SecretIndexEntry};
+use oc_core::{ItemType, SecretIndexEntry, SecretMetadata, SecretPayload};
 use oc_secret::{AgeIdentity, SecretStore};
 
 use crate::tui::clipboard;
@@ -40,6 +40,129 @@ pub(crate) enum Mode {
     Detail,
     /// Help screen.
     Help,
+}
+
+/// Form field identifiers for the new-secret creation form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FormField {
+    Name,
+    Type,
+    Secret,
+    Notes,
+    Url,
+    Username,
+    Issuer,
+    Account,
+    Chain,
+    Submit,
+    Cancel,
+}
+
+/// State for the new-secret creation form.
+pub(crate) struct FormState {
+    /// Currently focused field.
+    pub(crate) focus: FormField,
+    /// Name input.
+    pub(crate) name: String,
+    /// Selected item type index (into `ItemType::all()`).
+    pub(crate) type_index: usize,
+    /// Secret value input.
+    pub(crate) secret: String,
+    /// Notes input.
+    pub(crate) notes: String,
+    /// URL input (for Password).
+    pub(crate) url: String,
+    /// Username input (for Password).
+    pub(crate) username: String,
+    /// Issuer input (for Totp).
+    pub(crate) issuer: String,
+    /// Account input (for Totp).
+    pub(crate) account: String,
+    /// Chain input (for Mnemonic/PrivateKey).
+    pub(crate) chain: String,
+    /// Error message to display inline.
+    pub(crate) error: Option<String>,
+}
+
+impl FormState {
+    pub(crate) fn new() -> Self {
+        Self {
+            focus: FormField::Name,
+            name: String::new(),
+            type_index: 0,
+            secret: String::new(),
+            notes: String::new(),
+            url: String::new(),
+            username: String::new(),
+            issuer: String::new(),
+            account: String::new(),
+            chain: String::new(),
+            error: None,
+        }
+    }
+
+    /// Returns the selected `ItemType`.
+    pub(crate) fn selected_type(&self) -> ItemType {
+        ItemType::all().get(self.type_index).copied().unwrap_or(ItemType::Password)
+    }
+
+    /// Returns the ordered list of visible fields based on the selected type.
+    pub(crate) fn visible_fields(&self) -> Vec<FormField> {
+        let mut fields =
+            vec![FormField::Name, FormField::Type, FormField::Secret, FormField::Notes];
+        match self.selected_type() {
+            ItemType::Password => {
+                fields.push(FormField::Url);
+                fields.push(FormField::Username);
+            }
+            ItemType::Totp => {
+                fields.push(FormField::Issuer);
+                fields.push(FormField::Account);
+            }
+            ItemType::Mnemonic | ItemType::PrivateKey => {
+                fields.push(FormField::Chain);
+            }
+            _ => {}
+        }
+        fields.push(FormField::Submit);
+        fields.push(FormField::Cancel);
+        fields
+    }
+
+    /// Move focus to the previous field.
+    pub(crate) fn move_up(&mut self) {
+        let fields = self.visible_fields();
+        if let Some(idx) = fields.iter().position(|f| *f == self.focus) {
+            if idx > 0 {
+                self.focus = fields[idx - 1];
+            }
+        }
+    }
+
+    /// Move focus to the next field.
+    pub(crate) fn move_down(&mut self) {
+        let fields = self.visible_fields();
+        if let Some(idx) = fields.iter().position(|f| *f == self.focus) {
+            if idx + 1 < fields.len() {
+                self.focus = fields[idx + 1];
+            }
+        }
+    }
+
+    /// Get a mutable reference to the currently focused text field, if any.
+    pub(crate) fn focused_field_mut(&mut self) -> Option<&mut String> {
+        match self.focus {
+            FormField::Name => Some(&mut self.name),
+            FormField::Secret => Some(&mut self.secret),
+            FormField::Notes => Some(&mut self.notes),
+            FormField::Url => Some(&mut self.url),
+            FormField::Username => Some(&mut self.username),
+            FormField::Issuer => Some(&mut self.issuer),
+            FormField::Account => Some(&mut self.account),
+            FormField::Chain => Some(&mut self.chain),
+            _ => None,
+        }
+    }
 }
 
 /// TUI application state.
@@ -74,8 +197,8 @@ pub(crate) struct App {
     /// time. When `None`, copy and TOTP features display a guidance
     /// message instead of failing.
     identity: Option<AgeIdentity>,
-    /// Whether experimental features (e.g. new secret creation) are enabled.
-    pub(crate) experimental: bool,
+    /// New-secret creation form state (active when in `Mode::Insert`).
+    pub(crate) form: Option<FormState>,
 }
 
 impl App {
@@ -83,7 +206,7 @@ impl App {
     ///
     /// Attempts to load an age identity from `ONECIPHER_AGE_IDENTITY` so
     /// that copy / TOTP features work out of the box.
-    pub(crate) fn new(store: SecretStore, experimental: bool) -> Self {
+    pub(crate) fn new(store: SecretStore) -> Self {
         let identity =
             std::env::var("ONECIPHER_AGE_IDENTITY").ok().and_then(|s| AgeIdentity::parse(&s).ok());
 
@@ -101,7 +224,7 @@ impl App {
             input_buffer: String::new(),
             should_quit: false,
             identity,
-            experimental,
+            form: None,
         }
     }
 
@@ -273,6 +396,96 @@ impl App {
             }
             Err(e) => self.set_message(&format!("Delete failed: {e}")),
         }
+    }
+
+    /// Enter insert mode — initializes the new-secret creation form.
+    pub(crate) fn enter_insert(&mut self) {
+        self.form = Some(FormState::new());
+        self.mode = Mode::Insert;
+    }
+
+    /// Submit the new-secret creation form.
+    ///
+    /// Validates inputs, encrypts the payload with age, and persists it to
+    /// the `SecretStore`. On success, reloads entries and returns to Normal
+    /// mode. On failure, sets an inline error message on the form.
+    pub(crate) fn submit_form(&mut self) {
+        let Some(form) = &self.form else { return };
+
+        // Validate.
+        if form.name.trim().is_empty() {
+            self.form.as_mut().unwrap().error = Some("Name is required".into());
+            return;
+        }
+        if form.secret.is_empty() {
+            self.form.as_mut().unwrap().error = Some("Secret value is required".into());
+            return;
+        }
+
+        let name = form.name.trim().to_string();
+        let item_type = form.selected_type();
+        let payload = SecretPayload {
+            secret: form.secret.clone(),
+            notes: if form.notes.is_empty() { None } else { Some(form.notes.clone()) },
+            extra: None,
+        };
+        let mut metadata = SecretMetadata::default();
+        match item_type {
+            ItemType::Password => {
+                if !form.url.is_empty() {
+                    metadata.url = Some(form.url.clone());
+                }
+                if !form.username.is_empty() {
+                    metadata.username = Some(form.username.clone());
+                }
+            }
+            ItemType::Totp => {
+                if !form.issuer.is_empty() {
+                    metadata.issuer = Some(form.issuer.clone());
+                }
+                if !form.account.is_empty() {
+                    metadata.account = Some(form.account.clone());
+                }
+            }
+            ItemType::Mnemonic | ItemType::PrivateKey if !form.chain.is_empty() => {
+                metadata.chain = Some(form.chain.clone());
+            }
+            _ => {}
+        }
+
+        // Load recipients.
+        let recipients = match crate::commands::load_recipients() {
+            Ok(r) => r,
+            Err(e) => {
+                self.form.as_mut().unwrap().error = Some(format!("Recipients error: {e}"));
+                return;
+            }
+        };
+        if recipients.is_empty() {
+            self.form.as_mut().unwrap().error =
+                Some("No recipients found — run `onecipher age init` first".into());
+            return;
+        }
+
+        // Create and persist the entry.
+        let entry =
+            match oc_secret::SecretEntry::new(&name, item_type, &payload, metadata, &recipients) {
+                Ok(e) => e,
+                Err(e) => {
+                    self.form.as_mut().unwrap().error = Some(format!("Create failed: {e}"));
+                    return;
+                }
+            };
+        if let Err(e) = self.store.put(&entry) {
+            self.form.as_mut().unwrap().error = Some(format!("Save failed: {e}"));
+            return;
+        }
+
+        // Success — clear form, reload, return to Normal.
+        self.form = None;
+        self.mode = Mode::Normal;
+        self.reload();
+        self.set_message(&format!("Secret added: {name}"));
     }
 
     /// Set a transient status message (auto-expires after [`MESSAGE_TTL`]).

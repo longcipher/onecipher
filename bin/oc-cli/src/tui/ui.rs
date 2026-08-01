@@ -22,7 +22,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::tui::app::{App, Mode};
+use crate::tui::app::{App, FormField, Mode};
 
 /// Render the main UI.
 pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
@@ -40,6 +40,7 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
     match app.mode {
         Mode::Detail => render_detail(app, frame, chunks[1]),
         Mode::Help => render_help(frame, chunks[1]),
+        Mode::Insert => render_insert(app, frame, chunks[1]),
         _ => render_list(app, frame, chunks[1]),
     }
 
@@ -149,12 +150,12 @@ fn render_status(app: &App, frame: &mut Frame<'_>, area: Rect) {
     // Contextual key-binding hint.
     let hint = match app.mode {
         Mode::Normal => {
-            "j/k:move  /:search  Enter:detail  c:copy  t:totp  d:delete  ?:help  q:quit"
+            "j/k:move  /:search  Enter:detail  c:copy  t:totp  n:new  d:delete  ?:help  q:quit"
         }
         Mode::Search => "Type to search, Enter:confirm, Esc:cancel",
         Mode::Detail => "Esc:back  c:copy  t:totp  q:quit",
         Mode::Help => "Esc/q:back",
-        Mode::Insert => "Esc:cancel  Enter:confirm",
+        Mode::Insert => "Up/Down:field  Left/Right:type  Enter:next/submit  Esc:cancel",
         Mode::Confirm => "y:confirm  n/Esc:cancel",
     };
     lines.push(Line::from(vec![Span::styled(hint, Style::default().fg(Color::DarkGray))]));
@@ -229,6 +230,107 @@ fn render_detail(app: &App, frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+/// Render the new-secret creation form.
+fn render_insert(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let Some(form) = &app.form else { return };
+
+    let cyan = Style::default().fg(Color::Cyan);
+    let yellow = Style::default().fg(Color::Yellow);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+    let red = Style::default().fg(Color::Red);
+    let green_bold = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    // Title
+    lines.push(Line::from(vec![Span::styled("Create New Secret", bold)]));
+    lines.push(Line::from(""));
+
+    // Helper closure for text field lines.
+    let field_line = |label: &str, value: &str, focused: bool, masked: bool| -> Line<'static> {
+        let display = if masked { "*".repeat(value.len()) } else { value.to_string() };
+        let cursor = if focused { "▏" } else { "" };
+        Line::from(vec![
+            Span::styled(format!("  {label}: "), if focused { yellow } else { cyan }),
+            Span::raw(display),
+            Span::styled(cursor.to_string(), yellow),
+        ])
+    };
+
+    // Name
+    lines.push(field_line("Name", &form.name, form.focus == FormField::Name, false));
+
+    // Type selector
+    let type_label = form.selected_type().label();
+    let type_focused = form.focus == FormField::Type;
+    lines.push(Line::from(vec![
+        Span::styled("  Type: ", if type_focused { yellow } else { cyan }),
+        Span::styled("< ", dim),
+        Span::styled(type_label, if type_focused { green_bold } else { bold }),
+        Span::styled(" >", dim),
+    ]));
+
+    // Secret (masked)
+    lines.push(field_line("Secret", &form.secret, form.focus == FormField::Secret, true));
+
+    // Notes
+    lines.push(field_line("Notes", &form.notes, form.focus == FormField::Notes, false));
+
+    // Type-specific fields
+    match form.selected_type() {
+        ItemType::Password => {
+            lines.push(field_line("URL", &form.url, form.focus == FormField::Url, false));
+            lines.push(field_line(
+                "Username",
+                &form.username,
+                form.focus == FormField::Username,
+                false,
+            ));
+        }
+        ItemType::Totp => {
+            lines.push(field_line("Issuer", &form.issuer, form.focus == FormField::Issuer, false));
+            lines.push(field_line(
+                "Account",
+                &form.account,
+                form.focus == FormField::Account,
+                false,
+            ));
+        }
+        ItemType::Mnemonic | ItemType::PrivateKey => {
+            lines.push(field_line("Chain", &form.chain, form.focus == FormField::Chain, false));
+        }
+        _ => {}
+    }
+
+    lines.push(Line::from(""));
+
+    // Submit / Cancel buttons
+    let submit_style = if form.focus == FormField::Submit { green_bold } else { dim };
+    let cancel_style =
+        if form.focus == FormField::Cancel { red.add_modifier(Modifier::BOLD) } else { dim };
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("[ Submit ]", submit_style),
+        Span::raw("   "),
+        Span::styled("[ Cancel ]", cancel_style),
+    ]));
+
+    // Inline error message
+    if let Some(err) = &form.error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  Error: {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title("New Secret"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
 /// Render the help screen.
 fn render_help(frame: &mut Frame<'_>, area: Rect) {
     let cyan = Style::default().fg(Color::Cyan);
@@ -258,6 +360,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
             Span::styled("  d          ", cyan),
             Span::raw("Delete selected entry (confirms)"),
         ]),
+        Line::from(vec![Span::styled("  n          ", cyan), Span::raw("Create new secret")]),
         Line::from(vec![Span::styled("  ?          ", cyan), Span::raw("Show this help")]),
         Line::from(vec![Span::styled("  Esc        ", cyan), Span::raw("Cancel / go back")]),
         Line::from(vec![Span::styled("  Ctrl+C     ", cyan), Span::raw("Force quit")]),

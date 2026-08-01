@@ -77,9 +77,13 @@ impl StoreConfig {
         self.root.join("index.jsonl")
     }
 
-    /// `<root>/secrets/<name>.age`
+    /// `<root>/secrets/<encoded-name>.age`
+    ///
+    /// The name is percent-encoded for the filesystem: `/` → `%2F`, `%` → `%25`.
+    /// This allows hierarchical names like `github/personal` while keeping
+    /// the filesystem flat and safe.
     pub fn entry_path(&self, name: &str) -> PathBuf {
-        self.secrets_dir().join(format!("{name}.age"))
+        self.secrets_dir().join(format!("{}.age", name_to_filename(name)))
     }
 }
 
@@ -270,12 +274,13 @@ impl SecretStore {
 }
 
 /// Reject names that could escape the secrets directory.
+///
+/// `/` is allowed — it is percent-encoded in filenames via [`name_to_filename`].
 fn validate_name(name: &str) -> Result<(), SecretStoreError> {
     if name.trim().is_empty() {
         return Err(SecretStoreError::InvalidName("name must not be empty".into()));
     }
-    if name.contains('/') ||
-        name.contains('\\') ||
+    if name.contains('\\') ||
         name.contains('\0') ||
         name == ".." ||
         name == "." ||
@@ -286,6 +291,14 @@ fn validate_name(name: &str) -> Result<(), SecretStoreError> {
         )));
     }
     Ok(())
+}
+
+/// Percent-encode a secret name for filesystem storage.
+///
+/// Encodes `%` as `%25` first, then `/` as `%2F`. This allows hierarchical
+/// names like `github/personal` while keeping the filesystem flat and safe.
+fn name_to_filename(name: &str) -> String {
+    name.replace('%', "%25").replace('/', "%2F")
 }
 
 #[cfg(unix)]
@@ -459,8 +472,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_name_rejects_path_separators() {
-        assert!(validate_name("a/b").is_err());
+    fn validate_name_rejects_dangerous_chars() {
+        // '/' is now allowed (percent-encoded in filenames).
+        assert!(validate_name("a/b").is_ok());
         assert!(validate_name("a\\b").is_err());
         assert!(validate_name("..").is_err());
         assert!(validate_name(".").is_err());
@@ -472,9 +486,18 @@ mod tests {
     #[test]
     fn validate_name_accepts_valid_names() {
         assert!(validate_name("github").is_ok());
+        assert!(validate_name("github/personal").is_ok());
         assert!(validate_name("my-wallet").is_ok());
         assert!(validate_name("work_email").is_ok());
         assert!(validate_name("vault123").is_ok());
+    }
+
+    #[test]
+    fn name_to_filename_encodes_slash_and_percent() {
+        assert_eq!(name_to_filename("github"), "github");
+        assert_eq!(name_to_filename("github/personal"), "github%2Fpersonal");
+        assert_eq!(name_to_filename("100%done"), "100%25done");
+        assert_eq!(name_to_filename("a/b%c"), "a%2Fb%25c");
     }
 
     #[test]

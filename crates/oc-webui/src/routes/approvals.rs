@@ -6,6 +6,8 @@
 //! - `POST /api/approvals/:id/simulate` — simulate tx (W2 placeholder, always null)
 //! - `GET  /api/approvals/history`       — placeholder for resolved log
 
+use std::path::PathBuf;
+
 use axum::{
     Json,
     extract::{Path, State},
@@ -18,10 +20,12 @@ use uuid::Uuid;
 
 use crate::approval_queue::ApprovalQueue;
 
-/// Shared application state for approval routes.
+/// Shared application state for all WebUI routes.
 #[derive(Clone)]
 pub struct AppState {
     pub queue: ApprovalQueue,
+    /// Path to `~/.onecipher/` state directory.
+    pub state_dir: PathBuf,
 }
 
 /// List all pending approvals.
@@ -108,7 +112,7 @@ mod tests {
     #[tokio::test]
     async fn test_simulate_returns_null() {
         let queue = ApprovalQueue::new(16);
-        let state = AppState { queue };
+        let state = AppState { queue, state_dir: std::path::PathBuf::from("/tmp") };
         let app = axum::Router::new()
             .route("/api/approvals/{id}/simulate", axum::routing::post(simulate_approval))
             .with_state(state);

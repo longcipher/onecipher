@@ -231,15 +231,95 @@ just build
 cargo build --release --bin onecipher
 ```
 
-### Using the CLI
+### First-time setup
 
 ```bash
-# Create a wallet (derives addresses for all supported chains)
+# 1. Initialize the age encryption key (one-time)
+onecipher age init
+
+# 2. Create a wallet (derives addresses for all 12 chains)
 onecipher wallet create --name "agent-treasury"
 
-# List wallets
-onecipher wallet list
+# 3. Verify everything works
+onecipher status
+```
 
+### Password management
+
+```bash
+# Add a password (hierarchical names with / are supported)
+onecipher password add github/personal --url https://github.com --username alice
+# → prompts for password interactively
+
+# Add a password with auto-generated password
+onecipher password add aws/prod --url https://aws.amazon.com --username admin --generate --length 32
+
+# Retrieve a password
+onecipher password get github/personal
+
+# Retrieve and copy to clipboard (auto-clears after 40s)
+onecipher password get github/personal --copy
+
+# Generate a standalone random password
+onecipher password generate --length 24 --symbols
+```
+
+### TOTP two-factor auth
+
+```bash
+# Add a TOTP secret via otpauth URI (from QR code or manual setup)
+onecipher totp add discord --otpauth "otpauth://totp/Discord:alice?secret=JBSWY3DPEHPK3PXP&issuer=Discord"
+
+# Add a TOTP secret via base32 secret + issuer/account
+onecipher totp add github-2fa --secret JBSWY3DPEHPK3PXP --issuer GitHub --username alice
+
+# Generate current TOTP code
+onecipher totp generate discord
+
+# Show otpauth URI for backup
+onecipher totp uris discord
+```
+
+### Encrypted notes & generic secrets
+
+```bash
+# Add an encrypted note (hierarchical names supported)
+echo '{"secret":"recovery phrase words here"}' | \
+  onecipher secret add notes/recovery --type note --stdin
+
+# Add an API key
+echo '{"secret":"sk-abc123..."}' | \
+  onecipher secret add api-keys/openai --type password --stdin --meta url=https://api.openai.com
+
+# List all secrets
+onecipher secret list
+onecipher secret list --json       # machine-readable
+onecipher secret list --type note  # filter by type
+
+# Retrieve a secret
+onecipher secret get notes/recovery
+onecipher secret get notes/recovery --json
+
+# Rename a secret
+onecipher secret rename notes/recovery notes/recovery-v2
+
+# Delete a secret
+onecipher secret delete notes/recovery-v2
+```
+
+### Supported secret types
+
+| Type | Use case | Example name |
+|------|----------|-------------|
+| `password` | Site credentials, API keys | `github/personal`, `aws/prod` |
+| `note` | Encrypted free-form text | `notes/recovery`, `notes/ssh-config` |
+| `totp` | TOTP seed (use `totp add` shortcut) | `discord`, `github-2fa` |
+| `mnemonic` | BIP-39 seed phrases | `wallets/main-mnemonic` |
+| `private-key` | Raw private keys | `wallets/evm-key` |
+
+### Signing
+
+```bash
 # Sign a message (EVM)
 onecipher sign message --wallet agent-treasury --chain ethereum --message "hello"
 
@@ -249,49 +329,68 @@ onecipher sign message --wallet agent-treasury --chain solana --message "hello"
 # Sign a Bitcoin transaction
 onecipher sign tx --wallet agent-treasury --chain bitcoin --tx "0200000001..."
 
-# Use a bare EVM chain ID for Base
+# Use a bare EVM chain ID (e.g. Base = 8453)
 onecipher sign tx --wallet agent-treasury --chain 8453 --tx "02f8..."
-
-# Connect to a dApp via WalletConnect
-onecipher wc pair
-onecipher wc connect "wc:<topic>@2?relay-protocol=irn&symKey=..."
-
-# List WalletConnect sessions
-onecipher wc sessions
 ```
 
-### Using the unified vault (passwords, TOTP, notes, age)
+### WalletConnect
 
 ```bash
-# Initialize age key
-onecipher age init
+# Generate a pairing URI (QR-ready)
+onecipher wc pair
 
-# Password management
-onecipher password add github/personal --url https://github.com --username alice
-onecipher password get github/personal --copy
-onecipher password generate --length 32
+# Connect to a dApp via pairing URI
+onecipher wc connect "wc:<topic>@2?relay-protocol=irn&symKey=..."
 
-# TOTP
-onecipher totp add discord --otpauth "otpauth://totp/Discord:alice?secret=..."
-onecipher totp generate discord
+# List active sessions
+onecipher wc sessions
 
-# Generic secret
-onecipher secret list --json
-onecipher secret add notes/recovery --type note --stdin
-onecipher secret get notes/recovery --json
+# Disconnect a session
+onecipher wc disconnect --topic <topic>
+```
 
-# age key management
+### Age encryption management
+
+```bash
+# Show your age public key (for sharing with other devices)
+onecipher age identity-show
+
+# Add a recipient (multi-device access)
 onecipher age recipient add age1...
+
+# List recipients
+onecipher age recipient list
+
+# Re-encrypt vault with current recipients (after key rotation)
 onecipher age reencrypt
+```
 
-# Migrate legacy wallets
-onecipher migrate legacy-wallets
+### Migration & maintenance
 
-# TUI
+```bash
+# Migrate legacy wallets into the unified vault
+onecipher migrate
+
+# Dry-run migration (preview only)
+onecipher migrate --dry-run
+
+# Create an encrypted backup
+onecipher backup export backup.ocbk
+
+# Restore from backup
+onecipher backup import backup.ocbk
+
+# Launch interactive TUI
 onecipher tui
+```
 
-# git sync
+### Git sync (optional)
+
+```bash
+# Pull encrypted vault changes from remote
 onecipher git pull
+
+# Push encrypted vault changes to remote
 onecipher git push
 ```
 
@@ -432,7 +531,7 @@ nm target/release/onecipher | grep -i tcp    # R12 hard gate (requires release b
 | `onecipher secret list` | List all vault entries (`--json` supported) |
 | `onecipher secret add` | Add a generic secret (note, etc.) via `--stdin` |
 | `onecipher secret get` | Retrieve a generic secret (`--json` supported) |
-| `onecipher migrate legacy-wallets` | Migrate legacy wallets into the unified vault |
+| `onecipher migrate` | Migrate legacy wallets into the unified vault |
 | `onecipher tui` | Launch the interactive terminal UI |
 | `onecipher git pull` | Pull encrypted vault changes from the git remote |
 | `onecipher git push` | Push encrypted vault changes to the git remote |

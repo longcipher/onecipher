@@ -8,6 +8,7 @@
 
 use std::{io, net::SocketAddr, path::PathBuf};
 
+use axum::response::IntoResponse;
 use oc_core::{
     WebuiConfig,
     approval::{ApprovalDecision, PendingApproval},
@@ -43,7 +44,7 @@ pub use routes::approvals::AppState;
 /// cannot be created.
 pub async fn run_webui_server(
     config: &WebuiConfig,
-    _state_dir: PathBuf,
+    state_dir: PathBuf,
     approval_rx: mpsc::Receiver<(PendingApproval, oneshot::Sender<ApprovalDecision>)>,
 ) -> io::Result<(JoinHandle<()>, u16)> {
     let addr: SocketAddr = config.listen.parse().map_err(|e| {
@@ -65,7 +66,7 @@ pub async fn run_webui_server(
     let queue = ApprovalQueue::new(64);
     queue.spawn_receiver(approval_rx);
 
-    let state = AppState { queue };
+    let state = AppState { queue, state_dir };
 
     let app = axum::Router::new()
         .route("/api/health", axum::routing::get(health_handler))
@@ -164,7 +165,9 @@ pub async fn run_webui_server(
         )
         // WebSocket
         .route("/ws", axum::routing::get(routes::ws::ws_handler))
-        .with_state(state);
+        .with_state(state)
+        // Serve frontend SPA for all non-API routes.
+        .fallback(spa_fallback);
 
     let handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(listener, app).await {
@@ -182,6 +185,102 @@ async fn health_handler() -> axum::Json<serde_json::Value> {
         "ok": true,
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+/// SPA fallback handler: serves static files from the frontend dist directory.
+///
+/// If the requested path matches a file in the dist directory, serve it.
+/// Otherwise, serve `index.html` for SPA client-side routing.
+async fn spa_fallback(
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+) -> impl axum::response::IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+    let dist = find_frontend_dist();
+
+    // Try to serve the exact file from the dist directory.
+    if !path.is_empty() {
+        let file_path = dist.join(path);
+        if file_path.is_file() {
+            return serve_file(&file_path).await;
+        }
+    }
+
+    // SPA fallback: serve index.html for any non-file route.
+    let index = dist.join("index.html");
+    if index.is_file() {
+        return serve_file(&index).await;
+    }
+
+    // No frontend built — return a helpful message.
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        axum::response::Html(
+            "<h1>Frontend not built</h1>\
+             <p>Run <code>trunk build --release</code> in \
+             <code>crates/oc-webui/frontend/</code> to build the SPA.</p>\
+             <p>API is available at <a href=\"/api/health\">/api/health</a>.</p>"
+                .to_string(),
+        ),
+    )
+        .into_response()
+}
+
+/// Serve a single file with the correct content type.
+async fn serve_file(path: &std::path::Path) -> axum::response::Response {
+    let content_type = match path.extension().and_then(|e| e.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "application/javascript; charset=utf-8",
+        Some("wasm") => "application/wasm",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        _ => "application/octet-stream",
+    };
+
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            (axum::http::StatusCode::OK, [(axum::http::header::CONTENT_TYPE, content_type)], bytes)
+                .into_response()
+        }
+        Err(_) => axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Find the frontend dist directory.
+///
+/// Searches in order:
+/// 1. `~/.onecipher/webui-dist/` (user override)
+/// 2. Workspace-relative `crates/oc-webui/frontend/dist/`
+/// 3. Binary-relative `../share/onecipher/webui-dist/`
+fn find_frontend_dist() -> PathBuf {
+    // 1. User override in state dir
+    if let Ok(home) = std::env::var("HOME") {
+        let user_dist = PathBuf::from(home).join(".onecipher").join("webui-dist");
+        if user_dist.join("index.html").is_file() {
+            return user_dist;
+        }
+    }
+
+    // 2. Workspace-relative (development)
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let dev_dist = PathBuf::from(manifest_dir).join("frontend").join("dist");
+        if dev_dist.join("index.html").is_file() {
+            return dev_dist;
+        }
+    }
+
+    // 3. Fallback: try the crate's frontend/dist relative to the source tree. This covers `cargo
+    //    run` from the workspace root.
+    let workspace_dist = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("frontend").join("dist");
+    if workspace_dist.join("index.html").is_file() {
+        return workspace_dist;
+    }
+
+    // 4. Return the workspace path even if not found — the fallback handler will show a helpful
+    //    "not built" message.
+    workspace_dist
 }
 
 #[cfg(test)]

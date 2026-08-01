@@ -9,8 +9,9 @@
 //! - `?` for help, `q` to quit
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use oc_core::ItemType;
 
-use crate::tui::app::{App, Mode};
+use crate::tui::app::{App, FormField, Mode};
 
 /// Number of rows to scroll on PageUp / PageDown.
 const PAGE_SCROLL: usize = 10;
@@ -94,13 +95,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             false
         }
         KeyCode::Char('n') => {
-            if app.experimental {
-                app.set_message("New secret creation not yet implemented");
-            } else {
-                app.set_message(
-                    "New secret creation is experimental. Restart with --experimental to enable.",
-                );
-            }
+            app.enter_insert();
             false
         }
         _ => false,
@@ -134,23 +129,83 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> bool {
 }
 
 fn handle_insert_key(app: &mut App, key: KeyEvent) -> bool {
+    // If form is somehow missing, bail to Normal.
+    let has_form = app.form.is_some();
+    if !has_form {
+        app.mode = Mode::Normal;
+        return false;
+    }
+
     match key.code {
         KeyCode::Esc => {
+            app.form = None;
             app.mode = Mode::Normal;
-            app.input_buffer.clear();
+            false
+        }
+        KeyCode::Up => {
+            if let Some(form) = &mut app.form {
+                form.move_up();
+            }
+            false
+        }
+        KeyCode::Down => {
+            if let Some(form) = &mut app.form {
+                form.move_down();
+            }
+            false
+        }
+        KeyCode::Left => {
+            if let Some(form) = &mut app.form {
+                if form.focus == FormField::Type && form.type_index > 0 {
+                    form.type_index -= 1;
+                }
+            }
+            false
+        }
+        KeyCode::Right => {
+            if let Some(form) = &mut app.form {
+                if form.focus == FormField::Type {
+                    let max = ItemType::all().len().saturating_sub(1);
+                    if form.type_index < max {
+                        form.type_index += 1;
+                    }
+                }
+            }
             false
         }
         KeyCode::Enter => {
-            // Insert mode is reserved for future new-secret / edit flows.
-            app.mode = Mode::Normal;
+            let focus = app.form.as_ref().map(|f| f.focus);
+            match focus {
+                Some(FormField::Submit) => {
+                    app.submit_form();
+                }
+                Some(FormField::Cancel) => {
+                    app.form = None;
+                    app.mode = Mode::Normal;
+                }
+                _ => {
+                    // Advance to next field.
+                    if let Some(form) = &mut app.form {
+                        form.move_down();
+                    }
+                }
+            }
             false
         }
         KeyCode::Backspace => {
-            app.input_buffer.pop();
+            if let Some(form) = &mut app.form {
+                if let Some(field) = form.focused_field_mut() {
+                    field.pop();
+                }
+            }
             false
         }
         KeyCode::Char(c) => {
-            app.input_buffer.push(c);
+            if let Some(form) = &mut app.form {
+                if let Some(field) = form.focused_field_mut() {
+                    field.push(c);
+                }
+            }
             false
         }
         _ => false,

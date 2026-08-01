@@ -46,8 +46,8 @@ impl Drop for RawModeGuard {
 
 /// Run the TUI loop. Returns when the user quits (q) or an unrecoverable
 /// error occurs.
-pub(crate) fn run(store: SecretStore, experimental: bool) -> eyre::Result<()> {
-    let mut app = App::new(store, experimental);
+pub(crate) fn run(store: SecretStore) -> eyre::Result<()> {
+    let mut app = App::new(store);
     app.reload();
 
     // Enable raw mode and enter the alternate screen.

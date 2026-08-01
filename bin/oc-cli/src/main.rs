@@ -58,11 +58,10 @@ fn main() {
         std::process::exit(code);
     }
 
-    // Try the Key-Agent daemon first; fall back to the stub client if the
-    // daemon is not reachable. The daemon hosts the Network-Agent (WC v2
-    // wallet-role server) and forwards requests to the Key-Agent over UDS.
+    // Try the Key-Agent daemon first; auto-spawn if not running.
+    // Falls back to the stub client only if spawn + connect fails.
     let client: Box<dyn netagent::NetAgentClient> =
-        match netagent::UdsKeyAgentClient::connect_default() {
+        match netagent::UdsKeyAgentClient::connect_or_spawn() {
             Ok(c) => Box::new(c),
             Err(e) => {
                 eprintln!(
@@ -235,37 +234,30 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         Commands::Webui { subcommand } => match subcommand {
             cli::WebUiCommands::Open => commands::webui::open(),
         },
-        Commands::Intent { subcommand } => {
-            if !cli.experimental {
-                return Err(CliError::InvalidArgs(
-                    "Intent is experimental. Use --experimental to enable.".into(),
-                ));
+        Commands::Intent { subcommand } => match subcommand {
+            cli::IntentCommands::Submit { json, chain, session_key, sponsor, yes, rpc_url } => {
+                commands::intent::run_submit(
+                    &json,
+                    &chain,
+                    &session_key,
+                    &sponsor,
+                    yes,
+                    rpc_url.as_deref(),
+                )
             }
-            match subcommand {
-                cli::IntentCommands::Submit { json, chain, session_key, sponsor, yes, rpc_url } => {
-                    commands::intent::run_submit(
-                        &json,
-                        &chain,
-                        &session_key,
-                        &sponsor,
-                        yes,
-                        rpc_url.as_deref(),
-                    )
-                }
-                cli::IntentCommands::Simulate { json, chain, session_key, rpc_url } => {
-                    commands::intent::run_simulate(&json, &chain, &session_key, rpc_url.as_deref())
-                }
-                cli::IntentCommands::Execute { json, chain, session_key, sponsor, rpc_url } => {
-                    commands::intent::run_execute(
-                        &json,
-                        &chain,
-                        &session_key,
-                        &sponsor,
-                        rpc_url.as_deref(),
-                    )
-                }
+            cli::IntentCommands::Simulate { json, chain, session_key, rpc_url } => {
+                commands::intent::run_simulate(&json, &chain, &session_key, rpc_url.as_deref())
             }
-        }
+            cli::IntentCommands::Execute { json, chain, session_key, sponsor, rpc_url } => {
+                commands::intent::run_execute(
+                    &json,
+                    &chain,
+                    &session_key,
+                    &sponsor,
+                    rpc_url.as_deref(),
+                )
+            }
+        },
         Commands::Secret { subcommand } => match subcommand {
             cli::SecretCommands::List { r#type, json } => {
                 let item_type = r#type.as_deref().map(commands::parse_item_type).transpose()?;
@@ -323,7 +315,7 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         Commands::Migrate { dry_run, rollback } => commands::migrate::run(dry_run, rollback),
         Commands::Tui => {
             let store = commands::open_secret_store()?;
-            tui::run(store, cli.experimental).map_err(|e| CliError::InvalidArgs(e.to_string()))
+            tui::run(store).map_err(|e| CliError::InvalidArgs(e.to_string()))
         }
         Commands::AgentSecret { subcommand } => match subcommand {
             cli::AgentSecretCommands::Get { name, json } => {
