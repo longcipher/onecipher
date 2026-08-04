@@ -172,8 +172,10 @@ impl UdsKeyAgentClient {
 
 /// Return the path to the spawn lock file: `~/.onecipher/agent.spawn-lock`.
 fn lock_file_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    std::path::PathBuf::from(home).join(".onecipher").join("agent.spawn-lock")
+    // L3 fix: never place the spawn lock in world-writable /tmp — another user
+    // could pre-create it and block or hijack daemon spawning.
+    oc_core::paths::state_path("agent.spawn-lock")
+        .unwrap_or_else(|_| std::path::PathBuf::from(".onecipher/agent.spawn-lock"))
 }
 
 /// Try to acquire the spawn lock by atomically creating the lock file.

@@ -13,8 +13,10 @@
 pub mod approval;
 pub mod approval_log;
 pub mod error;
+pub mod intent;
 pub mod key_agent_client;
 pub mod rpc_client;
+pub mod sim;
 pub mod wc_method_router;
 pub mod wc_pairing;
 pub mod wc_session_store;
@@ -24,8 +26,13 @@ pub use approval::{
     RiskSource, TokenDelta, TokenDirection, TxSimulation,
 };
 pub use error::NetAgentError;
+pub use intent::{
+    CallData, Intent, IntentError, IntentKind, IntentResult, IntentStatus, IntentSummary,
+    MessageEncoding, MockRpcClient, RpcClient, RpcError, execute_intent, simulate_intent,
+};
 pub use key_agent_client::KeyAgentClient;
 pub use rpc_client::HpxRpcClient;
+pub use sim::{SimError, simulate_evm_tx};
 pub use wc_method_router::WcMethodRouter;
 pub use wc_pairing::{PairingError, generate_pairing_uri};
 pub use wc_session_store::{SessionStore, SessionStoreError};

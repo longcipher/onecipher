@@ -232,22 +232,31 @@ fn parse_hotp_uri(uri: &str) -> Result<(Algorithm, usize, Vec<u8>), TotpError> {
 }
 
 /// Minimal percent-decoding for URI query values.
+///
+/// Decoded octets are accumulated into a byte buffer and interpreted as UTF-8
+/// only once, at the end. Decoding byte-at-a-time via `char::from(u8)` would
+/// map each octet to the Latin-1 code point of the same value, corrupting any
+/// multi-byte UTF-8 sequence (e.g. a CJK or emoji issuer/account label).
+///
+/// Malformed escapes are handled leniently (a truncated `%` tail and non-hex
+/// digits both decode as if the missing nibbles were `0`), matching the
+/// previous behaviour. Byte sequences that are not valid UTF-8 are replaced
+/// with U+FFFD.
 fn percent_decode(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.bytes();
-    while let Some(b) = chars.next() {
+    let mut buf: Vec<u8> = Vec::with_capacity(s.len());
+    let mut bytes = s.bytes();
+    while let Some(b) = bytes.next() {
         if b == b'%' {
-            let hi = chars.next().unwrap_or(b'0');
-            let lo = chars.next().unwrap_or(b'0');
-            let val = hex_val(hi) << 4 | hex_val(lo);
-            result.push(val as char);
+            let hi = bytes.next().unwrap_or(b'0');
+            let lo = bytes.next().unwrap_or(b'0');
+            buf.push(hex_val(hi) << 4 | hex_val(lo));
         } else if b == b'+' {
-            result.push(' ');
+            buf.push(b' ');
         } else {
-            result.push(b as char);
+            buf.push(b);
         }
     }
-    result
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 /// Minimal percent-encoding for URI path/label components.
@@ -460,5 +469,49 @@ mod tests {
             "otpauth://totp/TestIssuer:test@example.com?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
         let result = generate_hotp(uri, 0);
         assert!(matches!(result, Err(TotpError::InvalidUri(_))));
+    }
+
+    /// Regression: decoding byte-at-a-time via `char::from(u8)` mapped each
+    /// octet to the Latin-1 code point of the same value, so a multi-byte
+    /// UTF-8 sequence came back mojibake'd ("中文" decoded as "ä¸­æ\u{96}\u{87}").
+    #[test]
+    fn percent_decode_multibyte_utf8() {
+        assert_eq!(percent_decode("%E4%B8%AD%E6%96%87"), "中文");
+        assert_eq!(percent_decode("%F0%9F%94%91"), "🔑");
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+    }
+
+    #[test]
+    fn percent_decode_ascii_and_plus() {
+        assert_eq!(percent_decode("Alice%20Smith"), "Alice Smith");
+        assert_eq!(percent_decode("a+b"), "a b");
+        assert_eq!(percent_decode("plain"), "plain");
+        assert_eq!(percent_decode(""), "");
+    }
+
+    #[test]
+    fn percent_decode_roundtrips_percent_encode() {
+        for original in ["中文用户@example.com", "test@example.com", "Ünïcodé Iss:uer", "🔑/key"]
+        {
+            assert_eq!(percent_decode(&percent_encode(original)), original);
+        }
+    }
+
+    /// A truncated escape must stay lenient rather than panicking — the parser
+    /// runs on untrusted URI input.
+    #[test]
+    fn percent_decode_malformed_escape_is_lenient() {
+        let _ = percent_decode("%");
+        let _ = percent_decode("%A");
+        let _ = percent_decode("%ZZ");
+        assert_eq!(percent_decode("ok%"), "ok\0");
+    }
+
+    /// Bytes that are not valid UTF-8 become U+FFFD instead of corrupting the
+    /// surrounding text.
+    #[test]
+    fn percent_decode_invalid_utf8_is_replaced() {
+        assert_eq!(percent_decode("%FF"), "\u{FFFD}");
+        assert_eq!(percent_decode("a%FFb"), "a\u{FFFD}b");
     }
 }

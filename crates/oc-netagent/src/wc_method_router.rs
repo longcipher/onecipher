@@ -321,7 +321,7 @@ impl WcMethodRouter {
     /// - Revert (sim.success == false): bump risk to Danger, add reason.
     /// - Error: return None simulation, warn (do NOT block signing).
     fn apply_simulation_result(
-        result: Result<TxSimulation, oc_sim::SimError>,
+        result: Result<TxSimulation, crate::sim::SimError>,
     ) -> (Option<TxSimulation>, RiskLevel, Vec<RiskReason>) {
         match result {
             Ok(sim) if sim.success => (Some(sim), RiskLevel::Safe, vec![]),
@@ -444,7 +444,8 @@ impl WalletMethodHandler for WcMethodRouter {
                     let simulation = {
                         let cid: Option<oc_core::ChainId> = chain_id.parse().ok();
                         if cid.as_ref().map_or(false, |c| c.is_evm()) {
-                            let sim_result = oc_sim::simulate_evm_tx(&raw_tx_hex, &chain_id).await;
+                            let sim_result =
+                                crate::sim::simulate_evm_tx(&raw_tx_hex, &chain_id).await;
                             let (sim, sim_risk, sim_reasons) =
                                 Self::apply_simulation_result(sim_result);
                             risk = std::cmp::max(risk, sim_risk);
@@ -1155,7 +1156,7 @@ mod sim_integration {
     #[test]
     fn failure_degrade_returns_none_simulation_with_warning() {
         let (sim, risk, reasons) = WcMethodRouter::apply_simulation_result(Err(
-            oc_sim::SimError::NotAvailable("stub".into()),
+            crate::sim::SimError::NotAvailable("stub".into()),
         ));
         assert!(sim.is_none());
         assert_eq!(risk, RiskLevel::Warning);

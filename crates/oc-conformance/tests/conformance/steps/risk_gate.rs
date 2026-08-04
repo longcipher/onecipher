@@ -75,7 +75,7 @@ async fn given_pending_with_risk(_world: &mut ConformanceWorld, _level: String) 
     // TODO(W2.4): Create PendingApproval with risk and unacknowledged reason.
 }
 
-#[when(regex = r#"the user clicks "Acknowledge" on the RiskCard"#)]
+#[when(regex = r#"^the user clicks "Acknowledge" on the RiskCard$"#)]
 async fn when_acknowledge_risk(_world: &mut ConformanceWorld) {
     // TODO(W2.4): Simulate clicking Acknowledge.
 }
@@ -109,7 +109,7 @@ async fn then_button_state_reveal(
 // @w2-danger-countdown
 // ===========================================================================
 
-#[given(regex = r"a PendingApproval with risk_level = (\w+)")]
+#[given(regex = r"^a PendingApproval with risk_level = (\w+)$")]
 async fn given_pending_risk_level(_world: &mut ConformanceWorld, _level: String) {
     // TODO(W2.4): Create PendingApproval with given risk level.
 }
@@ -186,7 +186,7 @@ async fn given_state(_world: &mut ConformanceWorld, _state: String) {
     // TODO(W2.4): Set up given state.
 }
 
-#[when(regex = r#"the user clicks "(.+)""#)]
+#[when(regex = r#"^the user clicks "(.+)"$"#)]
 async fn when_click_button(_world: &mut ConformanceWorld, _button: String) {
     // TODO(W2.4): Simulate clicking the named button.
 }

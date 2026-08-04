@@ -32,14 +32,18 @@ impl ApprovalLog {
         let logs_dir = state_dir.join("logs");
         tokio::fs::create_dir_all(&logs_dir).await?;
         let path = logs_dir.join("approval_queue.jsonl");
-        // Touch the file with restrictive permissions
+        // Touch the file with restrictive permissions. This log is append-only,
+        // so we must NOT use write-temp-then-rename — replacing the inode would
+        // discard prior entries. Instead create at 0600 directly.
         if !path.exists() {
-            tokio::fs::write(&path, b"").await?;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::PermissionsExt;
-                tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
+                use std::os::unix::fs::OpenOptionsExt as _;
+                opts.mode(0o600);
             }
+            opts.open(&path)?;
         }
         Ok(Self { path })
     }
@@ -150,7 +154,19 @@ impl ApprovalLog {
             if !new_content.is_empty() {
                 new_content.push('\n');
             }
-            tokio::fs::write(&self.path, new_content.as_bytes()).await?;
+            // Rebuild the file atomically. A torn write during compaction
+            // would lose approval records; the old code used `tokio::fs::write`
+            // which truncates first.
+            let p = self.path.clone();
+            tokio::task::spawn_blocking(move || {
+                oc_core::paths::write_atomic(
+                    &p,
+                    new_content.as_bytes(),
+                    oc_core::paths::MODE_PRIVATE_FILE,
+                )
+            })
+            .await
+            .map_err(std::io::Error::other)??;
         }
 
         Ok(removed)

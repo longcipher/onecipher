@@ -8,6 +8,11 @@ publish.workspace = true
 description = "Policy Engine v2 for OneCipher"
 
 [dependencies]
+# RFC3339 parsing for policy expiry. `jiff` is already in this crate's tree via
+# `oc-core` and pulls only `jiff-core` + `serde_core`, so declaring it directly
+# adds zero packages while removing a hand-rolled parser that accepted invalid
+# calendar dates. R56-clean: no tokio/reqwest/hyper in its subtree.
+jiff = { workspace = true }
 oc-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

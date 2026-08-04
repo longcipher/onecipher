@@ -68,8 +68,11 @@ fn read_api_token() -> Result<String, CliError> {
 /// fsync), but the `prev_hash` chain may diverge. `verify_chain` will detect
 /// any mismatch. Failures are logged to stderr and do not block the operation.
 fn audit_secret_op(event: EventType, payload: serde_json::Value) {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let path = std::path::PathBuf::from(home).join(".onecipher/logs/audit.jsonl");
+    // L3 fix: never write the audit trail to world-writable /tmp.
+    let Ok(path) = oc_core::paths::state_path("logs/audit.jsonl") else {
+        eprintln!("warning: audit log skipped — cannot determine home directory");
+        return;
+    };
     let device_id = "cli-agent-secret".to_string();
 
     let device_key = match DeviceKeyStore::open_default().and_then(|s| s.load_or_generate()) {

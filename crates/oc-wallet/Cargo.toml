@@ -12,6 +12,10 @@ default = ["rpc", "sui-grpc"]
 fast-kdf = ["oc-signer/fast-kdf"]
 rpc = ["dep:hpx", "dep:tokio"]
 sui-grpc = ["dep:tonic", "dep:tonic-prost"]
+# Passthrough for oc-signer's off-by-default XRPL support. Enabled
+# unconditionally for tests via the dev-dependency below, so the XRPL paths
+# stay covered even though they are absent from a default build.
+xrpl = ["oc-signer/xrpl"]
 
 [dependencies]
 base64 = { workspace = true }
@@ -39,7 +43,7 @@ uuid = { workspace = true, features = ["v4"] }
 bs58 = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["hazmat", "rand_core"] }
 k256 = { workspace = true, features = ["ecdsa"] }
-oc-signer = { workspace = true, features = ["fast-kdf"] }
+oc-signer = { workspace = true, features = ["fast-kdf", "xrpl"] }
 sha3 = { workspace = true }
 tempfile = { workspace = true }
 

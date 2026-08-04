@@ -138,9 +138,7 @@ fn audit_log_path() -> Result<PathBuf, CliError> {
             return Ok(PathBuf::from(p));
         }
     }
-    let home = std::env::var("HOME")
-        .map_err(|_| CliError::InvalidArgs("HOME env var not set".to_string()))?;
-    Ok(PathBuf::from(home).join(".onecipher").join("logs").join("audit.jsonl"))
+    Ok(oc_core::paths::state_path("logs/audit.jsonl")?)
 }
 
 /// Parse a duration string like "24h", "7d", "1h30m", "15m" into a

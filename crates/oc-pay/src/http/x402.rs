@@ -316,7 +316,7 @@ pub(crate) fn build_request(
             return Err(OcPayHttpError::new(
                 OcPayHttpErrorCode::InvalidInput,
                 format!("unsupported HTTP method: {other}"),
-            ))
+            ));
         }
     };
 
@@ -431,6 +431,15 @@ fn derive_chain_id_from_asset(asset: &str) -> String {
 ///
 /// Handles both quoted (`"value"`) and unquoted values, tolerating extra
 /// whitespace and commas between parameters.
+///
+/// Parameter **names are lowercased** on insertion: RFC 7235 auth-param names
+/// are case-insensitive, and every lookup site uses a lowercase literal. Without
+/// this, a spec-compliant server sending `maxAmount=` was rejected with
+/// `MissingField`.
+///
+/// An unterminated quoted value is a hard error rather than being silently
+/// accepted as everything up to end-of-input — a truncated `asset=` or
+/// `recipient=` must never be treated as a complete payment instruction.
 fn parse_auth_params(s: &str) -> Result<std::collections::HashMap<String, String>, X402ParseError> {
     let mut params = std::collections::HashMap::new();
     let mut chars = s.chars().peekable();
@@ -480,7 +489,14 @@ fn parse_auth_params(s: &str) -> Result<std::collections::HashMap<String, String
                     val.push(c);
                 }
             }
-            chars.next(); // consume closing quote
+            // The loop also ends at end-of-input. Distinguish that from a real
+            // closing quote, otherwise a truncated header parses as valid.
+            if chars.next() != Some('"') {
+                return Err(X402ParseError::InvalidField(
+                    key,
+                    "unterminated quoted value".to_string(),
+                ));
+            }
             val
         } else {
             let mut val = String::new();
@@ -493,7 +509,8 @@ fn parse_auth_params(s: &str) -> Result<std::collections::HashMap<String, String
         };
 
         if !key.is_empty() {
-            params.insert(key, value);
+            // RFC 7235: auth-param names are case-insensitive.
+            params.insert(key.to_ascii_lowercase(), value);
         }
     }
 
@@ -545,6 +562,45 @@ mod www_authenticate_tests {
         assert!(approx(req.max_amount, 1.0));
         assert_eq!(req.chain_id, "eip155:8453");
         assert_eq!(req.scheme, "exact"); // defaulted
+    }
+
+    /// Regression: RFC 7235 auth-param names are case-insensitive, but keys
+    /// were stored verbatim while every lookup used a lowercase literal. A
+    /// spec-compliant server sending `maxAmount=` was rejected as
+    /// `MissingField`.
+    #[test]
+    fn parse_header_is_case_insensitive_in_param_names() {
+        let header = r#"x402 MaxAmount=0.01, Asset="eip155:8453/erc20:0xToken", RECIPIENT="0xABC", Scheme="exact""#;
+        let req = parse_www_authenticate(header).expect("mixed-case param names must parse");
+        assert!(approx(req.max_amount, 0.01));
+        assert_eq!(req.asset, "eip155:8453/erc20:0xToken");
+        assert_eq!(req.recipient, "0xABC");
+        assert_eq!(req.scheme, "exact");
+    }
+
+    /// Regression: a missing closing quote used to consume to end-of-input and
+    /// yield a silently-truncated value. For a payment header that means
+    /// accepting a partial asset or recipient — it must be a hard error.
+    #[test]
+    fn parse_header_rejects_unterminated_quoted_value() {
+        let header = r#"x402 maxamount=0.01, recipient="0xABC", asset="eip155:8453/erc20:0xTok"#;
+        let err = parse_www_authenticate(header)
+            .expect_err("unterminated quote must not parse as a valid asset");
+        match err {
+            X402ParseError::InvalidField(field, msg) => {
+                assert_eq!(field, "asset");
+                assert!(msg.contains("unterminated"), "unexpected message: {msg}");
+            }
+            other => panic!("expected InvalidField, got {other:?}"),
+        }
+    }
+
+    /// A correctly quoted value adjacent to end-of-input must still parse.
+    #[test]
+    fn parse_header_accepts_quoted_value_at_end_of_input() {
+        let header = r#"x402 maxamount=0.01, recipient="0xABC", asset="eip155:1/erc20:0xTok""#;
+        let req = parse_www_authenticate(header).expect("properly closed quote must parse");
+        assert_eq!(req.asset, "eip155:1/erc20:0xTok");
     }
 
     #[test]

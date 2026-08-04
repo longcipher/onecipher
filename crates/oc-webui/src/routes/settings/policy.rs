@@ -109,7 +109,15 @@ pub async fn create_policy_rule(
 
     let path = policies_dir.join(format!("{id}.json"));
     let content = serde_json::to_string_pretty(&rule).unwrap_or_default();
-    if let Err(e) = tokio::fs::write(&path, content).await {
+    // Atomic: a torn write here would leave a policy file that doesn't parse,
+    // which the engine treats as absent → silently drops the restriction.
+    let p = path.clone();
+    let io_result = tokio::task::spawn_blocking(move || {
+        oc_core::paths::write_atomic(&p, content.as_bytes(), oc_core::paths::MODE_REGULAR_FILE)
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+    if let Err(e) = io_result {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("failed to write policy: {e}")})),
@@ -143,7 +151,13 @@ pub async fn update_policy_rule(
     });
 
     let content = serde_json::to_string_pretty(&rule).unwrap_or_default();
-    if let Err(e) = tokio::fs::write(&path, content).await {
+    let p = path.clone();
+    let io_result = tokio::task::spawn_blocking(move || {
+        oc_core::paths::write_atomic(&p, content.as_bytes(), oc_core::paths::MODE_REGULAR_FILE)
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+    if let Err(e) = io_result {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("failed to write policy: {e}")})),

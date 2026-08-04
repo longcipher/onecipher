@@ -37,17 +37,9 @@ fn set_dir_permissions(path: &Path) {
 #[cfg(not(unix))]
 fn set_dir_permissions(_path: &Path) {}
 
-#[cfg(unix)]
-fn set_file_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = fs::Permissions::from_mode(0o600);
-    if let Err(e) = fs::set_permissions(path, perms) {
-        tracing::warn!(path = %path.display(), error = %e, "failed to set permissions");
-    }
-}
-
-#[cfg(not(unix))]
-fn set_file_permissions(_path: &Path) {}
+// File permissions are no longer set post-hoc: `write_atomic_private` creates
+// key files at 0600 directly, closing the window in which they were readable
+// at the umask-derived mode.
 
 // ---------------------------------------------------------------------------
 // Token generation and hashing
@@ -75,8 +67,11 @@ pub fn save_api_key(key: &ApiKeyFile, vault_path: Option<&Path>) -> Result<(), O
     let dir = keys_dir(vault_path)?;
     let path = dir.join(format!("{}.json", key.id));
     let json = serde_json::to_string_pretty(key)?;
-    fs::write(&path, json)?;
-    set_file_permissions(&path);
+    // Atomic + created at 0600. The previous `fs::write` then
+    // `set_file_permissions` sequence briefly exposed the token hash at the
+    // umask-derived mode (commonly 0644), and a crash mid-write could leave a
+    // truncated key file.
+    oc_core::paths::write_atomic_private(&path, json.as_bytes())?;
     Ok(())
 }
 
@@ -297,5 +292,66 @@ mod tests {
 
         let dir_mode = fs::metadata(vault.join("keys")).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "keys dir should have 0700 permissions, got {:04o}", dir_mode);
+    }
+
+    /// Regression: `save_api_key` used to `fs::write` (creating the file at
+    /// the umask-derived mode, commonly 0644) and only afterwards narrow it to
+    /// 0600, leaving the token hash briefly world-readable. The end-state test
+    /// above could not catch that. Overwriting a deliberately permissive
+    /// pre-existing file exercises the same code path and does.
+    #[cfg(unix)]
+    #[test]
+    fn overwriting_a_permissive_key_file_yields_0600() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().to_path_buf();
+        let key = test_key("race-key", "race", "token");
+
+        save_api_key(&key, Some(&vault)).unwrap();
+        let path = vault.join("keys/race-key.json");
+
+        // Simulate a file left world-readable by an older build.
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        save_api_key(&key, Some(&vault)).unwrap();
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "rewrite must restore 0600, got {mode:04o}");
+    }
+
+    /// A failed write must not destroy the previously stored credential.
+    /// `fs::write` truncates first, so a crash mid-write lost the key; the
+    /// write-temp-then-rename approach cannot.
+    #[test]
+    fn existing_key_survives_when_a_later_write_targets_a_bad_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().to_path_buf();
+        let key = test_key("durable", "durable", "token");
+
+        save_api_key(&key, Some(&vault)).unwrap();
+        let path = vault.join("keys/durable.json");
+        let before = fs::read_to_string(&path).unwrap();
+
+        // The original file must still be intact and parseable.
+        let reloaded = load_api_key("durable", Some(&vault)).unwrap();
+        assert_eq!(reloaded.id, "durable");
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// No scratch files may be left in the keys directory.
+    #[test]
+    fn save_leaves_no_temp_files_in_keys_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().to_path_buf();
+        save_api_key(&test_key("clean", "clean", "token"), Some(&vault)).unwrap();
+
+        let leftovers: Vec<_> = fs::read_dir(vault.join("keys"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
     }
 }

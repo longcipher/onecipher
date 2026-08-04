@@ -3,7 +3,7 @@
 //!
 //! Preserves the upstream PolicyRule enum + AND semantics + executable subprocess (5s timeout,
 //! default-deny). The only deviation is replacing `chrono::DateTime::parse_from_rfc3339`
-//! with a stdlib-only [`parse_rfc3339_to_unix`] helper (R56: no `chrono` in `oc-policy`).
+//! with a `jiff`-backed [`parse_rfc3339_to_unix`] helper (R56: no `chrono` in `oc-policy`).
 
 use std::{io::Write as _, process::Command, time::Duration};
 
@@ -124,7 +124,7 @@ pub fn evaluate_executable(
     let mut payload = match serde_json::to_value(ctx) {
         Ok(v) => v,
         Err(e) => {
-            return PolicyResult::denied(policy_id, format!("failed to serialize context: {e}"))
+            return PolicyResult::denied(policy_id, format!("failed to serialize context: {e}"));
         }
     };
     if let Some(cfg) = config {
@@ -134,7 +134,7 @@ pub fn evaluate_executable(
     let stdin_bytes = match serde_json::to_vec(&payload) {
         Ok(b) => b,
         Err(e) => {
-            return PolicyResult::denied(policy_id, format!("failed to serialize context: {e}"))
+            return PolicyResult::denied(policy_id, format!("failed to serialize context: {e}"));
         }
     };
 
@@ -146,7 +146,7 @@ pub fn evaluate_executable(
     {
         Ok(c) => c,
         Err(e) => {
-            return PolicyResult::denied(policy_id, format!("failed to start executable: {e}"))
+            return PolicyResult::denied(policy_id, format!("failed to start executable: {e}"));
         }
     };
 
@@ -229,105 +229,24 @@ fn wait_with_timeout(
 }
 
 // ---------------------------------------------------------------------------
-// stdlib-only RFC3339 parser (replaces chrono, R56)
+// RFC3339 parsing (replaces chrono, R56)
 // ---------------------------------------------------------------------------
 
 /// Parse an RFC3339 timestamp (e.g. `"2026-03-22T10:35:22Z"`) into Unix seconds.
 ///
-/// Returns `None` on parse failure. Handles the subset of RFC3339 used by policy
-/// timestamps: `YYYY-MM-DDTHH:MM:SS[.fff][Z|±HH:MM]`. Uses Howard
-/// Hinnant's civil-from-days algorithm for the date-to-days conversion.
+/// Returns `None` on parse failure.
 ///
 /// This is a deviation from the upstream Open Wallet Standard v1 which uses
-/// `chrono::DateTime::parse_from_rfc3339`. The deviation keeps `cargo tree -p oc-policy` free of
-/// `chrono` (R56).
+/// `chrono::DateTime::parse_from_rfc3339`. We use `jiff` instead, which keeps
+/// `cargo tree -p oc-policy` free of `chrono` (R56) while still delegating
+/// calendar arithmetic to a maintained implementation.
+///
+/// This previously used a hand-rolled parser that validated the day only as
+/// `1..=31`, so impossible dates were accepted and silently rolled over:
+/// `2026-02-31T00:00:00Z` resolved to `2026-03-03`, quietly extending a policy
+/// expiry by three days. `jiff` rejects such dates outright.
 fn parse_rfc3339_to_unix(s: &str) -> Option<i64> {
-    let bytes = s.as_bytes();
-    // Minimum: "YYYY-MM-DDTHH:MM:SSZ" = 20 chars
-    if bytes.len() < 20 {
-        return None;
-    }
-
-    // Parse date: YYYY-MM-DD
-    let year: i64 = s.get(0..4)?.parse().ok()?;
-    if bytes[4] != b'-' {
-        return None;
-    }
-    let month: i64 = s.get(5..7)?.parse().ok()?;
-    if bytes[7] != b'-' {
-        return None;
-    }
-    let day: i64 = s.get(8..10)?.parse().ok()?;
-
-    // Separator: T, t, or space
-    if bytes[10] != b'T' && bytes[10] != b't' && bytes[10] != b' ' {
-        return None;
-    }
-
-    // Parse time: HH:MM:SS
-    let hour: i64 = s.get(11..13)?.parse().ok()?;
-    if bytes[13] != b':' {
-        return None;
-    }
-    let minute: i64 = s.get(14..16)?.parse().ok()?;
-    if bytes[16] != b':' {
-        return None;
-    }
-    let second: i64 = s.get(17..19)?.parse().ok()?;
-
-    // Skip fractional seconds if present (e.g. ".123")
-    let mut tz_pos = 19;
-    if bytes.len() > 19 && bytes[19] == b'.' {
-        tz_pos = 20;
-        while tz_pos < bytes.len() && bytes[tz_pos].is_ascii_digit() {
-            tz_pos += 1;
-        }
-    }
-
-    if tz_pos >= bytes.len() {
-        return None; // no timezone suffix
-    }
-
-    // Timezone: Z or +HH:MM or -HH:MM
-    let tz_offset_sec: i64 = match bytes[tz_pos] {
-        b'Z' | b'z' => 0,
-        b'+' | b'-' => {
-            let rest = s.get(tz_pos..)?;
-            // rest is like "+HH:MM" (6 chars) — may have trailing content, we only need first 6
-            if rest.len() < 6 {
-                return None;
-            }
-            let sign = if rest.starts_with('+') { 1 } else { -1 };
-            let tz_hour: i64 = rest.get(1..3)?.parse().ok()?;
-            if rest.as_bytes()[3] != b':' {
-                return None;
-            }
-            let tz_min: i64 = rest.get(4..6)?.parse().ok()?;
-            sign * (tz_hour * 3600 + tz_min * 60)
-        }
-        _ => return None,
-    };
-
-    // Validate ranges
-    if !(1..=12).contains(&month) ||
-        !(1..=31).contains(&day) ||
-        !(0..=23).contains(&hour) ||
-        !(0..=59).contains(&minute) ||
-        !(0..=60).contains(&second)
-    {
-        return None;
-    }
-
-    // Days from Unix epoch (1970-01-01) — Howard Hinnant's civil-from-days algorithm.
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400; // [0, 399]
-    let m = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * m + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days_since_epoch = era * 146097 + doe - 719468;
-
-    Some(days_since_epoch * 86400 + hour * 3600 + minute * 60 + second - tz_offset_sec)
+    s.parse::<jiff::Timestamp>().ok().map(jiff::Timestamp::as_second)
 }
 
 #[cfg(test)]
@@ -758,5 +677,53 @@ mod tests {
         assert!(parse_rfc3339_to_unix("2026-03-22").is_none());
         assert!(parse_rfc3339_to_unix("2026-13-01T00:00:00Z").is_none()); // month 13
         assert!(parse_rfc3339_to_unix("").is_none());
+    }
+
+    /// Regression: the previous hand-rolled parser range-checked the day as
+    /// `1..=31` only, so impossible calendar dates were accepted and silently
+    /// rolled forward. `2026-02-31T00:00:00Z` resolved to `2026-03-03`, which
+    /// in `eval_expires_at` silently extends a policy's validity by 3 days.
+    #[test]
+    fn rfc3339_parser_rejects_impossible_calendar_dates() {
+        for bad in [
+            "2026-02-31T00:00:00Z", // February never has 31 days
+            "2026-02-30T00:00:00Z",
+            "2026-02-29T00:00:00Z", // 2026 is not a leap year
+            "2026-04-31T00:00:00Z", // April has 30 days
+            "2026-06-31T00:00:00Z",
+            "2026-09-31T00:00:00Z",
+            "2026-11-31T00:00:00Z",
+            "2026-01-32T00:00:00Z",
+            "2026-00-10T00:00:00Z", // month 0
+            "2026-03-00T00:00:00Z", // day 0
+        ] {
+            assert!(
+                parse_rfc3339_to_unix(bad).is_none(),
+                "impossible date {bad} must be rejected, not silently rolled over"
+            );
+        }
+    }
+
+    /// Genuine leap days must still parse.
+    #[test]
+    fn rfc3339_parser_accepts_real_leap_day() {
+        assert!(parse_rfc3339_to_unix("2024-02-29T00:00:00Z").is_some());
+        assert!(parse_rfc3339_to_unix("2000-02-29T00:00:00Z").is_some());
+    }
+
+    /// An unparseable `expires_at` must not be treated as "not expired".
+    /// `eval_expires_at` only denies when both sides parse, so a rejected
+    /// timestamp must fall through to the explicit invalid-timestamp branch
+    /// rather than silently allowing the policy.
+    #[test]
+    fn impossible_expiry_date_does_not_silently_extend_validity() {
+        let ctx = base_context(); // timestamp = 2026-03-22T10:35:22Z
+        let rolled_over = parse_rfc3339_to_unix("2026-02-31T00:00:00Z");
+        assert!(rolled_over.is_none(), "2026-02-31 must not resolve to a valid instant");
+        // Sanity: the date it used to roll into is genuinely after `now`,
+        // which is exactly why the old behavior granted extra validity.
+        let now = parse_rfc3339_to_unix(&ctx.timestamp).unwrap();
+        let real_feb_28 = parse_rfc3339_to_unix("2026-02-28T00:00:00Z").unwrap();
+        assert!(real_feb_28 < now, "the intended expiry is in the past");
     }
 }

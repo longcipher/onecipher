@@ -9,7 +9,7 @@
 //! - `AlertSink` trait + `LogAlertSink` default (C-10)
 //!
 //! **Deviation note:** The v1 implementation replaces `chrono::DateTime::parse_from_rfc3339`
-//! with a stdlib-only RFC3339-to-unix parser (20-line function) to keep `cargo tree`
+//! with a `jiff`-backed RFC3339-to-unix parser to keep `cargo tree`
 //! clean (R56 — no `chrono` in `oc-policy`). Fork behavior is otherwise verbatim.
 
 #![deny(unsafe_code)]

@@ -53,9 +53,13 @@ fn workspace_root() -> PathBuf {
     crate::workspace_root()
 }
 
-/// Path to the release-built `oc-keyagent` binary.
+/// Path to the release-built binary that hosts the Key-Agent.
+///
+/// `oc-keyagent` is a library crate — it has no binary of its own. The Key-
+/// Agent runs inside the workspace's sole binary, `onecipher` (from `oc-cli`),
+/// which is therefore what gets inspected.
 fn keyagent_binary() -> PathBuf {
-    workspace_root().join("target").join("release").join("oc-keyagent")
+    workspace_root().join("target").join("release").join("onecipher")
 }
 
 /// Fixed path for the strace log (used only on Linux).
@@ -81,11 +85,11 @@ fn cargo_command(args: &[&str]) -> Command {
 
 /// Build the release `oc-keyagent` binary. Returns `Ok(())` on success.
 fn build_keyagent_release() -> Result<(), String> {
-    let status = cargo_command(&["build", "--release", "--bin", "oc-keyagent"])
+    let status = cargo_command(&["build", "--release", "--bin", "onecipher"])
         .status()
         .map_err(|e| format!("failed to spawn cargo build: {e}"))?;
     if !status.success() {
-        return Err(format!("cargo build --release --bin oc-keyagent exited {status}"));
+        return Err(format!("cargo build --release --bin onecipher exited {status}"));
     }
     Ok(())
 }

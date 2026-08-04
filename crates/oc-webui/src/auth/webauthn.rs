@@ -178,18 +178,16 @@ impl WebAuthnManager {
         let file = CredentialFile { credentials: creds.to_vec() };
         let content = serde_json::to_string_pretty(&file)
             .map_err(|_| WebauthnError::InvalidClientDataType)?;
-        tokio::fs::write(&self.credentials_path, content.as_bytes())
-            .await
-            .map_err(|_| WebauthnError::InvalidClientDataType)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = tokio::fs::set_permissions(
-                &self.credentials_path,
-                std::fs::Permissions::from_mode(0o600),
-            )
-            .await;
-        }
+        // Atomic + created at 0600. WebAuthn credentials must never be briefly
+        // world-readable: they contain the credential ID and public key that
+        // a nearby local attacker could replay.
+        let p = self.credentials_path.clone();
+        tokio::task::spawn_blocking(move || {
+            oc_core::paths::write_atomic_private(&p, content.as_bytes())
+        })
+        .await
+        .map_err(|_| WebauthnError::InvalidClientDataType)?
+        .map_err(|_| WebauthnError::InvalidClientDataType)?;
         Ok(())
     }
 }

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 /// 1. `~/.lws` (pre-0.7 "Local Wallet Server") → `~/.ows` (Open Wallet Standard)
 /// 2. `~/.ows` → `~/.onecipher` (OneCipher)
 pub fn migrate_vault_if_needed() {
-    let Some(home) = std::env::var("HOME").ok() else {
+    let Ok(home) = oc_core::paths::home_dir() else {
         return;
     };
 
@@ -51,7 +51,17 @@ pub fn migrate_single_dir(
     if config_path.exists() {
         if let Ok(contents) = std::fs::read_to_string(&config_path) {
             let updated = contents.replace(src_marker, dst_marker);
-            let _ = std::fs::write(&config_path, updated);
+            // Config is non-secret, but a torn write here leaves config.json
+            // pointing at the wrong vault path post-migration.
+            if oc_core::paths::write_atomic(
+                &config_path,
+                updated.as_bytes(),
+                oc_core::paths::MODE_REGULAR_FILE,
+            )
+            .is_err()
+            {
+                tracing::warn!(path = %config_path.display(), "failed to update config paths during migration");
+            }
         }
     }
 

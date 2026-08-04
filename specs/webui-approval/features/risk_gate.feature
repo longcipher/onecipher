@@ -40,8 +40,8 @@ Feature: Risk Grading and Sign-Button Gating
     Given a PendingApproval with risk_level = Danger
     When the approval detail view renders
     Then the Sign button is Disabled and shows "Wait 5s before signing (Danger)"
-    After 1 second the text reads "Wait 4s before signing (Danger)"
-    After 5 seconds the Sign button becomes enabled for first-click
+    And after 1 second the text reads "Wait 4s before signing (Danger)"
+    And after 5 seconds the Sign button becomes enabled for first-click
 
   @w2-sim-revert-danger
   Scenario: evm2 simulation revert → risk escalated to Danger

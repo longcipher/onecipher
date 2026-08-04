@@ -20,7 +20,7 @@ path = "src/lib.rs"
 ed25519-dalek = { workspace = true, features = ["hazmat", "rand_core"] }
 hex = { workspace = true }
 jiff = { workspace = true }
-oc-core = { workspace = true }
+oc-core = { workspace = true, features = ["hardened"] }
 oc-crypto = { workspace = true }
 oc-policy = { workspace = true }
 oc-signer = { workspace = true }
@@ -48,7 +48,7 @@ libc = { workspace = true }
 # (test crate can only see dev-deps, not lib deps)
 ed25519-dalek = { workspace = true, features = ["hazmat", "rand_core"] }
 hex = { workspace = true }
-oc-core = { workspace = true }
+oc-core = { workspace = true, features = ["hardened"] }
 proptest = { workspace = true }
 rand = { workspace = true }
 serde_json = { workspace = true }

@@ -36,16 +36,10 @@ impl SessionStore {
 
     pub fn save(&self, sessions: &[WcSession]) -> Result<(), SessionStoreError> {
         let bytes = serde_json::to_vec_pretty(sessions)?;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&self.path, &bytes)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&self.path, perms)?;
-        }
+        // Atomic + created at 0600. WalletConnect session records contain
+        // pairing topics and symmetric keys, so they must never be briefly
+        // world-readable the way `fs::write` + `set_permissions` left them.
+        oc_core::paths::write_atomic_private(&self.path, &bytes)?;
         Ok(())
     }
 

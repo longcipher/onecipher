@@ -11,6 +11,18 @@ readme = "README.md"
 [features]
 default = []
 fast-kdf = []
+# XRPL support is OFF by default. `xrpl-rust` pulls a 125-crate subtree that is
+# the workspace's single largest source of duplicate dependencies: it is the
+# only consumer of `chrono` (workspace standardizes on `jiff`) and `regex`
+# (standardizes on `regex-lite`), and it links a SECOND copy of `ed25519-dalek`
+# (2.x), `curve25519-dalek` (4.x) and `secp256k1` on top of the 3.x/5.x
+# versions the rest of the tree uses. Shipping two independent Ed25519
+# implementations inside a signing wallet is exactly the dual-crypto attack
+# surface that keeps `git` (OpenSSL via libssh2) off by default.
+#
+# Only three symbols are actually used: `binarycodec::{encode, decode}` and
+# `keypairs::derive_classic_address`. Build with `--features xrpl` to enable.
+xrpl = ["dep:xrpl-rust"]
 
 [dependencies]
 aes-gcm-siv = { workspace = true }
@@ -39,7 +51,7 @@ sha2 = { workspace = true }
 sha3 = { workspace = true }
 signal-hook = { workspace = true }
 thiserror = { workspace = true }
-xrpl-rust = { workspace = true, features = ["core"] }
+xrpl-rust = { workspace = true, features = ["core"], optional = true }
 zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

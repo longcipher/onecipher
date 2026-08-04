@@ -12,13 +12,17 @@ name = "oc_netagent"
 path = "src/lib.rs"
 
 [dependencies]
+# `alloy-dyn-abi` backs the `sim` ABI decoder. It replaces a hand-rolled
+# fixed-slot decoder that could only read static types and rendered dynamic
+# types (`address[]`, `bytes`, tuples) as their raw offset-pointer word — a
+# misleading value to show in a signing-approval prompt.
+alloy-dyn-abi = { workspace = true }
+backon = { workspace = true }
 hex = { workspace = true }
 hpx = { workspace = true }
 oc-core = { workspace = true }
-oc-intent = { workspace = true }
 oc-keyagent = { workspace = true }
 oc-policy = { workspace = true }
-oc-sim = { workspace = true }
 oc-walletconnect = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }

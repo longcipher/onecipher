@@ -254,8 +254,9 @@ pub struct PasskeyPubkeyStore {
 impl PasskeyPubkeyStore {
     /// Open the default store at `~/.onecipher/passkeys.json`.
     pub fn open_default() -> Result<Self, PasskeyStoreError> {
-        let home = std::env::var("HOME").map_err(|_| PasskeyStoreError::HomeNotSet)?;
-        Ok(Self { path: PathBuf::from(home).join(".onecipher").join("passkeys.json") })
+        let path = oc_core::paths::state_path("passkeys.json")
+            .map_err(|_| PasskeyStoreError::HomeNotSet)?;
+        Ok(Self { path })
     }
 
     /// Open a store at a specific path.
@@ -286,8 +287,11 @@ impl PasskeyPubkeyStore {
             }
         }
         let json = serde_json::to_string_pretty(map)?;
-        fs::write(&self.path, json.as_bytes())?;
-        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
+        // Atomic + created at 0600. The passkey store holds credential public
+        // keys; a torn write could leave a store that fails to parse and
+        // silently rejects all passkeys.
+        oc_core::paths::write_atomic_private(&self.path, json.as_bytes())
+            .map_err(PasskeyStoreError::Io)?;
         Ok(())
     }
 

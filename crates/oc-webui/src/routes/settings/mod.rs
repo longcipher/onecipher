@@ -67,11 +67,22 @@ pub async fn patch_settings(
         changes.push(format!("auto_lock_at={lock}"));
     }
 
-    // Persist to config.json.
+    // Persist to config.json atomically so a crash or full disk does not
+    // leave a truncated config that (for instance) resets the session timeout.
     let config_path = state.state_dir.join("config.json");
     match serde_json::to_string_pretty(&config) {
         Ok(content) => {
-            if let Err(e) = tokio::fs::write(&config_path, content).await {
+            let p = config_path.clone();
+            let io_result = tokio::task::spawn_blocking(move || {
+                oc_core::paths::write_atomic(
+                    &p,
+                    content.as_bytes(),
+                    oc_core::paths::MODE_REGULAR_FILE,
+                )
+            })
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+            if let Err(e) = io_result {
                 tracing::error!(error = %e, "failed to write config.json");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,

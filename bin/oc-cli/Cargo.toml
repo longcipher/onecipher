@@ -13,11 +13,23 @@ name = "onecipher"
 path = "src/main.rs"
 
 [features]
-default = ["git"]
-# Enable git sync support (`onecipher git` subcommand). Requires libgit2
-# (via git2 → libssh2 → OpenSSL). Disabled by default would remove the
-# `git` subcommand entirely; enable explicitly when libssh2 is available.
+# `git` is OFF by default: `git2` pulls in `libgit2-sys` → `libssh2-sys` →
+# OpenSSL. Linking OpenSSL into a signing wallet that already links BoringSSL
+# (via `hpx`'s `boring-tls`) doubles the C-crypto attack surface and inflates
+# both binary size and cold-build time, for a feature most users never touch.
+# Build with `--features git` to enable the `onecipher git` subcommand.
+#
+# `webui` is ON by default but can be switched off: `webauthn-rs` is the sole
+# source of OpenSSL in the dependency graph, and the binary already links
+# BoringSSL through `hpx`'s `boring-tls`. `--no-default-features --features
+# tui,walletconnect` yields a signing-focused binary with a single C-crypto
+# stack.
+#
+# `xrpl` is OFF by default — see the rationale in `oc-signer/Cargo.toml`.
+default = ["webui"]
 git = ["oc-secret/git"]
+webui = ["dep:oc-webui"]
+xrpl = ["oc-signer/xrpl"]
 
 [dependencies]
 arboard = { workspace = true }
@@ -31,8 +43,7 @@ hex = { workspace = true }
 hpx = { workspace = true }
 jiff = { workspace = true }
 k256 = { workspace = true }
-oc-core = { workspace = true }
-oc-intent = { workspace = true }
+oc-core = { workspace = true, features = ["hardened"] }
 oc-keyagent = { workspace = true }
 oc-netagent = { workspace = true }
 oc-pay = { workspace = true, features = ["http"] }
@@ -41,7 +52,7 @@ oc-signer = { workspace = true }
 oc-vault = { workspace = true }
 oc-wallet = { workspace = true, features = ["rpc", "sui-grpc"] }
 oc-walletconnect = { workspace = true }
-oc-webui = { workspace = true }
+oc-webui = { workspace = true, optional = true }
 prost = { workspace = true }
 qr2term = { workspace = true }
 rand = { workspace = true }
