@@ -1,12 +1,9 @@
-use std::path::PathBuf;
-
 use oc_core::Config;
 
 use crate::CliError;
 
 pub(crate) fn show() -> Result<(), CliError> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let config_path = PathBuf::from(&home).join(".onecipher/config.json");
+    let config_path = oc_core::paths::config_path()?;
     let config_exists = config_path.exists();
 
     let config = Config::load_or_default();
@@ -50,8 +47,7 @@ pub(crate) fn show() -> Result<(), CliError> {
 /// - `webui.session_timeout_secs` (u64)
 /// - `webui.auto_lock_at` (string)
 pub(crate) fn set(key: &str, value: &str) -> Result<(), CliError> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let config_dir = PathBuf::from(&home).join(".onecipher");
+    let config_dir = oc_core::paths::state_dir()?;
     let config_path = config_dir.join("config.json");
 
     // Load existing config as raw JSON, or start from an empty object.

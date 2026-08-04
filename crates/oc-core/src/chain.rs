@@ -4,11 +4,65 @@
 // and is intentionally synchronous.
 #![expect(clippy::print_stderr, reason = "CLI-facing deprecation warning")]
 
-use std::{fmt, str::FromStr};
+use std::{
+    collections::HashSet,
+    fmt,
+    str::FromStr,
+    sync::{Mutex, OnceLock},
+};
 
 use serde::{Deserialize, Serialize};
 
 use crate::caip::ChainId;
+
+/// Interner backing the `&'static str` fields of dynamically-parsed [`Chain`]s.
+///
+/// `Chain` stores `&'static str` and is `Copy`, so a chain ID that is not in
+/// [`KNOWN_CHAINS`] has to be given a `'static` lifetime somehow. This used to
+/// be a bare `Box::leak` per call, which is an *unbounded* leak: `parse_chain`
+/// is reachable from untrusted input (WalletConnect session proposals, x402
+/// payment requirements), so a peer could grow the heap without limit by
+/// sending an endless stream of distinct chain IDs.
+///
+/// Interning bounds the leak to the number of *distinct* chain IDs ever seen
+/// rather than the number of *calls*, and caps that set at
+/// [`MAX_INTERNED_CHAIN_IDS`]. Repeated parses of the same ID now allocate
+/// nothing.
+static CHAIN_ID_INTERNER: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+
+/// Upper bound on distinct interned chain IDs.
+///
+/// Sized well above any plausible legitimate workload (the CAIP-2 registry is
+/// in the low hundreds). Past this point `intern_chain_id` refuses to allocate
+/// and the caller reports the chain as unknown, so a hostile peer cannot use
+/// chain-ID churn as a memory-exhaustion vector.
+const MAX_INTERNED_CHAIN_IDS: usize = 1024;
+
+/// Intern `s`, returning a `'static` handle to a single shared allocation.
+///
+/// Returns `None` once [`MAX_INTERNED_CHAIN_IDS`] distinct IDs are held, or if
+/// the interner lock was poisoned.
+fn intern_chain_id(s: &str) -> Option<&'static str> {
+    intern_chain_id_capped(s, MAX_INTERNED_CHAIN_IDS)
+}
+
+/// [`intern_chain_id`] with an explicit cap, so the bound can be exercised in
+/// tests without exhausting the process-wide interner that other tests share.
+fn intern_chain_id_capped(s: &str, cap: usize) -> Option<&'static str> {
+    let interner = CHAIN_ID_INTERNER.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut set = interner.lock().ok()?;
+    if let Some(existing) = set.get(s) {
+        return Some(existing);
+    }
+    if set.len() >= cap {
+        return None;
+    }
+    // Only reached the first time a given ID is observed, so total leaked
+    // bytes are bounded by MAX_INTERNED_CHAIN_IDS * len(id).
+    let leaked: &'static str = Box::leak(s.to_owned().into_boxed_str());
+    set.insert(leaked);
+    Some(leaked)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -147,19 +201,29 @@ pub fn parse_chain(s: &str) -> Result<Chain, String> {
         if let Some(chain) = KNOWN_CHAINS.iter().find(|c| c.chain_id == caip2) {
             return Ok(*chain);
         }
-        let leaked: &'static str = Box::leak(caip2.into_boxed_str());
-        return Ok(Chain { name: leaked, chain_type: ChainType::Evm, chain_id: leaked });
+        if let Some(interned) = intern_chain_id(&caip2) {
+            return Ok(Chain { name: interned, chain_type: ChainType::Evm, chain_id: interned });
+        }
+        return Err(format!(
+            "too many distinct chain IDs seen (limit {MAX_INTERNED_CHAIN_IDS}); \
+             refusing to intern '{caip2}'"
+        ));
     }
 
     // Try namespace match for unknown CAIP-2 IDs (e.g. eip155:4217, eip155:84532).
     // Uses the same signer as the namespace's default chain. The chain_id string is
-    // leaked to satisfy the 'static lifetime — acceptable since parse_chain is called
-    // with a small, bounded set of user-supplied chain identifiers.
+    // interned (not leaked per-call) to satisfy the 'static lifetime — `parse_chain`
+    // is reachable from untrusted input, so the allocation must be bounded.
     if let Some((namespace, _reference)) = s.split_once(':') &&
         let Some(ct) = ChainType::from_namespace(namespace)
     {
-        let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
-        return Ok(Chain { name: leaked, chain_type: ct, chain_id: leaked });
+        if let Some(interned) = intern_chain_id(s) {
+            return Ok(Chain { name: interned, chain_type: ct, chain_id: interned });
+        }
+        return Err(format!(
+            "too many distinct chain IDs seen (limit {MAX_INTERNED_CHAIN_IDS}); \
+             refusing to intern '{s}'"
+        ));
     }
 
     Err(format!(
@@ -564,5 +628,57 @@ mod tests {
         let chain = default_chain_for_type(ChainType::Evm);
         assert_eq!(chain.name, "ethereum");
         assert_eq!(chain.chain_id, "eip155:1");
+    }
+
+    /// Regression: `parse_chain` used to `Box::leak` on every call for an
+    /// unknown chain ID. Because it is reachable from untrusted input, parsing
+    /// the same ID repeatedly must reuse one allocation rather than leaking
+    /// per call. Pointer equality is the observable proof of interning.
+    #[test]
+    fn unknown_chain_id_is_interned_not_leaked_per_call() {
+        let first = parse_chain("eip155:1337").unwrap();
+        let second = parse_chain("eip155:1337").unwrap();
+        assert!(
+            std::ptr::eq(first.chain_id.as_ptr(), second.chain_id.as_ptr()),
+            "repeated parses must share one interned allocation"
+        );
+
+        // Bare-numeric form resolves to the same interned CAIP-2 string.
+        let bare = parse_chain("1337").unwrap();
+        assert_eq!(bare.chain_id, "eip155:1337");
+        assert!(std::ptr::eq(bare.chain_id.as_ptr(), first.chain_id.as_ptr()));
+    }
+
+    /// Known chains must never touch the interner — they already have
+    /// `'static` data in `KNOWN_CHAINS`.
+    #[test]
+    fn known_chain_ids_are_not_interned() {
+        let a = parse_chain("ethereum").unwrap();
+        let b = parse_chain("eip155:1").unwrap();
+        assert!(std::ptr::eq(a.chain_id.as_ptr(), b.chain_id.as_ptr()));
+        assert_eq!(a.chain_id, "eip155:1");
+    }
+
+    /// The interner must refuse to grow without bound, so chain-ID churn from
+    /// a hostile peer cannot exhaust memory.
+    ///
+    /// Uses an explicit cap of 0 rather than driving the real
+    /// `MAX_INTERNED_CHAIN_IDS`: the interner is process-wide, so exhausting it
+    /// here would make unrelated tests fail depending on execution order.
+    #[test]
+    fn interner_is_bounded() {
+        // An already-interned ID is still returned once the cap is reached —
+        // the bound applies to *new* allocations only.
+        let known = intern_chain_id("eip155:4242").expect("first intern succeeds");
+        assert!(std::ptr::eq(
+            intern_chain_id_capped("eip155:4242", 0).expect("hit is served past cap").as_ptr(),
+            known.as_ptr()
+        ));
+
+        // A previously unseen ID is refused rather than allocated.
+        assert!(
+            intern_chain_id_capped("eip155:989898", 0).is_none(),
+            "interner must reject new IDs once the cap is reached"
+        );
     }
 }

@@ -24,12 +24,13 @@ format:
 fix:
     RUSTC_WRAPPER= cargo +nightly clippy --fix --allow-dirty --all
 
-# Run all lints (clippy + fmt check + cargo sort + shear + R56 dep check).
+# Run all lints (clippy + fmt check + cargo sort + shear + duplicate-dep ratchet).
 lint:
     cargo +nightly fmt --all -- --check
     RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
     cargo sort -w -g -c
     cargo shear
+    ./scripts/check-duplicate-deps.sh
 
 # ============================================================
 # Testing
@@ -98,3 +99,11 @@ r12-check:
     @echo "R12a: checking source-level TCP isolation..."
     @! rg -n 'TcpListener|TcpStream' crates/oc-keyagent/src/ crates/oc-crypto/src/ crates/oc-policy/src/ crates/oc-session-key/src/ || (echo "R12a FAILED: TCP types found in isolated crates" && exit 1)
     @echo "R12a: PASS — no TCP types in isolated crate sources"
+
+# Report crates resolved at more than one version (duplicate-dependency ratchet).
+deps-duplicates:
+    ./scripts/check-duplicate-deps.sh --list
+
+# Enforce the duplicate-dependency baseline.
+deps-check:
+    ./scripts/check-duplicate-deps.sh

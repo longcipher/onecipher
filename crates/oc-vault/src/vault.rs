@@ -36,15 +36,6 @@ fn set_dir_permissions(path: &Path) {
     }
 }
 
-/// Set file permissions to 0o600 (owner read/write only).
-#[cfg(unix)]
-fn set_file_permissions(path: &Path) -> Result<(), OcVaultError> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = fs::Permissions::from_mode(0o600);
-    fs::set_permissions(path, perms)?;
-    Ok(())
-}
-
 /// Check that a directory has permissions of exactly 0o700 (owner-only).
 ///
 /// Returns `Err(InsecurePermissions)` if the mode is not 0o700, or
@@ -62,11 +53,6 @@ pub fn check_vault_permissions(path: &Path) -> Result<(), OcVaultError> {
 
 #[cfg(not(unix))]
 fn set_dir_permissions(_path: &Path) {}
-
-#[cfg(not(unix))]
-fn set_file_permissions(_path: &Path) -> Result<(), OcVaultError> {
-    Ok(())
-}
 
 #[cfg(not(unix))]
 pub fn check_vault_permissions(_path: &Path) -> Result<(), OcVaultError> {
@@ -109,12 +95,11 @@ pub fn save_encrypted_wallet(
     }
     let dir = wallets_dir(vault_path)?;
     let path = dir.join(format!("{}.json", wallet.id));
-    let tmp_path = dir.join(format!("{}.json.tmp", wallet.id));
     let json = serde_json::to_string_pretty(wallet)?;
-    // Atomic write: write to tmp file, set permissions, then rename
-    fs::write(&tmp_path, &json)?;
-    set_file_permissions(&tmp_path)?;
-    fs::rename(&tmp_path, &path)?;
+    // Consolidate the previously hand-rolled write-tmp-rename into the shared
+    // atomic helper, which additionally fsyncs the directory so the rename is
+    // durable. The old pattern wrote tmp then narrowed perms — same race.
+    oc_core::paths::write_atomic_private(&path, json.as_bytes()).map_err(OcVaultError::Io)?;
     Ok(())
 }
 

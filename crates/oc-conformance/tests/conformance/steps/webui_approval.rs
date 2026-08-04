@@ -63,9 +63,20 @@ async fn given_daemon_running_webui_enabled(_world: &mut ConformanceWorld) {
     // For now, this step is a no-op placeholder.
 }
 
+#[given("the daemon is running with `[webui] approval_mode = true`")]
+async fn given_daemon_running_approval_mode_on(_world: &mut ConformanceWorld) {
+    // TODO(W1.14): Spawn an in-process daemon with webui approval_mode = true.
+    // For now, this step is a no-op placeholder.
+}
+
 #[given("a browser tab is authenticated via WebAuthn Passkey")]
 async fn given_browser_authenticated(_world: &mut ConformanceWorld) {
     // TODO(W1.14): Mock browser auth session.
+}
+
+#[given("the caller is authenticated via a valid session cookie unless noted")]
+async fn given_caller_authenticated(_world: &mut ConformanceWorld) {
+    // TODO(W1.14): Mock session cookie auth.
 }
 
 #[given("the daemon listens on a loopback 127.0.0.1 random port")]

@@ -31,6 +31,15 @@ pub(crate) fn shared_runtime() -> &'static tokio::runtime::Runtime {
 fn main() {
     oc_signer::process_hardening::harden_process();
 
+    // L3 fix: resolve HOME exactly once, up front. Previously 17 call sites
+    // each fell back to `/tmp` or `.` when HOME was unset, which would have
+    // written the vault, key store and audit log into a world-writable
+    // directory. Fail closed instead.
+    if let Err(e) = oc_core::paths::home_dir() {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+
     // Eagerly initialize the global key cache and register it for zeroization
     // on termination signals (SIGTERM, SIGINT, SIGHUP).
     let cache = oc_signer::global_key_cache();
@@ -543,6 +552,12 @@ fn run_daemon() -> Result<(), CliError> {
         });
 
         // --- Web UI server (conditionally spawned) ---
+        // Compiled out entirely without the `webui` feature: `webauthn-rs` is
+        // the only thing that links OpenSSL into a binary that already links
+        // BoringSSL (via `hpx`), so a signing-only build should not pay for it.
+        #[cfg(not(feature = "webui"))]
+        let webui_handle: Option<tokio::task::JoinHandle<()>> = None;
+        #[cfg(feature = "webui")]
         let webui_handle: Option<tokio::task::JoinHandle<()>> = {
             let config = oc_core::Config::load_or_default();
             if config.webui.enabled {
@@ -702,7 +717,7 @@ async fn control_socket_loop(
 
 /// Replace `src_bin` with `dst_bin` in common shell RC files.
 pub(crate) fn update_shell_rc_paths(src_bin: &str, dst_bin: &str) {
-    let Some(home) = std::env::var("HOME").ok() else {
+    let Ok(home) = oc_core::paths::home_dir() else {
         return;
     };
     let rc_files = [

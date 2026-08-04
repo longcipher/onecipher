@@ -227,5 +227,6 @@ fn install_dir() -> PathBuf {
 }
 
 fn dirs_or_home() -> PathBuf {
-    std::env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from)
+    // `main()` validates HOME before dispatch, so the fallback is unreachable.
+    oc_core::paths::home_dir().unwrap_or_else(|_| PathBuf::from("."))
 }

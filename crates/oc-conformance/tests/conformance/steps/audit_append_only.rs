@@ -43,6 +43,41 @@ thread_local! {
     static ENTRY_SNAPSHOT: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
+// Number of entries already in the log when a scenario's own `Given` step
+// runs. The Background step
+// (`the Key-Agent processes a representative workload ...`) appends 6 entries
+// to the same log that every scenario shares, so scenarios that assert on
+// "the entry" or on an absolute entry count must offset by this baseline
+// rather than assume a pristine log.
+thread_local! {
+    static BASELINE_LEN: RefCell<usize> = const { RefCell::new(0) };
+}
+
+/// Record how many entries exist before the scenario appends its own.
+fn set_baseline(path: &Path) {
+    let len = read_entries(path).len();
+    BASELINE_LEN.with(|b| *b.borrow_mut() = len);
+}
+
+/// The entries appended by the scenario itself, i.e. everything after the
+/// baseline captured by [`set_baseline`].
+fn scenario_entries(path: &Path) -> Vec<AuditEntry> {
+    let baseline = BASELINE_LEN.with(|b| *b.borrow());
+    read_entries(path).split_off(baseline)
+}
+
+/// The single entry the scenario appended. Panics if the scenario did not
+/// append exactly one.
+fn scenario_entry(path: &Path) -> AuditEntry {
+    let mut entries = scenario_entries(path);
+    assert_eq!(
+        entries.len(),
+        1,
+        "scenario must have appended exactly one entry beyond the Background baseline"
+    );
+    entries.remove(0)
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -198,6 +233,12 @@ async fn then_contains_all_event_types(world: &mut ConformanceWorld) {
 
 #[given("an audit entry is appended for a PayX402 operation")]
 async fn given_payx402_entry(world: &mut ConformanceWorld) {
+    // The Background workload has already written 6 entries to this log.
+    // Record that baseline so the `Then` steps inspect the PayX402 entry this
+    // scenario appends rather than the Background's first entry.
+    let path = world.audit_path.as_ref().expect("audit_path must be set").clone();
+    set_baseline(&path);
+
     let audit = world.audit_log.as_mut().expect("audit_log must be open");
     audit
         .append(
@@ -216,8 +257,7 @@ async fn when_entry_inspected(_world: &mut ConformanceWorld) {
 #[then("it contains device_id matching the writing device")]
 async fn then_device_id_matches(world: &mut ConformanceWorld) {
     let path = world.audit_path.as_ref().expect("audit_path must be set");
-    let entries = read_entries(path);
-    let entry = entries.first().expect("at least one audit entry must exist");
+    let entry = scenario_entry(path);
     assert_eq!(entry.device_id, "device-test", "device_id must match the writing device");
 }
 
@@ -225,31 +265,37 @@ async fn then_device_id_matches(world: &mut ConformanceWorld) {
 async fn then_seq_monotonic(world: &mut ConformanceWorld) {
     let path = world.audit_path.as_ref().expect("audit_path must be set");
     let entries = read_entries(path);
-    let entry = entries.first().expect("at least one audit entry must exist");
-    assert_eq!(entry.seq, 1, "first entry for this device must have seq == 1");
+    assert!(!entries.is_empty(), "at least one audit entry must exist");
+    // seq is per-device and starts at 1, so the whole log must be a gap-free
+    // strictly increasing run. Asserting the sequence (rather than only that
+    // the first entry is 1) is what actually proves monotonicity.
+    for (i, entry) in entries.iter().enumerate() {
+        let expected = i as u64 + 1;
+        assert_eq!(
+            entry.seq, expected,
+            "entry {i} must have seq == {expected} (seq must increase monotonically by 1)"
+        );
+    }
 }
 
 #[then("it contains an RFC 3339 timestamp")]
 async fn then_timestamp_rfc3339(world: &mut ConformanceWorld) {
     let path = world.audit_path.as_ref().expect("audit_path must be set");
-    let entries = read_entries(path);
-    let entry = entries.first().expect("at least one audit entry must exist");
+    let entry = scenario_entry(path);
     entry.timestamp.parse::<jiff::Timestamp>().expect("timestamp must be valid RFC 3339");
 }
 
 #[then("it contains an event_type field")]
 async fn then_event_type_field(world: &mut ConformanceWorld) {
     let path = world.audit_path.as_ref().expect("audit_path must be set");
-    let entries = read_entries(path);
-    let entry = entries.first().expect("at least one audit entry must exist");
+    let entry = scenario_entry(path);
     assert_eq!(entry.event_type, EventType::PayX402, "event_type must be PayX402");
 }
 
 #[then("it contains the session_key_id of the operation")]
 async fn then_session_key_id_field(world: &mut ConformanceWorld) {
     let path = world.audit_path.as_ref().expect("audit_path must be set");
-    let entries = read_entries(path);
-    let entry = entries.first().expect("at least one audit entry must exist");
+    let entry = scenario_entry(path);
     assert_eq!(
         entry.session_key_id,
         Some("sk-test".to_string()),
@@ -260,8 +306,7 @@ async fn then_session_key_id_field(world: &mut ConformanceWorld) {
 #[then("it contains a payload with amount_usd, chain, tx_hash, and status")]
 async fn then_payload_fields(world: &mut ConformanceWorld) {
     let path = world.audit_path.as_ref().expect("audit_path must be set");
-    let entries = read_entries(path);
-    let entry = entries.first().expect("at least one audit entry must exist");
+    let entry = scenario_entry(path);
     let payload = &entry.payload;
     assert!(payload.get("amount_usd").is_some(), "payload must contain amount_usd");
     assert!(payload.get("chain").is_some(), "payload must contain chain");
@@ -295,8 +340,8 @@ async fn then_prev_hash_chains(world: &mut ConformanceWorld) {
 )]
 async fn then_device_sig_verifies(world: &mut ConformanceWorld) {
     let path = world.audit_path.as_ref().expect("audit_path must be set");
-    let entries = read_entries(path);
-    let entry = entries.first().expect("at least one audit entry must exist");
+    let entry = scenario_entry(path);
+    let entry = &entry;
 
     let device_key = world.device_key.as_ref().expect("device_key must be set");
     let verifying_key = device_key.verifying_key();
@@ -325,6 +370,13 @@ const SCENARIO3_N: usize = 3;
 
 #[given("an audit log with N existing entries")]
 async fn given_n_existing_entries(world: &mut ConformanceWorld) {
+    // The Background workload already wrote entries to this shared log, so
+    // "N existing entries" means N *beyond* that baseline. The snapshot below
+    // captures the whole file, and the byte-for-byte comparison covers every
+    // pre-existing line, which is a strictly stronger append-only check.
+    let path = world.audit_path.as_ref().expect("audit_path must be set").clone();
+    set_baseline(&path);
+
     let audit = world.audit_log.as_mut().expect("audit_log must be open");
     for i in 0..SCENARIO3_N as u64 {
         audit
@@ -356,7 +408,7 @@ async fn when_new_operation_recorded(world: &mut ConformanceWorld) {
 #[then("the new entry is appended at position N+1")]
 async fn then_appended_at_n_plus_1(world: &mut ConformanceWorld) {
     let path = world.audit_path.as_ref().expect("audit_path must be set");
-    let entries = read_entries(path);
+    let entries = scenario_entries(path);
     assert_eq!(
         entries.len(),
         SCENARIO3_N + 1,
@@ -364,6 +416,14 @@ async fn then_appended_at_n_plus_1(world: &mut ConformanceWorld) {
         SCENARIO3_N + 1,
         SCENARIO3_N,
         entries.len()
+    );
+    // Position N+1 must be the entry this scenario just recorded, not merely
+    // *some* new entry.
+    let last = entries.last().expect("scenario entries must be non-empty");
+    assert_eq!(
+        last.payload.get("label").and_then(serde_json::Value::as_str),
+        Some("post-snapshot"),
+        "the entry at position N+1 must be the newly recorded operation"
     );
 }
 
@@ -378,25 +438,24 @@ async fn then_existing_entries_unchanged(world: &mut ConformanceWorld) {
         current_content.lines().filter(|l| !l.trim().is_empty()).collect();
     let snapshot_lines: Vec<&str> = snapshot.lines().filter(|l| !l.trim().is_empty()).collect();
 
+    // The snapshot was taken after the scenario's N entries were appended, so
+    // it covers the Background baseline plus N. Exactly one new line must have
+    // been added since.
     assert_eq!(
         current_lines.len(),
-        SCENARIO3_N + 1,
-        "expected {} lines in current log, got {}",
-        SCENARIO3_N + 1,
+        snapshot_lines.len() + 1,
+        "expected exactly one new line since the snapshot ({} -> {})",
+        snapshot_lines.len(),
         current_lines.len()
     );
-    assert_eq!(
-        snapshot_lines.len(),
-        SCENARIO3_N,
-        "expected {} lines in snapshot, got {}",
-        SCENARIO3_N,
-        snapshot_lines.len()
-    );
-    for i in 0..SCENARIO3_N {
+
+    // Every pre-existing line must be untouched — this is the append-only
+    // guarantee under test.
+    for (i, expected) in snapshot_lines.iter().enumerate() {
         assert_eq!(
-            current_lines[i], snapshot_lines[i],
-            "entry {} was modified: expected {:?}, got {:?}",
-            i, snapshot_lines[i], current_lines[i]
+            &current_lines[i], expected,
+            "entry {i} was modified: expected {expected:?}, got {:?}",
+            current_lines[i]
         );
     }
 }

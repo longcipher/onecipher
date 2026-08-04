@@ -8,9 +8,18 @@ publish.workspace = true
 description = "Core types and traits for OneCipher"
 readme = "README.md"
 
+[features]
+default = []
+# Enables `oc_core::secure_types` (`Passphrase`, `UnlockToken`), which are
+# backed by `oc_crypto::HardenedBytes`. Kept optional because `oc-core` is
+# depended on by 13 crates while only 4 need hardened memory — gating it here
+# keeps `oc-crypto` (+ `libc`, `windows-sys`, `ml-dsa`) out of the other 9
+# dependency graphs.
+hardened = ["dep:oc-crypto"]
+
 [dependencies]
 jiff = { workspace = true }
-oc-crypto = { workspace = true }
+oc-crypto = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

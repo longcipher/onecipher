@@ -260,8 +260,7 @@ async fn serve_file(path: &std::path::Path) -> axum::response::Response {
 /// 3. Binary-relative `../share/onecipher/webui-dist/`
 fn find_frontend_dist() -> PathBuf {
     // 1. User override in state dir
-    if let Ok(home) = std::env::var("HOME") {
-        let user_dist = PathBuf::from(home).join(".onecipher").join("webui-dist");
+    if let Ok(user_dist) = oc_core::paths::state_path("webui-dist") {
         if user_dist.join("index.html").is_file() {
             return user_dist;
         }

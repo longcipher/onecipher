@@ -1,22 +1,24 @@
-//! Real EVM JSON-RPC client backed by `hpx`, implementing [`oc_intent::RpcClient`].
+//! Real EVM JSON-RPC client backed by `hpx`, implementing [`crate::intent::RpcClient`].
 //!
 //! Used by the `intent` CLI subcommands when `--rpc-url` is provided. When
-//! `--rpc-url` is absent, the CLI falls back to [`oc_intent::MockRpcClient`].
+//! `--rpc-url` is absent, the CLI falls back to [`crate::intent::MockRpcClient`].
 //!
 //! The client is chain-agnostic in the sense that it only speaks EVM JSON-RPC
 //! (eth_call, eth_estimateGas, eth_sendRawTransaction, …). Solana / Bitcoin
 //! support will be added in a later stage once the `RpcClient` trait grows
 //! chain-specific methods.
 
-use std::{
-    future::Future,
-    pin::Pin,
-    time::{Duration, Instant},
-};
+use std::{future::Future, pin::Pin, time::Duration};
 
-use oc_intent::{CallData, RpcClient, RpcError};
+use backon::{ExponentialBuilder, Retryable};
 use serde_json::{Value, json};
 use tracing::debug;
+
+use crate::intent::rpc::{CallData, RpcClient, RpcError};
+
+/// Overall budget for [`RpcClient::wait_for_receipt`] before returning
+/// [`RpcError::Timeout`].
+const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// EVM JSON-RPC client backed by `hpx`.
 ///
@@ -153,19 +155,44 @@ impl RpcClient for HpxRpcClient {
     ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + '_>> {
         let tx_hash = tx_hash.to_string();
         Box::pin(async move {
-            let deadline = Instant::now() + Duration::from_secs(60);
-            let poll_interval = Duration::from_secs(2);
-            loop {
-                if Instant::now() >= deadline {
-                    return Err(RpcError::Timeout);
-                }
+            // Backoff policy (replaces the previous hand-rolled fixed 2 s loop):
+            //
+            // - Exponential 500 ms → 4 s cap, jittered. The old fixed interval made every
+            //   concurrent `wait_for_receipt` hit the RPC endpoint in lockstep; jitter breaks that
+            //   thundering herd.
+            // - `with_total_delay` enforces the same overall 60 s budget the manual `Instant`
+            //   deadline provided.
+            let backoff = ExponentialBuilder::default()
+                .with_min_delay(Duration::from_millis(500))
+                .with_max_delay(Duration::from_secs(4))
+                .with_total_delay(Some(RECEIPT_TIMEOUT))
+                .with_jitter()
+                .without_max_times();
+
+            let poll = || async {
                 let result = self.rpc_call("eth_getTransactionReceipt", json!([tx_hash])).await?;
-                if !result.is_null() {
-                    return Ok(result);
+                if result.is_null() {
+                    return Err(RpcError::NotFound);
                 }
-                debug!(tx_hash, "receipt not yet available; polling");
-                tokio::time::sleep(poll_interval).await;
-            }
+                Ok(result)
+            };
+
+            poll.retry(backoff)
+                // A pending receipt is `NotFound`; transient transport/server
+                // blips are also retried rather than aborting the whole wait,
+                // which the previous `?` propagation did.
+                .when(|e| {
+                    matches!(e, RpcError::NotFound | RpcError::Transport(_) | RpcError::Server(_))
+                })
+                .notify(|e, delay| {
+                    debug!(tx_hash, error = %e, ?delay, "receipt not yet available; polling");
+                })
+                .await
+                .map_err(|e| match e {
+                    // Exhausting the delay budget is a timeout, not "no such tx".
+                    RpcError::NotFound => RpcError::Timeout,
+                    other => other,
+                })
         })
     }
 

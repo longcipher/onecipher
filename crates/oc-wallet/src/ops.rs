@@ -594,7 +594,7 @@ pub fn sign_message(
         _ => {
             return Err(OcWalletError::InvalidInput(format!(
                 "unsupported encoding: {encoding} (use 'utf8' or 'hex')"
-            )))
+            )));
         }
     };
 

@@ -18,9 +18,8 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 │   ├── oc-conformance/     # BDD conformance test crate (cucumber)
 │   ├── oc-core/            # Core types, CAIP, error types
 │   ├── oc-crypto/          # Memory hardening (mlock, zeroize, page guards)
-│   ├── oc-intent/          # Intent framing, execution, simulation
 │   ├── oc-keyagent/        # Key-Agent lib (sync std, NO tokio — R56)
-│   ├── oc-netagent/        # Network-Agent lib (tokio + WalletConnect v2)
+│   ├── oc-netagent/        # Network-Agent lib (tokio + WC v2 + intent layer)
 │   ├── oc-pay/             # Payment primitives (x402 + MPP settlers)
 │   ├── oc-policy/          # Policy Engine v2/v3 (11-step evaluation)
 │   ├── oc-secret/          # Secret vault (age-encrypted secrets + TOTP)

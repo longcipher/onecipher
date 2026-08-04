@@ -51,36 +51,53 @@ jobs:
       - run: cargo shear
 
   hard-gates:
-    name: Hard Gates (R56)
+    name: Hard Gates (R12 / R56)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: R56 — no forbidden deps in isolated crates
+
+      # R56: the isolated crates must stay free of every async runtime and
+      # network stack, not just tokio. The previous version only grepped for
+      # `tokio`, so adding e.g. `reqwest` or `async-std` would have passed.
+      - name: R56 — no async/network deps in isolated crates
         run: |
-          cargo tree -p oc-crypto -e features
-          cargo tree -p oc-policy -e features
-          cargo tree -p oc-keyagent -e features
-          cargo tree -p oc-session-key -e features
-      - name: Verify no tokio in oc-crypto
+          forbidden='tokio|reqwest|tungstenite|hyper|async-std|smol'
+          status=0
+          for crate in oc-crypto oc-policy oc-keyagent oc-session-key; do
+            # `--edges normal` still catches dev-deps? No -- so check both:
+            # normal edges gate the shipped tree, all edges gate dev-deps too,
+            # which R56 also forbids.
+            if hit=$(cargo tree -p "$crate" 2>/dev/null | grep -Eo "^[^a-zA-Z]*($forbidden) v[0-9]" | sort -u); then
+              if [ -n "$hit" ]; then
+                echo "R56 VIOLATION in $crate:"
+                echo "$hit"
+                status=1
+              fi
+            fi
+          done
+          exit $status
+
+      # R12a: source-level isolation. Mirrors `just r12-check`.
+      - name: R12a — no TCP types in isolated crate sources
         run: |
-          if cargo tree -p oc-crypto -e features 2>/dev/null | grep -q tokio; then
-            echo "R56 VIOLATION: tokio found in oc-crypto dependency tree"
+          if grep -rnE 'TcpListener|TcpStream' \
+               crates/oc-keyagent/src/ crates/oc-crypto/src/ \
+               crates/oc-policy/src/ crates/oc-session-key/src/; then
+            echo "R12a VIOLATION: TCP types found in isolated crate sources"
             exit 1
           fi
-      - name: Verify no tokio in oc-policy
-        run: |
-          if cargo tree -p oc-policy -e features 2>/dev/null | grep -q tokio; then
-            echo "R56 VIOLATION: tokio found in oc-policy dependency tree"
-            exit 1
-          fi
-      - name: Verify no tokio in oc-keyagent
-        run: |
-          if cargo tree -p oc-keyagent -e features 2>/dev/null | grep -q tokio; then
-            echo "R56 VIOLATION: tokio found in oc-keyagent dependency tree"
-            exit 1
-          fi
+          echo "R12a PASS"
+
+  duplicate-deps:
+    name: Duplicate Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/check-duplicate-deps.sh
 
   test:
     name: Test
@@ -117,13 +134,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --bin onecipher
-      - name: R12 — no TCP symbols in release binary
-        run: |
-          if nm target/release/onecipher 2>/dev/null | grep -i 'TcpListener\|TcpStream\|AF_INET'; then
-            echo "R12 VIOLATION: TCP symbols found in release binary"
-            exit 1
-          fi
-          echo "R12 PASS: no TCP symbols found"
+
+      # NOTE: the old `nm target/release/onecipher | grep -i tcp` step was
+      # removed. It was wrong in both directions:
+      #
+      #   - False negative: release binaries are stripped, so `nm` emits
+      #     "no symbols" and the grep trivially "passed" regardless of content.
+      #   - False positive by design: R12b explicitly permits TCP symbols in
+      #     the daemon, which links axum/hyper for the Web UI and the
+      #     WalletConnect relay. A passing grep would have meant the Web UI
+      #     had been dropped.
+      #
+      # R12 is now enforced where it is actually meaningful: R12a (source
+      # isolation) in the hard-gates job above, and the sandbox scenarios in
+      # the conformance suite.
+      - name: R12 — Key-Agent sandbox conformance scenarios
+        run: cargo test -p oc-conformance --test conformance -- keyagent_sandbox
 
   audit:
     name: Security Audit

@@ -104,10 +104,12 @@ impl SecretStore {
         std::fs::create_dir_all(config.secrets_dir())?;
         set_dir_mode_0700(&config.root);
         set_dir_mode_0700(&config.secrets_dir());
-        if !config.index_path().exists() {
-            std::fs::write(config.index_path(), "")?;
+        if config.index_path().exists() {
+            set_file_mode_0600(&config.index_path());
+        } else {
+            // Create at 0600 directly rather than touching then narrowing.
+            oc_core::paths::write_atomic_private(&config.index_path(), b"")?;
         }
-        set_file_mode_0600(&config.index_path());
         Ok(Self { config })
     }
 
@@ -153,8 +155,10 @@ impl SecretStore {
         validate_name(&entry.name)?;
         let path = self.config.entry_path(&entry.name);
         let json = serde_json::to_vec_pretty(entry)?;
-        std::fs::write(&path, json)?;
-        set_file_mode_0600(&path);
+        // Atomic + created at 0600. The previous `fs::write` then
+        // `set_file_mode_0600` sequence left the age ciphertext readable at the
+        // umask-derived mode, and a torn write destroyed the existing secret.
+        oc_core::paths::write_atomic_private(&path, &json)?;
         self.upsert_index(entry.to_index_entry())?;
         // Auto-commit if the vault is a git repository (silent no-op otherwise).
         let index_path = self.config.index_path();
@@ -200,8 +204,9 @@ impl SecretStore {
         let mut entry = self.get(old)?;
         entry.rename(new)?;
         let json = serde_json::to_vec_pretty(&entry)?;
-        std::fs::write(&new_path, json)?;
-        set_file_mode_0600(&new_path);
+        // Write the new copy atomically at 0600 BEFORE unlinking the old one,
+        // so an interruption can leave both but never neither.
+        oc_core::paths::write_atomic_private(&new_path, &json)?;
         std::fs::remove_file(&old_path)?;
         // Update index: remove old, add new.
         self.remove_from_index(old)?;
@@ -267,8 +272,11 @@ impl SecretStore {
             content.push_str(&line);
             content.push('\n');
         }
-        std::fs::write(self.config.index_path(), content)?;
-        set_file_mode_0600(&self.config.index_path());
+        // Whole-file rebuild (not an append), so atomic replace is correct.
+        // A torn write here would truncate the index and orphan every secret
+        // below the cut point — the ciphertext files would survive but become
+        // invisible to `list`.
+        oc_core::paths::write_atomic_private(&self.config.index_path(), content.as_bytes())?;
         Ok(())
     }
 }

@@ -120,10 +120,22 @@ impl Config {
 }
 
 impl Default for Config {
+    /// Build the default config.
+    ///
+    /// `vault_path` resolves to `~/.onecipher`. If the home directory cannot
+    /// be determined, it falls back to the *relative* path `.onecipher` in the
+    /// current working directory. This is deliberate: the previous fallback
+    /// was the absolute, world-writable `/tmp/.onecipher`, which silently
+    /// placed the vault somewhere any local user could tamper with. A
+    /// relative path stays inside whatever directory the operator chose.
+    ///
+    /// Callers that need a hard failure instead of a fallback should use
+    /// [`crate::paths::state_dir`] directly.
     fn default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let vault_path = crate::paths::state_dir()
+            .unwrap_or_else(|_| PathBuf::from(crate::paths::STATE_DIR_NAME));
         Self {
-            vault_path: PathBuf::from(home).join(".onecipher"),
+            vault_path,
             rpc: Self::default_rpc(),
             plugins: HashMap::new(),
             backup: None,
@@ -154,9 +166,14 @@ impl Config {
     /// Load `~/.onecipher/config.json`, merging user overrides on top of defaults.
     /// If the file doesn't exist, returns the built-in defaults.
     pub fn load_or_default() -> Self {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let config_path = PathBuf::from(home).join(".onecipher/config.json");
-        Self::load_or_default_from(&config_path)
+        match crate::paths::config_path() {
+            Ok(p) => Self::load_or_default_from(&p),
+            // No home directory: there is no user config to merge, so the
+            // built-in defaults are the correct answer. Previously this read
+            // from `/tmp/.onecipher/config.json`, meaning any local user could
+            // plant a config file that redirected the vault and RPC endpoints.
+            Err(_) => Self::default(),
+        }
     }
 
     /// Load config from a specific path, merging user overrides on top of defaults.
@@ -172,9 +189,13 @@ impl Config {
             config.plugins = user_config.plugins;
             config.backup = user_config.backup;
             config.webui = user_config.webui;
-            if user_config.vault_path.as_path() != std::path::Path::new("/tmp/.onecipher") &&
-                user_config.vault_path.to_string_lossy() != ""
-            {
+            // Honor any non-empty user-specified vault path. The previous
+            // code also ignored the literal `/tmp/.onecipher`, because that
+            // used to be the `Default` value when HOME was unset and would
+            // otherwise be round-tripped back in as an explicit setting.
+            // That fallback is gone, so the sentinel check would now only
+            // serve to silently ignore a deliberate operator choice.
+            if !user_config.vault_path.as_os_str().is_empty() {
                 config.vault_path = user_config.vault_path;
             }
         }

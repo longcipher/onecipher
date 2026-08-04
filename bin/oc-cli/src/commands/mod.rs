@@ -183,13 +183,16 @@ use std::path::PathBuf;
 use oc_core::{ItemType, SecretMetadata, SecretPayload};
 use oc_secret::{AgeIdentity, SecretStore, StoreConfig};
 
-/// Resolve the OneCipher home directory (`~/.onecipher`).
+/// Resolve the OneCipher state directory (`~/.onecipher`).
 ///
-/// Uses the `HOME` env var; falls back to `/tmp` if unset (matching
-/// `oc_core::Config::default()` behavior).
+/// Delegates to [`oc_core::paths::state_dir`], the single source of truth.
+///
+/// `main()` validates `HOME` before dispatching any subcommand, so the error
+/// branch is unreachable in the CLI. It still refuses `/tmp`: the fallback is
+/// a *relative* `.onecipher`, which stays inside the caller's own working
+/// directory rather than a world-writable shared one.
 pub(crate) fn onecipher_home() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".onecipher")
+    oc_core::paths::state_dir().unwrap_or_else(|_| PathBuf::from(oc_core::paths::STATE_DIR_NAME))
 }
 
 /// Secret store root directory: `<onecipher_home>/store/`.

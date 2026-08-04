@@ -49,13 +49,12 @@ impl BootstrapToken {
         state.created_at = Some(Instant::now());
         state.consumed = false;
 
-        // Persist to filesystem with 0600 permissions
-        tokio::fs::write(&self.path, token.as_bytes()).await?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600)).await?;
-        }
+        // Persist to filesystem atomically at 0600. A bootstrap token written
+        // at the umask-derived mode gives every local user one-time admin.
+        let p = self.path.clone();
+        let t = token.clone();
+        tokio::task::spawn_blocking(move || oc_core::paths::write_atomic_private(&p, t.as_bytes()))
+            .await??;
 
         Ok(token)
     }

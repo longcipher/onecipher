@@ -7,7 +7,6 @@
 use std::{
     collections::HashMap,
     io::BufRead,
-    path::PathBuf,
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -37,10 +36,8 @@ fn global_audit_log() -> Result<Arc<Mutex<AuditLog>>, KeyAgentError> {
     }
     // L3 fix: HOME must be set — refuse to fall back to /tmp (world-readable,
     // survives reboot, leaks audit trail to a shared location).
-    let home = std::env::var("HOME").map_err(|_| {
-        KeyAgentError::Internal("HOME environment variable not set — refusing to use /tmp".into())
-    })?;
-    let path = PathBuf::from(home).join(".onecipher/logs/audit.jsonl");
+    let path = oc_core::paths::state_path("logs/audit.jsonl")
+        .map_err(|e| KeyAgentError::Internal(e.to_string()))?;
     let device_id = "keyagent".to_string();
     // Stage 0: persistent device key instead of per-process random key.
     let store = DeviceKeyStore::open_default()
@@ -565,15 +562,9 @@ fn handle_pay_x402(req: &crate::proto::PayX402Request) -> Result<KeyAgentRespons
         Ok(log) => log,
         Err(e) => return Ok(KeyAgentResponse::error(format!("audit log init: {e}"))),
     };
-    let state_path = {
-        // L3 fix: HOME must be set — refuse to fall back to /tmp.
-        let home = std::env::var("HOME").map_err(|_| {
-            KeyAgentError::Internal(
-                "HOME environment variable not set — refusing to use /tmp".into(),
-            )
-        })?;
-        PathBuf::from(home).join(".onecipher/policy_state.json")
-    };
+    // L3 fix: HOME must be set — refuse to fall back to /tmp.
+    let state_path = oc_core::paths::state_path("policy_state.json")
+        .map_err(|e| KeyAgentError::Internal(e.to_string()))?;
 
     let mut policy_integration = match crate::PolicyIntegration::open(
         &state_path,
@@ -616,8 +607,9 @@ fn handle_pay_x402(req: &crate::proto::PayX402Request) -> Result<KeyAgentRespons
 fn handle_get_payment_history(
     req: &crate::proto::GetPaymentHistoryRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let log_path = PathBuf::from(home).join(".onecipher/logs/audit.jsonl");
+    // L3 fix: HOME must be set — refuse to read/write the audit trail under /tmp.
+    let log_path = oc_core::paths::state_path("logs/audit.jsonl")
+        .map_err(|e| KeyAgentError::Internal(e.to_string()))?;
 
     let file = match std::fs::File::open(&log_path) {
         Ok(f) => f,

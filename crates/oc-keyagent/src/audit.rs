@@ -137,12 +137,24 @@ impl AuditLog {
         }
 
         let existed = path.exists();
-        if !existed {
-            // Touch the file so we can set its mode before any appends.
-            File::create(path)?;
+        if existed {
+            // Enforce 0600 on a pre-existing log (best-effort).
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        } else {
+            // Create at 0600 in a single syscall. NOTE: this log is
+            // append-only (R40 / AD-03), so it must NOT be created via
+            // write-temp-then-rename — replacing the inode would break the
+            // hash chain and discard prior entries. `create_new` + `mode`
+            // closes the permission window without touching existing data.
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                opts.mode(0o600);
+            }
+            opts.open(path)?;
         }
-        // Enforce 0600 on the log file (best-effort).
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 
         let (last_hash, last_seq) =
             if existed { Self::load_tail(path)? } else { (String::new(), 0) };
@@ -329,17 +341,17 @@ impl AuditLog {
             }
         }
 
-        // Write merged log.
-        {
-            let mut file = File::create(output)?;
-            for entry in &all_entries {
-                let line = serde_json::to_string(entry)?;
-                file.write_all(line.as_bytes())?;
-                file.write_all(b"\n")?;
-            }
-            file.sync_all()?;
+        // Write merged log. Unlike `append`, this produces a whole new file
+        // from `all_entries`, so an atomic replace is correct here: a torn
+        // write would otherwise leave a partial merge that still parses but
+        // has silently lost audit entries.
+        let mut merged = Vec::new();
+        for entry in &all_entries {
+            let line = serde_json::to_string(entry)?;
+            merged.extend_from_slice(line.as_bytes());
+            merged.push(b'\n');
         }
-        let _ = std::fs::set_permissions(output, std::fs::Permissions::from_mode(0o600));
+        oc_core::paths::write_atomic_private(output, &merged)?;
 
         let (last_hash, last_seq, device_id) = if let Some(last) = all_entries.last() {
             (hash_entry(last), last.seq, last.device_id.clone())
@@ -487,18 +499,13 @@ impl DeviceKeyStore {
             }
         }
 
-        // Write key bytes (32 bytes raw)
+        // Write the raw 32-byte private key atomically, created at 0600.
+        // Previously `fs::write` created it at the umask-derived mode
+        // (commonly 0644) and only then narrowed it — briefly exposing an
+        // Ed25519 signing key to every local user.
         let key_bytes = signing_key.to_bytes();
-        std::fs::write(&self.path, key_bytes)
+        oc_core::paths::write_atomic_private(&self.path, &key_bytes)
             .map_err(|e| AuditError::DeviceKeyError(format!("write key: {e}")))?;
-
-        // Set file permissions to 0600
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|e| AuditError::DeviceKeyError(format!("set file perms: {e}")))?;
-        }
 
         Ok(signing_key)
     }
@@ -506,9 +513,8 @@ impl DeviceKeyStore {
 
 /// Resolve the default device key path: `~/.onecipher/audit_device.key`
 fn default_device_key_path() -> Result<PathBuf, AuditError> {
-    let home = std::env::var("HOME")
-        .map_err(|_| AuditError::DeviceKeyError("HOME not set".to_string()))?;
-    Ok(PathBuf::from(home).join(".onecipher").join("audit_device.key"))
+    oc_core::paths::state_path("audit_device.key")
+        .map_err(|e| AuditError::DeviceKeyError(e.to_string()))
 }
 
 /// Compute the canonical bytes of an entry: the entry serialized with

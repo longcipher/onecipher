@@ -18,9 +18,8 @@ pub struct SigningEngine {
 impl SigningEngine {
     /// Open the engine with default paths (`~/.onecipher/`).
     pub fn open_default() -> Result<Self, SigningCoreError> {
-        let home = std::env::var("HOME")
-            .map_err(|_| SigningCoreError::InvalidInput("HOME not set".to_string()))?;
-        let state_dir = PathBuf::from(home).join(".onecipher");
+        let state_dir = oc_core::paths::state_dir()
+            .map_err(|e| SigningCoreError::InvalidInput(e.to_string()))?;
         Self::open(&state_dir)
     }
 

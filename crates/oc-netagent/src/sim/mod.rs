@@ -3,6 +3,11 @@
 //! [`simulate_evm_tx`] is the single public entry-point. It decodes a raw
 //! hex-encoded transaction, runs it through the evm2 interpreter, and returns
 //! a [`TxSimulation`] (reusing the shared type from `oc-core`).
+//!
+//! Formerly the standalone `oc-sim` crate. It was folded into `oc-netagent`
+//! because it was ~500 LOC with exactly one consumer (this crate) and three
+//! call sites — an extra compilation unit and link step bought no reuse or
+//! isolation. See `wc_method_router.rs` for the call sites.
 
 pub mod abi_cache;
 pub mod abi_decode;

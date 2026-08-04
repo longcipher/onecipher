@@ -76,13 +76,18 @@ impl RecipientsFile {
     }
 
     /// Write a list of recipients to a file (one per line).
+    ///
+    /// Written atomically at 0600. This list is security-critical even though
+    /// it holds only public keys: a torn write that drops trailing lines would
+    /// silently re-encrypt subsequent secrets to a *subset* of the intended
+    /// recipients, locking those recipients out without any error.
     pub fn save(path: &Path, recipients: &[Recipient]) -> Result<(), RecipientError> {
         let mut content = String::new();
         for r in recipients {
             content.push_str(&r.to_string());
             content.push('\n');
         }
-        std::fs::write(path, content)?;
+        oc_core::paths::write_atomic_private(path, content.as_bytes())?;
         Ok(())
     }
 

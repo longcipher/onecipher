@@ -14,7 +14,7 @@ getrandom = { workspace = true }
 hex = { workspace = true }
 jiff = { workspace = true }
 libc = { workspace = true }
-oc-core = { workspace = true }
+oc-core = { workspace = true, features = ["hardened"] }
 oc-crypto = { workspace = true }
 oc-keyagent = { workspace = true }
 oc-policy = { workspace = true }

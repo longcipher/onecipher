@@ -21,7 +21,10 @@ pub fn save_policy(policy: &Policy, vault_path: Option<&Path>) -> Result<(), OcW
     let dir = policies_dir(vault_path)?;
     let path = dir.join(format!("{}.json", policy.id));
     let json = serde_json::to_string_pretty(policy)?;
-    fs::write(&path, json)?;
+    // Atomic: a torn write here would leave a corrupt or partially-populated
+    // policy file. Because the engine is default-deny that is a lockout at
+    // best, and at worst a truncation that still parses but has lost a rule.
+    oc_core::paths::write_atomic(&path, json.as_bytes(), oc_core::paths::MODE_REGULAR_FILE)?;
     Ok(())
 }
 

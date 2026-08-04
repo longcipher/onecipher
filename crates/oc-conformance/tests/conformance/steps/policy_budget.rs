@@ -843,9 +843,15 @@ async fn then_local_engine_denies_subsequent(world: &mut ConformanceWorld, _devi
 /// Asserts:
 /// 1. `world.last_audit_event == Some(EventType::BudgetReclaim)`.
 /// 2. The audit log file (read directly from `world.audit_path`) contains at least one entry with
-///    `event_type == BudgetReclaim` and `payload.reclaimed_usd == 1.20` (the expected reclaim
-///    amount for this scenario: 3.00 - 1.80 = 1.20).
+///    `event_type == BudgetReclaim` whose `payload.reclaimed_usd` matches the amount the `When`
+///    step actually reclaimed.
 /// 3. The audit chain still verifies after the append (integrity).
+///
+/// The expected amount is taken from the value the `When` step stashed rather
+/// than hardcoded. A previous revision asserted a literal `1.20` (from an
+/// older `3.00 - 1.80` fixture) which contradicted the scenario's own
+/// `spent 1.00 USD of its 3.00 USD allocation`, so the step failed against
+/// correct production behavior.
 #[then("an audit entry of event_type BUDGET_RECLAIM is appended with the reclaimed amount")]
 async fn then_audit_budget_reclaim_appended(world: &mut ConformanceWorld) {
     assert_eq!(
@@ -853,6 +859,13 @@ async fn then_audit_budget_reclaim_appended(world: &mut ConformanceWorld) {
         Some(EventType::BudgetReclaim),
         "expected last_audit_event = BudgetReclaim"
     );
+
+    let expected_reclaimed: f64 = world
+        .last_error
+        .as_ref()
+        .expect("reclaimed amount must be stashed in last_error by the When step")
+        .parse()
+        .expect("last_error must be a float stashed by the When step");
 
     // Read the audit log file directly and find the BUDGET_RECLAIM entry.
     let audit_path = world.audit_path.as_ref().expect("audit_path must be set by Background");
@@ -873,10 +886,11 @@ async fn then_audit_budget_reclaim_appended(world: &mut ConformanceWorld) {
                 .get("reclaimed_usd")
                 .and_then(|v| v.as_f64())
                 .expect("BUDGET_RECLAIM payload must have reclaimed_usd");
-            // Expected: 3.00 (allocated) - 1.80 (spent) = 1.20.
+            // `expected_reclaimed` is parsed from a "{:.2}" string, so compare
+            // at cent precision rather than 1e-9.
             assert!(
-                (reclaimed - 1.20).abs() < 1e-9,
-                "reclaimed_usd in audit payload: expected 1.20, got {reclaimed}"
+                (reclaimed - expected_reclaimed).abs() < 1e-6,
+                "reclaimed_usd in audit payload: expected {expected_reclaimed}, got {reclaimed}"
             );
             found_reclaim = true;
             break;

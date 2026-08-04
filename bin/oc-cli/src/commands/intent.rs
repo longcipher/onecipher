@@ -14,7 +14,7 @@
 
 use std::io::{self, BufRead, IsTerminal, Write};
 
-use oc_intent::{
+use oc_netagent::intent::{
     Intent, IntentError, IntentKind, IntentResult, IntentStatus, IntentSummary, MessageEncoding,
     MockRpcClient, RpcClient, execute_intent, simulate_intent,
 };
@@ -410,9 +410,10 @@ async fn run_execution(intent: &Intent, rpc: &dyn RpcClient) -> Result<IntentRes
     // build stays green and the MockRpcClient (which does not validate
     // signatures) can exercise the full execute → broadcast → receipt path.
     // Real signing is deferred to integration with the Key-Agent UDS channel.
-    let signer = |_wallet_id: &str, tx_bytes: &[u8]| -> Result<Vec<u8>, oc_intent::IntentError> {
-        Ok(tx_bytes.to_vec())
-    };
+    let signer =
+        |_wallet_id: &str, tx_bytes: &[u8]| -> Result<Vec<u8>, oc_netagent::intent::IntentError> {
+            Ok(tx_bytes.to_vec())
+        };
     execute_intent(intent, rpc, signer).await.map_err(map_intent_error)
 }
 
@@ -724,7 +725,7 @@ mod tests {
     fn print_result_does_not_panic() {
         let result = IntentResult {
             intent_id: uuid::Uuid::new_v4(),
-            status: oc_intent::IntentStatus::Confirmed,
+            status: oc_netagent::intent::IntentStatus::Confirmed,
             tx_hash: Some("0xabc".to_string()),
             receipt: Some(serde_json::json!({"status": "0x1"})),
             error: None,

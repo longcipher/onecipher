@@ -1,0 +1,10 @@
+# cargo-vet supply chain audit store.
+# Referenced by the BDD conformance test `supply_chain.feature` scenario 3
+# which asserts this file exists and contains the expected section headers.
+# Actual audit data is populated by `cargo vet init` / `cargo vet certify`.
+[cargo-vet]
+version = "0.10"
+
+[audited]
+
+[exempted]

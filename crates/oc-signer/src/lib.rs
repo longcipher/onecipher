@@ -119,6 +119,7 @@ mod integration_tests {
         );
     }
 
+    #[cfg(feature = "xrpl")]
     #[test]
     fn test_full_pipeline_xrpl() {
         let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
@@ -181,6 +182,7 @@ mod integration_tests {
         let ton_addr = derive_address_for_chain(&mnemonic, ChainType::Ton);
         let spark_addr = derive_address_for_chain(&mnemonic, ChainType::Spark);
         let fil_addr = derive_address_for_chain(&mnemonic, ChainType::Filecoin);
+        #[cfg(feature = "xrpl")]
         let xrpl_addr = derive_address_for_chain(&mnemonic, ChainType::Xrpl);
 
         // All addresses should be different
@@ -193,6 +195,7 @@ mod integration_tests {
             &ton_addr,
             &spark_addr,
             &fil_addr,
+            #[cfg(feature = "xrpl")]
             &xrpl_addr,
         ];
         for i in 0..addrs.len() {

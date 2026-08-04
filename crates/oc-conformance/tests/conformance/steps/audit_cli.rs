@@ -50,6 +50,23 @@ fn workspace_root() -> PathBuf {
     crate::workspace_root()
 }
 
+/// Subtract `days` from `ts`, treating a day as exactly 24 hours.
+///
+/// `Timestamp - Span::new().days(n)` panics: a `Timestamp` carries no calendar
+/// or time-zone context, so jiff refuses to interpret calendar units (a "day"
+/// is 23 or 25 hours across a DST transition). The `onecipher audit list`
+/// implementation resolves this with
+/// `Span::to_duration(SpanRelativeTo::days_are_24_hours())`; this helper
+/// mirrors that exactly so the fixtures and the code under test agree on what
+/// `--since 7d` means.
+fn days_ago(ts: Timestamp, days: i64) -> Timestamp {
+    let dur = Span::new()
+        .days(days)
+        .to_duration(jiff::SpanRelativeTo::days_are_24_hours())
+        .expect("days are convertible to a 24-hour-based duration");
+    ts.checked_sub(dur).expect("timestamp minus a small day span stays in range")
+}
+
 /// Path to the `onecipher` debug binary.
 fn onecipher_bin() -> PathBuf {
     workspace_root().join("target").join("debug").join("onecipher")
@@ -423,7 +440,7 @@ async fn given_mix_allowed_denied_multiple_days(world: &mut ConformanceWorld) {
         "agent-01",
         &device_key,
         &mut chain,
-        now - Span::new().days(3),
+        days_ago(now, 3),
         EventType::PayX402,
         Some("sk-a1-3d-allowed".to_string()),
         serde_json::json!({"status": "allowed", "amount_usd": 5.00}),
@@ -434,7 +451,7 @@ async fn given_mix_allowed_denied_multiple_days(world: &mut ConformanceWorld) {
         "agent-01",
         &device_key,
         &mut chain,
-        now - Span::new().days(3),
+        days_ago(now, 3),
         EventType::PayX402,
         Some("sk-a1-3d-denied".to_string()),
         serde_json::json!({"status": "denied", "amount_usd": 6.00, "deny_reason": "POLICY_AMOUNT"}),
@@ -445,7 +462,7 @@ async fn given_mix_allowed_denied_multiple_days(world: &mut ConformanceWorld) {
         "agent-02",
         &device_key,
         &mut chain,
-        now - Span::new().days(3),
+        days_ago(now, 3),
         EventType::PayX402,
         Some("sk-a2-3d-allowed".to_string()),
         serde_json::json!({"status": "allowed", "amount_usd": 7.00}),
@@ -456,7 +473,7 @@ async fn given_mix_allowed_denied_multiple_days(world: &mut ConformanceWorld) {
         "agent-02",
         &device_key,
         &mut chain,
-        now - Span::new().days(3),
+        days_ago(now, 3),
         EventType::PayX402,
         Some("sk-a2-3d-denied".to_string()),
         serde_json::json!({"status": "denied", "amount_usd": 8.00, "deny_reason": "RATE_LIMIT_MINUTE"}),
@@ -467,7 +484,7 @@ async fn given_mix_allowed_denied_multiple_days(world: &mut ConformanceWorld) {
         "agent-02",
         &device_key,
         &mut chain,
-        now - Span::new().days(10),
+        days_ago(now, 10),
         EventType::PayX402,
         Some("sk-a2-10d-denied".to_string()),
         serde_json::json!({"status": "denied", "amount_usd": 9.00, "deny_reason": "POLICY_AMOUNT"}),
@@ -478,7 +495,7 @@ async fn given_mix_allowed_denied_multiple_days(world: &mut ConformanceWorld) {
         "agent-03",
         &device_key,
         &mut chain,
-        now - Span::new().days(3),
+        days_ago(now, 3),
         EventType::PayX402,
         Some("sk-a3-3d-denied".to_string()),
         serde_json::json!({"status": "denied", "amount_usd": 10.00, "deny_reason": "POLICY_AMOUNT"}),
@@ -502,7 +519,7 @@ async fn then_only_agent_02_within_7d(world: &mut ConformanceWorld) {
         !lines.is_empty(),
         "expected at least one DENIED entry for agent-02 within 7d, got empty output"
     );
-    let cutoff = Timestamp::now() - Span::new().days(7);
+    let cutoff = days_ago(Timestamp::now(), 7);
     for (i, line) in lines.iter().enumerate() {
         let device_id = field_value(line, "device_id").unwrap_or("");
         assert_eq!(
@@ -545,7 +562,7 @@ async fn then_exposes_deny_reason(world: &mut ConformanceWorld) {
 #[then("no entries from other Agents or other time windows appear in the output")]
 async fn then_no_other_agents_or_time_windows(world: &mut ConformanceWorld) {
     let stdout = world.last_error.as_ref().expect("stdout must be captured by the When step");
-    let cutoff = Timestamp::now() - Span::new().days(7);
+    let cutoff = days_ago(Timestamp::now(), 7);
     for (i, line) in stdout.lines().filter(|l| !l.trim().is_empty()).enumerate() {
         let device_id = field_value(line, "device_id").unwrap_or("");
         assert_eq!(device_id, "agent-02", "line {i} leaked entry from agent {device_id:?}: {line}");

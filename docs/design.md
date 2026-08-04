@@ -18,8 +18,8 @@ single `onecipher` binary. Created the signing-core facade (the
 runs as a sync `std::thread` with UDS; the WC v2 server runs on tokio.
 
 ### Stage 2 — AI Agent Native Features
-- **Intent Layer (`oc-intent`):** Declarative intent framing, simulation,
-  and execution for Pay/SignTransaction/SignMessage/CrossChainTransfer.
+- **Intent Layer (`oc-netagent::intent`):** Declarative intent framing,
+  simulation, and execution for Pay/SignTransaction/SignMessage/CrossChainTransfer.
 - **Paymaster (`oc-pay`):** ERC-4337 gas abstraction via sponsor strategies.
 - **Real Session Keys:** ERC-7579 (EVM) and Session Tokens (Solana).
 - **Policy v3:** Cedar-like DSL with permit/forbid rules.
@@ -125,7 +125,7 @@ cross-chain routing via ERC-7683, and Cedar-policy full integration.
 
 ## §6 Component Design References
 
-### §6.1 Intent Layer (`oc-intent`)
+### §6.1 Intent Layer (`oc-netagent::intent`)
 The Intent Layer provides a declarative interface for AI agents to
 express signing and payment intentions (e.g. "pay 10.5 USDC to 0xABC
 on Base") without constructing raw transactions. Intents flow through
@@ -140,7 +140,7 @@ Key types: `Intent`, `IntentKind` (`Pay` / `SignTransaction` /
 Key functions: `simulate_intent`, `execute_intent`.
 
 `simulate_intent` and `execute_intent` both take an `&dyn RpcClient`
-trait object. `oc-intent` stays decoupled from the Key-Agent by
+trait object. `oc-netagent::intent` stays decoupled from the Key-Agent by
 depending only on this `RpcClient` abstraction (gas estimation, tx
 construction, `send_raw_transaction`, receipt polling); real RPC
 implementations are supplied by `oc-netagent`. `execute_intent` builds

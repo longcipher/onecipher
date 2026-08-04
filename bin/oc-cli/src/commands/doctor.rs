@@ -277,6 +277,9 @@ pub(crate) fn run(verbose: bool) -> Result<(), CliError> {
 
     // 9. Git repo status (if git feature enabled).
     {
+        // `mut` is only required by the `git` arm below; without the feature
+        // the binding is used immutably (or not at all).
+        #[cfg_attr(not(feature = "git"), allow(unused_mut))]
         let mut cx = check!("Git sync");
         #[cfg(feature = "git")]
         {
