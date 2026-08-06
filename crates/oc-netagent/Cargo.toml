@@ -17,6 +17,7 @@ path = "src/lib.rs"
 # types (`address[]`, `bytes`, tuples) as their raw offset-pointer word — a
 # misleading value to show in a signing-approval prompt.
 alloy-dyn-abi = { workspace = true }
+axum = { workspace = true }
 backon = { workspace = true }
 hex = { workspace = true }
 hpx = { workspace = true }
@@ -28,6 +29,7 @@ prost = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha3 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tracing = { workspace = true }
@@ -35,6 +37,7 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 
 [dev-dependencies]
 oc-walletconnect = { workspace = true, features = ["test-utils"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full", "test-util"] }
 

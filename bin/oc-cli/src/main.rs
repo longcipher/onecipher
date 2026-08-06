@@ -559,6 +559,7 @@ fn run_daemon() -> Result<(), CliError> {
     let state_dir_str = state_dir.to_string_lossy().to_string();
     let ka_sock_for_telemetry = key_agent_sock.clone();
     let ka_sock_for_webui = key_agent_sock.clone();
+    let ka_sock_for_rpc = key_agent_sock.clone();
     let ka_sock_for_wc = key_agent_sock;
 
     // Channel: control socket → WC server (pairing URI injection)
@@ -694,6 +695,46 @@ fn run_daemon() -> Result<(), CliError> {
             }
         };
 
+        // --- Local HTTP-RPC server (P1: AI-agent direct signing surface) ---
+        // Loopback-only JSON-RPC 2.0, disabled by default. Enable with
+        // OC_RPC_LISTEN=127.0.0.1:7667 — the address MUST be loopback; any
+        // other value is rejected at bind time (R12e), surfaced as a startup
+        // error in the spawned task.
+        let rpc_handle: Option<tokio::task::JoinHandle<()>> = {
+            match std::env::var("OC_RPC_LISTEN") {
+                Ok(listen) => match listen.parse::<std::net::SocketAddr>() {
+                    Ok(addr) => {
+                        let server =
+                            oc_netagent::LocalRpcServer::new(oc_netagent::LocalRpcServerConfig {
+                                listen: addr,
+                                key_agent_sock: ka_sock_for_rpc,
+                                approval: None,
+                                approval_mode: std::sync::Arc::new(
+                                    std::sync::atomic::AtomicBool::new(false),
+                                ),
+                                approval_timeout: std::time::Duration::from_secs(300),
+                                approval_log: None,
+                            });
+                        Some(tokio::spawn(async move {
+                            match server.serve().await {
+                                Ok(port) => {
+                                    eprintln!("HTTP-RPC listening on 127.0.0.1:{port}");
+                                }
+                                Err(e) => {
+                                    eprintln!("HTTP-RPC server failed to start: {e}");
+                                }
+                            }
+                        }))
+                    }
+                    Err(e) => {
+                        eprintln!("invalid OC_RPC_LISTEN '{listen}': {e}");
+                        None
+                    }
+                },
+                Err(_) => None,
+            }
+        };
+
         eprintln!("daemon running (Ctrl+C to stop)");
 
         // Monitor the Key-Agent thread: bridge the sync mpsc receiver into the
@@ -722,6 +763,15 @@ fn run_daemon() -> Result<(), CliError> {
                 }
             } => {
                 eprintln!("Web UI server exited");
+                Ok(())
+            }
+            () = async {
+                match rpc_handle {
+                    Some(h) => { let _ = h.await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                eprintln!("HTTP-RPC server exited");
                 Ok(())
             }
             ka_err = ka_monitor => {

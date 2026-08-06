@@ -4758,6 +4758,7 @@ name = "oc-netagent"
 version = "0.1.0"
 dependencies = [
  "alloy-dyn-abi",
+ "axum",
  "backon",
  "hex",
  "hpx",
@@ -4767,8 +4768,10 @@ dependencies = [
  "oc-walletconnect",
  "prost",
  "rand 0.10.2",
+ "reqwest",
  "serde",
  "serde_json",
+ "sha3 0.12.0",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",

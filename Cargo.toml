@@ -28,6 +28,7 @@ publish = false
 
 [workspace.dependencies]
 alloy-dyn-abi = "1.6.1"
+axum = "0.8"
 # local crates
 oc-core = { path = "crates/oc-core" }
 oc-crypto = { path = "crates/oc-crypto" }

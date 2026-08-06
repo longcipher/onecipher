@@ -144,12 +144,14 @@ mod tests {
 
     #[test]
     fn build_call_data_pay_erc20_targets_token_contract() {
-        // M5: ERC-20 Pay (token == Some) targets the token contract address
-        // and carries value "0x0" (the actual transfer happens via calldata).
+        // M5: ERC-20 Pay (token == Some) targets the token contract address,
+        // carries value "0x0", and encodes a `transfer(address,uint256)`
+        // calldata (selector 0xa9059cbb) for the recipient.
+        const RECIPIENT: &str = "0xabcdef1234567890abcdef1234567890abcdef12";
         let intent = Intent::new(
             IntentKind::Pay {
-                amount: "10.5 USDC".to_string(),
-                recipient: "0xabcdef1234567890".to_string(),
+                amount: "10500000".to_string(), // 10.5 USDC in 6-decimal base units
+                recipient: RECIPIENT.to_string(),
                 token: Some("0x833589fcd6edb6e08f4c7c32d4f71b54cda0ed66".to_string()),
             },
             "eip155:8453".to_string(),
@@ -158,6 +160,10 @@ mod tests {
         let cd = build_call_data(&intent.kind, &intent.chain_id).expect("build_call_data");
         assert_eq!(cd.to, "0x833589fcd6edb6e08f4c7c32d4f71b54cda0ed66");
         assert_eq!(cd.value.as_deref(), Some("0x0"));
+        let data = cd.data.expect("ERC-20 transfer must carry calldata");
+        assert_eq!(&data[0..4], &[0xa9, 0x05, 0x9c, 0xbb], "transfer(address,uint256) selector");
+        // Recipient is ABI-encoded in bytes 4..36 (12 zero pad + 20-byte addr).
+        assert_eq!(&data[16..36], &hex::decode(RECIPIENT.trim_start_matches("0x")).expect("hex"));
     }
 
     #[test]
