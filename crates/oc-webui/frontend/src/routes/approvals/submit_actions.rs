@@ -21,6 +21,45 @@ struct DecisionBody {
     reason: Option<String>,
 }
 
+/// POST a decision for `approval_id`, converge the cache, and report back.
+///
+/// Extracted because the four button variants below (Forbidden-reject,
+/// Disabled-reject, Armed-confirm, Armed-reject) were four copies of the same
+/// block — and the copies had already drifted into not invalidating anything,
+/// leaving a decided approval in the queue until the WebSocket happened to
+/// echo it back.
+fn submit_decision(
+    approval_id: String,
+    decision: &'static str,
+    reason: Option<&'static str>,
+    label: &'static str,
+    on_decided: Callback<String>,
+    sign_state: RwSignal<SignState>,
+    error: RwSignal<Option<String>>,
+) {
+    sign_state.set(SignState::Submitting);
+    leptos::task::spawn_local(async move {
+        let path = format!("/approvals/{approval_id}/decision");
+        let body = DecisionBody { decision: decision.into(), reason: reason.map(Into::into) };
+        match crate::api::post_json::<DecisionBody, serde_json::Value>(&path, &body).await {
+            Ok(_) => {
+                // A decision removes the item from the queue and — if it was
+                // approved — moves funds and appends to the audit log. Refetch
+                // rather than waiting for a WS echo that may never arrive if
+                // the socket dropped.
+                crate::cache::invalidate_scene(crate::cache::Scene::Approvals);
+                crate::cache::invalidate_scene(crate::cache::Scene::Balances);
+                crate::cache::invalidate_scene(crate::cache::Scene::Audit);
+                on_decided.run(label.into());
+            }
+            Err(e) => {
+                error.set(Some(e.to_string()));
+                sign_state.set(SignState::Disabled);
+            }
+        }
+    });
+}
+
 #[component]
 pub fn SubmitActions(
     approval_id: String,
@@ -106,23 +145,15 @@ pub fn SubmitActions(
                     match sign_state.get() {
                         SignState::Forbidden => {
                             let on_reject = move |_| {
-                                sign_state.set(SignState::Submitting);
-                                let id = id_signal.get();
-                                let cb = on_decided;
-                                leptos::task::spawn_local(async move {
-                                    let path = format!("/approvals/{id}/decision");
-                                    let body = DecisionBody {
-                                        decision: "rejected".into(),
-                                        reason: Some("user rejected".into()),
-                                    };
-                                    match crate::api::post_json::<DecisionBody, serde_json::Value>(&path, &body).await {
-                                        Ok(_) => cb.run("Rejected".into()),
-                                        Err(e) => {
-                                            error.set(Some(e.to_string()));
-                                            sign_state.set(SignState::Disabled);
-                                        }
-                                    }
-                                });
+                                submit_decision(
+                                    id_signal.get(),
+                                    "rejected",
+                                    Some("user rejected"),
+                                    "Rejected",
+                                    on_decided,
+                                    sign_state,
+                                    error,
+                                );
                             };
                             view! {
                                 <button
@@ -135,23 +166,15 @@ pub fn SubmitActions(
                         }
                         SignState::Disabled => {
                             let on_reject = move |_| {
-                                sign_state.set(SignState::Submitting);
-                                let id = id_signal.get();
-                                let cb = on_decided;
-                                leptos::task::spawn_local(async move {
-                                    let path = format!("/approvals/{id}/decision");
-                                    let body = DecisionBody {
-                                        decision: "rejected".into(),
-                                        reason: Some("user rejected".into()),
-                                    };
-                                    match crate::api::post_json::<DecisionBody, serde_json::Value>(&path, &body).await {
-                                        Ok(_) => cb.run("Rejected".into()),
-                                        Err(e) => {
-                                            error.set(Some(e.to_string()));
-                                            sign_state.set(SignState::Disabled);
-                                        }
-                                    }
-                                });
+                                submit_decision(
+                                    id_signal.get(),
+                                    "rejected",
+                                    Some("user rejected"),
+                                    "Rejected",
+                                    on_decided,
+                                    sign_state,
+                                    error,
+                                );
                             };
                             view! {
                                 <button
@@ -175,42 +198,26 @@ pub fn SubmitActions(
                         }
                         SignState::Armed => {
                             let on_confirm = move |_| {
-                                sign_state.set(SignState::Submitting);
-                                let id = id_signal.get();
-                                let cb = on_decided;
-                                leptos::task::spawn_local(async move {
-                                    let path = format!("/approvals/{id}/decision");
-                                    let body = DecisionBody {
-                                        decision: "approved".into(),
-                                        reason: None,
-                                    };
-                                    match crate::api::post_json::<DecisionBody, serde_json::Value>(&path, &body).await {
-                                        Ok(_) => cb.run("Approved".into()),
-                                        Err(e) => {
-                                            error.set(Some(e.to_string()));
-                                            sign_state.set(SignState::Disabled);
-                                        }
-                                    }
-                                });
+                                submit_decision(
+                                    id_signal.get(),
+                                    "approved",
+                                    None,
+                                    "Approved",
+                                    on_decided,
+                                    sign_state,
+                                    error,
+                                );
                             };
                             let on_reject = move |_| {
-                                sign_state.set(SignState::Submitting);
-                                let id = id_signal.get();
-                                let cb = on_decided;
-                                leptos::task::spawn_local(async move {
-                                    let path = format!("/approvals/{id}/decision");
-                                    let body = DecisionBody {
-                                        decision: "rejected".into(),
-                                        reason: Some("user rejected".into()),
-                                    };
-                                    match crate::api::post_json::<DecisionBody, serde_json::Value>(&path, &body).await {
-                                        Ok(_) => cb.run("Rejected".into()),
-                                        Err(e) => {
-                                            error.set(Some(e.to_string()));
-                                            sign_state.set(SignState::Disabled);
-                                        }
-                                    }
-                                });
+                                submit_decision(
+                                    id_signal.get(),
+                                    "rejected",
+                                    Some("user rejected"),
+                                    "Rejected",
+                                    on_decided,
+                                    sign_state,
+                                    error,
+                                );
                             };
                             view! {
                                 <button

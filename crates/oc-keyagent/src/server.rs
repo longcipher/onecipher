@@ -14,11 +14,9 @@ use std::{
     thread,
 };
 
-use prost::Message;
-
 use crate::{
     error::KeyAgentError,
-    frame::{read_frame, write_frame},
+    frame::{Frame, read_typed, write_typed},
     handler::dispatch,
     request::KeyAgentRequest,
     response::KeyAgentResponse,
@@ -113,32 +111,28 @@ pub fn handle_conn(stream: UnixStream) -> Result<(), KeyAgentError> {
     let mut writer = stream;
 
     loop {
-        let payload = match read_frame(&mut reader) {
-            Ok(payload) => payload,
+        let req = match read_typed::<_, KeyAgentRequest>(&mut reader) {
+            Ok(frame) => frame.into_inner(),
             Err(crate::frame::FrameError::Eof) => {
                 // Clean client disconnect between frames.
                 return Ok(());
             }
-            Err(e) => return Err(e.into()),
-        };
-
-        let req = match KeyAgentRequest::decode(payload.as_slice()) {
-            Ok(req) => req,
-            Err(e) => {
+            Err(crate::frame::FrameError::Decode(e)) => {
                 // Decode failure — respond with Error and continue the loop
                 // so the client can send a corrected request on the same
                 // connection.
                 let resp = KeyAgentResponse::error(format!("decode error: {e}"));
-                write_frame(&mut writer, &resp.encode_to_vec())?;
+                write_typed(&mut writer, &Frame::new(resp))?;
                 continue;
             }
+            Err(e) => return Err(e.into()),
         };
 
         let resp = match dispatch(&req) {
             Ok(resp) => resp,
             Err(e) => KeyAgentResponse::error(format!("dispatch error: {e}")),
         };
-        write_frame(&mut writer, &resp.encode_to_vec())?;
+        write_typed(&mut writer, &Frame::new(resp))?;
     }
 }
 

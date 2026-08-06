@@ -13,8 +13,8 @@ pub struct AuditEntry {
 
 #[component]
 pub fn HistoryPage() -> impl IntoView {
-    let entries = read_or_fetch::<Vec<AuditEntry>, _>(Scene::Audit, "list", async {
-        crate::api::get_json::<Vec<AuditEntry>>("/audit").await
+    let entries = read_or_fetch(Scene::Audit, "list", || {
+        crate::api::get_json::<Vec<AuditEntry>>("/audit")
     });
 
     view! {

@@ -261,6 +261,7 @@ pub fn dispatch(req: &KeyAgentRequest) -> Result<KeyAgentResponse, KeyAgentError
         Some(KeyAgentRequestKind::GenerateTotp(_)) => Ok(KeyAgentResponse::not_implemented(
             "GenerateTotp — secret operations handled locally by CLI (R56: no oc-secret dep in Key-Agent)",
         )),
+        Some(KeyAgentRequestKind::DrainTelemetry(req)) => handle_drain_telemetry(*req),
         None => {
             Err(KeyAgentError::InvalidRequest("request kind is None (empty request)".to_string()))
         }
@@ -818,6 +819,51 @@ fn handle_generate_challenge(
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
+/// Default number of telemetry records returned when the caller passes `0`.
+///
+/// Sized so a full batch stays comfortably inside
+/// [`crate::frame::MAX_FRAME_SIZE`] (4 MiB): a record with the maximum number
+/// of allowlisted fields serializes to well under 4 KiB, so 512 records is
+/// ~2 MiB worst case.
+const DEFAULT_TELEMETRY_DRAIN: u32 = 512;
+
+/// Upper bound on a single drain, regardless of what the caller asks for.
+const MAX_TELEMETRY_DRAIN: u32 = 1024;
+
+/// P1 3.1: Hand the Network-Agent a batch of buffered telemetry records.
+///
+/// The Key-Agent is deliberately export-blind — it has no tokio, no HTTP
+/// client and no OTLP exporter (R56), and its seccomp/Seatbelt profile denies
+/// every non-UDS socket (R12). So instead of pushing spans out, it buffers
+/// them in a bounded ring ([`crate::telemetry`]) and lets the Network-Agent —
+/// which already holds this UDS connection and may link an exporter — pull
+/// them.
+///
+/// Field values are redacted at *record* time, not here: only names in
+/// `telemetry::SAFE_FIELDS` keep their value, everything else is stored as
+/// `<redacted>`. That makes this RPC safe to serve without Passkey
+/// authorization.
+fn handle_drain_telemetry(
+    req: crate::proto::DrainTelemetryRequest,
+) -> Result<KeyAgentResponse, KeyAgentError> {
+    let max = match req.max_records {
+        0 => DEFAULT_TELEMETRY_DRAIN,
+        n => n.min(MAX_TELEMETRY_DRAIN),
+    };
+
+    let batch = crate::telemetry::drain(max as usize);
+    let record_count = u32::try_from(batch.records.len()).unwrap_or(u32::MAX);
+    let dropped = batch.dropped;
+
+    let batch_json = match serde_json::to_string(&batch) {
+        Ok(j) => j,
+        Err(e) => return Ok(KeyAgentResponse::error(format!("telemetry encode: {e}"))),
+    };
+
+    let resp = crate::proto::DrainTelemetryResponse { batch_json, record_count, dropped };
+    Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1067,5 +1113,131 @@ mod tests {
             let resp = dispatch(&req).unwrap_or_else(|e| panic!("dispatch[{i}] err: {e:?}"));
             let _ = resp;
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // P1 3.1 — DrainTelemetry
+    // -----------------------------------------------------------------------
+
+    /// Run `body` with exclusive access to the global telemetry buffer, left
+    /// enabled and empty on entry and restored on exit.
+    ///
+    /// The ring is a process-wide singleton, so these tests share it with
+    /// `telemetry`'s own tests — hence the crate-wide lock.
+    fn with_exclusive_telemetry<T>(
+        body: impl FnOnce(&'static crate::telemetry::TelemetryBuffer) -> T,
+    ) -> T {
+        let guard = crate::telemetry::TELEMETRY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let buffer = crate::telemetry::global_buffer();
+        let was_enabled = buffer.is_enabled();
+        buffer.set_enabled(true);
+        // Discard anything an earlier test left behind.
+        let _ = crate::telemetry::drain(usize::MAX);
+
+        let out = body(buffer);
+
+        let _ = crate::telemetry::drain(usize::MAX);
+        buffer.set_enabled(was_enabled);
+        drop(guard);
+        out
+    }
+
+    fn test_record(seq: u64, name: &str) -> crate::telemetry::TelemetryRecord {
+        crate::telemetry::TelemetryRecord {
+            seq,
+            timestamp_ms: 1_700_000_000_000,
+            level: crate::telemetry::TelemetryLevel::Info,
+            kind: crate::telemetry::RecordKind::Event,
+            target: "oc-keyagent::handler".to_string(),
+            name: name.to_string(),
+            span_id: None,
+            parent_span_id: None,
+            duration_ms: None,
+            fields: vec![],
+        }
+    }
+
+    fn drain_via_dispatch(max_records: u32) -> crate::proto::DrainTelemetryResponse {
+        let resp = dispatch_req(KeyAgentRequestKind::DrainTelemetry(
+            crate::proto::DrainTelemetryRequest { max_records },
+        ));
+        match &resp.kind {
+            Some(KeyAgentResponseKind::Ok(bytes)) => {
+                prost::Message::decode(bytes.as_slice()).expect("decode DrainTelemetryResponse")
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drain_telemetry_dispatches_without_panic() {
+        // The counterpart of `test_all_variants_dispatch_without_panic` for
+        // the DrainTelemetry variant, kept here so it runs under the
+        // telemetry lock instead of stealing records from the other tests.
+        with_exclusive_telemetry(|_| {
+            let req = KeyAgentRequest {
+                kind: Some(KeyAgentRequestKind::DrainTelemetry(
+                    crate::proto::DrainTelemetryRequest { max_records: 1 },
+                )),
+            };
+            let resp = dispatch(&req).expect("DrainTelemetry must not error");
+            assert!(!resp.is_error());
+            assert!(!resp.is_deny());
+        });
+    }
+
+    #[test]
+    fn drain_telemetry_on_an_empty_buffer_is_an_empty_batch() {
+        with_exclusive_telemetry(|_| {
+            let resp = drain_via_dispatch(16);
+            assert_eq!(resp.record_count, 0);
+            assert_eq!(resp.dropped, 0);
+            let batch: crate::telemetry::TelemetryBatch =
+                serde_json::from_str(&resp.batch_json).expect("batch_json is valid JSON");
+            assert!(batch.is_empty());
+        });
+    }
+
+    #[test]
+    fn drain_telemetry_returns_buffered_records_and_empties_the_ring() {
+        with_exclusive_telemetry(|buffer| {
+            for seq in 0..3u64 {
+                buffer.push(test_record(seq, "drain_test"));
+            }
+
+            let resp = drain_via_dispatch(16);
+            assert_eq!(resp.record_count, 3);
+            let batch: crate::telemetry::TelemetryBatch =
+                serde_json::from_str(&resp.batch_json).expect("batch_json is valid JSON");
+            assert_eq!(batch.records.len(), 3);
+
+            // Second drain sees an empty ring — the first call consumed it.
+            assert_eq!(drain_via_dispatch(16).record_count, 0);
+        });
+    }
+
+    #[test]
+    fn drain_telemetry_caps_an_oversized_request() {
+        with_exclusive_telemetry(|buffer| {
+            buffer.push(test_record(0, "cap_test"));
+            // Ask for far more than MAX_TELEMETRY_DRAIN: the cap must not
+            // panic or overflow, and the buffered record still comes back.
+            let resp = drain_via_dispatch(u32::MAX);
+            assert_eq!(resp.record_count, 1);
+        });
+    }
+
+    #[test]
+    fn zero_max_records_means_server_default_not_drain_nothing() {
+        with_exclusive_telemetry(|buffer| {
+            buffer.push(test_record(0, "default_cap"));
+            // An un-set proto field decodes to 0; that must NOT be read as
+            // "return nothing", otherwise every default-constructed request
+            // would silently no-op.
+            let resp = drain_via_dispatch(0);
+            assert_eq!(resp.record_count, 1);
+        });
     }
 }

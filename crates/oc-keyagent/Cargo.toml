@@ -38,9 +38,14 @@ tracing = { workspace = true }
 # tracing is a pure log facade (no I/O, no async runtime) — R56-safe.
 # IPC wire types live in `src/proto.rs` (replaces the former `oc-proto` crate).
 
-# T12 sandbox: Linux-only libc dep for seccomp/prctl/capset syscalls.
-# Target-specific so the dep doesn't even resolve on macOS / Windows.
+# T12 sandbox: libc for seccomp/prctl/capset (Linux) and
+# sandbox_init/ptrace/setrlimit (macOS). Target-specific so the dep does not
+# resolve on Windows, whose implementation uses raw `extern "system"` bindings
+# to kernel32 (already linked by every Rust binary) rather than `windows-sys`.
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
 
 [dev-dependencies]

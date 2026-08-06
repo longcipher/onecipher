@@ -41,7 +41,15 @@ pub(crate) fn render(app: &mut App, frame: &mut Frame<'_>) {
         Mode::Detail => render_detail(app, frame, chunks[1]),
         Mode::Help => render_help(frame, chunks[1]),
         Mode::Insert => render_insert(app, frame, chunks[1]),
-        _ => render_list(app, frame, chunks[1]),
+        #[cfg(feature = "git")]
+        Mode::Git => render_git(app, frame, chunks[1]),
+        // Confirm renders the list underneath with a modal dialog on top.
+        _ => {
+            render_list(app, frame, chunks[1]);
+            if app.mode == Mode::Confirm {
+                render_confirm(app, frame);
+            }
+        }
     }
 
     render_status(app, frame, chunks[2]);
@@ -65,9 +73,9 @@ fn render_search(app: &App, frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-/// Render the secret list.
+/// Render the secret list as a tree (namespaces + entries).
 fn render_list(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
-    if app.filtered_indices.is_empty() {
+    if app.tree_rows.is_empty() {
         let msg = if app.entries.is_empty() {
             "No secrets in vault. Press 'n' to create one."
         } else {
@@ -81,40 +89,62 @@ fn render_list(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
     }
 
     let items: Vec<ListItem<'_>> = app
-        .filtered_indices
+        .tree_rows
         .iter()
-        .map(|&i| {
-            let entry = &app.entries[i];
-            let icon = type_icon(entry.item_type);
-            let totp_span = if entry.item_type == ItemType::Totp {
-                app.totp_cache
-                    .get(&entry.name)
-                    .map(|(code, _)| {
-                        vec![
-                            Span::raw("  "),
-                            Span::styled(
-                                code.as_str(),
-                                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                            ),
-                        ]
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
+        .map(|row| match row {
+            crate::tui::app::TreeRow::Header(ns) => {
+                let name_part = ns.trim_end_matches('/').to_string();
+                let short = name_part.rsplit('/').next().unwrap_or(&name_part).to_string();
+                ListItem::new(Line::from(vec![Span::styled(
+                    format!("▾ {short}/"),
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                )]))
+            }
+            crate::tui::app::TreeRow::Entry(i) => {
+                let entry = &app.entries[*i];
+                let icon = type_icon(entry.item_type);
 
-            let mut spans = vec![
-                Span::styled(format!("{icon} "), Style::default().fg(Color::Cyan)),
-                Span::raw(&entry.name),
-                Span::raw("  "),
-                Span::styled(
-                    format!("[{}]", entry.item_type),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ];
-            spans.extend(totp_span);
+                // Namespaced entries are indented; the last path segment is
+                // the visible name (the namespace header already shows the
+                // prefix).
+                let visible = if let Some((_ns, rest)) = entry.name.split_once('/') {
+                    rest
+                } else {
+                    &entry.name
+                };
+                let indent = if entry.name.contains('/') { "  " } else { "" };
 
-            ListItem::new(Line::from(spans))
+                let totp_span = if entry.item_type == ItemType::Totp {
+                    app.totp_cache
+                        .get(&entry.name)
+                        .map(|(code, _)| {
+                            vec![
+                                Span::raw("  "),
+                                Span::styled(
+                                    code.as_str(),
+                                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                                ),
+                            ]
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                let mut spans = vec![
+                    Span::raw(indent),
+                    Span::styled(format!("{icon} "), Style::default().fg(Color::Cyan)),
+                    Span::raw(visible),
+                    Span::raw("  "),
+                    Span::styled(
+                        format!("[{}]", entry.item_type),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ];
+                spans.extend(totp_span);
+
+                ListItem::new(Line::from(spans))
+            }
         })
         .collect();
 
@@ -124,7 +154,7 @@ fn render_list(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
         .highlight_symbol("> ");
 
     let mut state = ListState::default();
-    if app.selected < app.filtered_indices.len() {
+    if app.selected < app.tree_rows.len() {
         state.select(Some(app.selected));
     }
     frame.render_stateful_widget(list, area, &mut state);
@@ -150,13 +180,15 @@ fn render_status(app: &App, frame: &mut Frame<'_>, area: Rect) {
     // Contextual key-binding hint.
     let hint = match app.mode {
         Mode::Normal => {
-            "j/k:move  /:search  Enter:detail  c:copy  t:totp  n:new  d:delete  ?:help  q:quit"
+            "j/k:move  /:search  Enter:detail  c:copy  t:totp  n:new  e:edit  d:delete  g:git  ?:help  q:quit"
         }
         Mode::Search => "Type to search, Enter:confirm, Esc:cancel",
         Mode::Detail => "Esc:back  c:copy  t:totp  q:quit",
         Mode::Help => "Esc/q:back",
         Mode::Insert => "Up/Down:field  Left/Right:type  Enter:next/submit  Esc:cancel",
         Mode::Confirm => "y:confirm  n/Esc:cancel",
+        #[cfg(feature = "git")]
+        Mode::Git => "p:pull  P:push  r:refresh  Esc/q:back",
     };
     lines.push(Line::from(vec![Span::styled(hint, Style::default().fg(Color::DarkGray))]));
 
@@ -331,6 +363,135 @@ fn render_insert(app: &App, frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
+/// Render a confirmation dialog for destructive actions (delete).
+///
+/// A centered modal over the dimmed list. The `Mode::Confirm` branch of
+/// `render` draws the list first, then overlays this.
+fn render_confirm(app: &App, frame: &mut Frame<'_>) {
+    let name = app.current_entry().map_or_else(|| "unknown".to_string(), |e| e.name.clone());
+
+    let dialog_area = centered_rect(frame.area(), 46, 5);
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "Delete secret?",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        Line::from(Span::raw(format!("  {name}"))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("[ y ]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(" confirm     "),
+            Span::styled("[ n / Esc ]", Style::default().fg(Color::DarkGray)),
+            Span::raw(" cancel"),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title("Confirm"))
+        .style(Style::default().bg(Color::DarkGray));
+    frame.render_widget(paragraph, dialog_area);
+}
+
+/// Render the git status + recent history view.
+#[cfg(feature = "git")]
+fn render_git(app: &App, frame: &mut Frame<'_>, area: Rect) {
+    let dim = Style::default().fg(Color::DarkGray);
+    let green = Style::default().fg(Color::Green);
+    let red = Style::default().fg(Color::Red);
+    let yellow = Style::default().fg(Color::Yellow);
+    let cyan = Style::default().fg(Color::Cyan);
+
+    let mut lines: Vec<Line<'_>> = Vec::new();
+
+    // Repository status banner.
+    if app.git_is_repo {
+        lines.push(Line::from(vec![
+            Span::styled("Repository: ", cyan),
+            Span::styled("tracked", green),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("Repository: ", cyan),
+            Span::styled("not a git repo — run `onecipher git init` in the CLI", yellow),
+        ]));
+    }
+
+    // Transient git message (pull/push result).
+    if let Some((msg, expires)) = &app.git_message {
+        if Instant::now() < *expires {
+            lines.push(Line::from(Span::styled(msg.as_str(), Style::default().fg(Color::Green))));
+            lines.push(Line::from(""));
+        }
+    }
+
+    // Working tree status.
+    lines.push(Line::from(vec![Span::styled(
+        "Working tree",
+        Style::default().add_modifier(Modifier::BOLD),
+    )]));
+    if app.git_status.is_empty() {
+        lines.push(Line::from(Span::styled("  (clean)", dim)));
+    } else {
+        for e in &app.git_status {
+            let color = match e.status.as_str() {
+                "deleted" => red,
+                "new" => green,
+                _ => yellow,
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {:<10}", e.status), color),
+                Span::raw(&e.path),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![Span::styled(
+        "Recent history",
+        Style::default().add_modifier(Modifier::BOLD),
+    )]));
+    if app.git_history.is_empty() {
+        lines.push(Line::from(Span::styled("  (no commits)", dim)));
+    } else {
+        for e in app.git_history.iter().take(12) {
+            let short: &str = e.oid.get(..7).unwrap_or(&e.oid);
+            lines.push(Line::from(vec![
+                Span::styled(short.to_string(), cyan),
+                Span::raw("  "),
+                Span::styled(e.author.clone(), dim),
+                Span::raw("  "),
+                Span::raw(e.message.trim().to_string()),
+            ]));
+        }
+    }
+
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title("Git Sync"))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, area);
+}
+
+/// Compute a centered sub-rectangle with the given percentage width/height.
+fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(area);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
 /// Render the help screen.
 fn render_help(frame: &mut Frame<'_>, area: Rect) {
     let cyan = Style::default().fg(Color::Cyan);
@@ -342,7 +503,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from(""),
         Line::from(vec![Span::styled("  j / Down   ", cyan), Span::raw("Move selection down")]),
         Line::from(vec![Span::styled("  k / Up     ", cyan), Span::raw("Move selection up")]),
-        Line::from(vec![Span::styled("  g / Home   ", cyan), Span::raw("Jump to top")]),
+        Line::from(vec![Span::styled("  Home       ", cyan), Span::raw("Jump to top")]),
         Line::from(vec![Span::styled("  G / End    ", cyan), Span::raw("Jump to bottom")]),
         Line::from(vec![Span::styled("  PgDn       ", cyan), Span::raw("Scroll down 10 rows")]),
         Line::from(vec![Span::styled("  PgUp       ", cyan), Span::raw("Scroll up 10 rows")]),
@@ -361,6 +522,17 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
             Span::raw("Delete selected entry (confirms)"),
         ]),
         Line::from(vec![Span::styled("  n          ", cyan), Span::raw("Create new secret")]),
+        Line::from(vec![Span::styled("  e          ", cyan), Span::raw("Edit selected entry")]),
+        #[cfg(feature = "git")]
+        Line::from(vec![
+            Span::styled("  g          ", cyan),
+            Span::raw("Git status / history view"),
+        ]),
+        #[cfg(feature = "git")]
+        Line::from(vec![
+            Span::styled("  p / P      ", cyan),
+            Span::raw("In git view: pull / push"),
+        ]),
         Line::from(vec![Span::styled("  ?          ", cyan), Span::raw("Show this help")]),
         Line::from(vec![Span::styled("  Esc        ", cyan), Span::raw("Cancel / go back")]),
         Line::from(vec![Span::styled("  Ctrl+C     ", cyan), Span::raw("Force quit")]),

@@ -121,9 +121,9 @@ pub fn encrypt(plaintext: &[u8], passphrase: &[u8]) -> Result<CryptoEnvelope, Cr
         .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
     derived_key.zeroize();
 
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
     let ciphertext_with_tag = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|_| CryptoError::EncryptionFailed("encryption failed".into()))?;
 
     // AES-GCM-SIV appends a 16-byte auth tag to the ciphertext
@@ -231,13 +231,16 @@ fn decrypt_argon2id(
     let cipher = Aes256GcmSiv::new_from_slice(&derived_key)
         .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
     derived_key.zeroize();
-    let nonce = Nonce::from_slice(&iv);
+    let nonce = Nonce::from(
+        <[u8; 12]>::try_from(iv.as_slice())
+            .map_err(|_| CryptoError::InvalidParams("iv is not 12 bytes".into()))?,
+    );
 
     let mut combined = ciphertext;
     combined.extend_from_slice(&auth_tag);
 
     let plaintext = cipher
-        .decrypt(nonce, combined.as_ref())
+        .decrypt(&nonce, combined.as_ref())
         .map_err(|_| CryptoError::DecryptionFailed("decryption failed".into()))?;
 
     Ok(HardenedBytes::from_vec(plaintext)?)
@@ -262,9 +265,9 @@ pub fn encrypt_with_hkdf(plaintext: &[u8], token: &[u8]) -> Result<CryptoEnvelop
     let cipher = Aes256GcmSiv::new_from_slice(&derived_key)
         .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
     derived_key.zeroize();
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
     let ciphertext_with_tag = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|_| CryptoError::EncryptionFailed("encryption failed".into()))?;
 
     let tag_offset = ciphertext_with_tag.len() - 16;
@@ -320,13 +323,16 @@ fn decrypt_hkdf(envelope: &CryptoEnvelope, token: &[u8]) -> Result<HardenedBytes
     let cipher = Aes256GcmSiv::new_from_slice(&derived_key)
         .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
     derived_key.zeroize();
-    let nonce = Nonce::from_slice(&iv);
+    let nonce = Nonce::from(
+        <[u8; 12]>::try_from(iv.as_slice())
+            .map_err(|_| CryptoError::InvalidParams("iv is not 12 bytes".into()))?,
+    );
 
     let mut combined = ciphertext;
     combined.extend_from_slice(&auth_tag);
 
     let plaintext = cipher
-        .decrypt(nonce, combined.as_ref())
+        .decrypt(&nonce, combined.as_ref())
         .map_err(|_| CryptoError::DecryptionFailed("decryption failed".into()))?;
 
     Ok(HardenedBytes::from_vec(plaintext)?)

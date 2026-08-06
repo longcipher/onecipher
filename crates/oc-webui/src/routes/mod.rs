@@ -2,6 +2,7 @@
 
 pub mod approvals;
 pub mod audit;
+pub mod auth;
 pub mod sessions;
 pub mod settings;
 pub mod wallets;

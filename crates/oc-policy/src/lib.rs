@@ -19,6 +19,7 @@ pub mod secret;
 pub mod v1;
 pub mod v2;
 pub mod v3;
+pub mod wasm;
 
 pub use error::OcPolicyError;
 pub use secret::{Effect, PolicyDecision, SecretOperation, SecretPolicyRule, check_secret_access};
@@ -28,7 +29,12 @@ pub use v2::{
     PolicyRulesV2, PolicyState, PolicyV2, WarnReason, evaluate_11_step,
 };
 pub use v3::{
-    ComparisonOp, PolicyRule, PolicyV3, RuleCondition, RuleEffect, evaluate_v3, parse_policy_v3,
+    ComparisonOp, PolicyRule, PolicyV3, RuleCondition, RuleEffect, StrategyDecision, evaluate_v3,
+    evaluate_v3_with_registry, evaluate_v3_with_strategies, parse_policy_v3, wasm_request_from_pay,
+};
+pub use wasm::{
+    NoHostFacts, RegistryOutcome, StrategyLimits, StrategyOutcome, StrategyPlugin,
+    StrategyRegistry, WasmError, WasmEvalRequest, WasmHostCalls,
 };
 
 // ---------------------------------------------------------------------------

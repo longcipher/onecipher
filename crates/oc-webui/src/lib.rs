@@ -47,6 +47,7 @@ pub async fn run_webui_server(
     config: &WebuiConfig,
     state_dir: PathBuf,
     approval_rx: mpsc::Receiver<(PendingApproval, oneshot::Sender<ApprovalDecision>)>,
+    dual_register: Option<routes::auth::DualRegistrationFn>,
 ) -> io::Result<(JoinHandle<()>, u16)> {
     let addr: SocketAddr = config.listen.parse().map_err(|e| {
         io::Error::new(io::ErrorKind::InvalidInput, format!("invalid listen address: {e}"))
@@ -63,16 +64,80 @@ pub async fn run_webui_server(
     let listener = TcpListener::bind(addr).await?;
     let bound_port = listener.local_addr()?.port();
 
-    // Set up the approval queue
-    let queue = ApprovalQueue::new(64);
+    // Set up the approval queue with a persistent JSONL log for crash recovery.
+    let log = std::sync::Arc::new(
+        oc_core::approval_log::ApprovalLog::open(&state_dir)
+            .map_err(|e| io::Error::other(format!("approval log: {e}")))?,
+    );
+    let queue = ApprovalQueue::with_log(64, log.clone());
+
+    // Replay unresolved approvals from a previous daemon run so the user can
+    // still see and clear them after a restart.
+    match log.replay_unresolved() {
+        Ok(orphans) if !orphans.is_empty() => {
+            tracing::info!(count = orphans.len(), "replaying orphaned approvals from log");
+            queue.replay_orphans(orphans);
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "failed to replay approval log"),
+    }
+
+    // Best-effort GC of resolved entries older than 7 days.
+    if let Err(e) = log.gc_older_than(7) {
+        tracing::warn!(error = %e, "approval log GC failed");
+    }
+
     queue.spawn_receiver(approval_rx);
 
     // Session store for WebAuthn sessions (default 30-minute idle timeout)
     let session_store = SessionStore::new(1800);
 
+    // WebAuthn manager + bootstrap token for the auth routes (W1.6). The
+    // relying-party origin is the loopback server's own origin.
+    // webauthn-rs requires a hostname RP ID — an IP address is rejected as an
+    // invalid origin. `localhost` is what the browser treats as loopback, so
+    // the RP origin and the loopback-only listener agree.
+    let origin = url::Url::parse(&format!("http://localhost:{bound_port}"))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("origin parse: {e}")))?;
+    let webauthn = auth::WebAuthnManager::new(&state_dir, &origin)
+        .map_err(|e| io::Error::other(format!("webauthn init: {e}")))?;
+    let bootstrap = auth::BootstrapToken::new(&state_dir);
+    let auto_lock_at = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    // The daemon installs a dual-registration callback that mirrors a browser
+    // passkey into the Key-Agent's PasskeyPubkeyStore. oc-webui itself must
+    // NOT depend on oc-keyagent (that would drag BoringSSL into this crate's
+    // graph and break the OpenSSL/BoringSSL link ordering in the final
+    // binary), so the wiring happens in oc-cli.
+    let auth_state = routes::auth::AuthState {
+        webauthn,
+        bootstrap,
+        session_store: session_store.clone(),
+        dual_register,
+        auto_lock_at,
+    };
+    // Generate a bootstrap token only when no credential exists yet.
+    if !auth_state.webauthn.has_credentials().await {
+        if let Err(e) = auth_state.bootstrap.generate().await {
+            tracing::warn!(error = %e, "bootstrap token generation failed");
+        }
+    }
+
     let state = AppState { queue, state_dir, session_store };
 
+    // Auth routes carry their own state (WebAuthn manager + bootstrap token).
+    let auth_router = axum::Router::new()
+        .route("/bootstrap", axum::routing::post(routes::auth::bootstrap))
+        .route("/webauthn/register/begin", axum::routing::post(routes::auth::register_begin))
+        .route("/webauthn/register/finish", axum::routing::post(routes::auth::register_finish))
+        .route("/webauthn/login/begin", axum::routing::post(routes::auth::login_begin))
+        .route("/webauthn/login/finish", axum::routing::post(routes::auth::login_finish))
+        .route("/logout", axum::routing::post(routes::auth::logout))
+        .route("/status", axum::routing::get(routes::auth::status))
+        .route("/lock", axum::routing::post(routes::auth::lock))
+        .with_state(auth_state);
+
     let app = axum::Router::new()
+        .nest("/api/auth", auth_router)
         .route("/api/health", axum::routing::get(health_handler))
         // Approvals
         .route("/api/approvals", axum::routing::get(routes::approvals::list_approvals))
@@ -295,7 +360,7 @@ mod tests {
         let config =
             WebuiConfig { enabled: true, listen: "0.0.0.0:8080".to_string(), ..Default::default() };
         let (_tx, rx) = mpsc::channel(16);
-        let result = run_webui_server(&config, PathBuf::from("/tmp"), rx).await;
+        let result = run_webui_server(&config, PathBuf::from("/tmp"), rx, None).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
@@ -307,7 +372,7 @@ mod tests {
             WebuiConfig { enabled: true, listen: "127.0.0.1:0".to_string(), ..Default::default() };
         let state_dir = tempfile::tempdir().unwrap();
         let (_tx, rx) = mpsc::channel(16);
-        let result = run_webui_server(&config, state_dir.path().to_path_buf(), rx).await;
+        let result = run_webui_server(&config, state_dir.path().to_path_buf(), rx, None).await;
         assert!(result.is_ok());
         let (handle, port) = result.unwrap();
         assert!(port > 0);
@@ -321,7 +386,7 @@ mod tests {
         let state_dir = tempfile::tempdir().unwrap();
         let (_tx, rx) = mpsc::channel(16);
         let (_handle, port) =
-            run_webui_server(&config, state_dir.path().to_path_buf(), rx).await.unwrap();
+            run_webui_server(&config, state_dir.path().to_path_buf(), rx, None).await.unwrap();
 
         // Make an HTTP request to the health endpoint
         let resp = reqwest::get(format!("http://127.0.0.1:{port}/api/health")).await.unwrap();

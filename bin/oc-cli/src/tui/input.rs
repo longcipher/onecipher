@@ -30,6 +30,8 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> bool {
         Mode::Insert => handle_insert_key(app, key),
         Mode::Confirm => handle_confirm_key(app, key),
         Mode::Detail => handle_detail_key(app, key),
+        #[cfg(feature = "git")]
+        Mode::Git => handle_git_key(app, key),
         Mode::Help => handle_help_key(app, key),
     }
 }
@@ -48,13 +50,15 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             app.move_up();
             false
         }
-        KeyCode::Char('g') | KeyCode::Home => {
+        KeyCode::Home => {
             app.selected = 0;
             false
         }
         KeyCode::Char('G') | KeyCode::End => {
-            if !app.filtered_indices.is_empty() {
-                app.selected = app.filtered_indices.len() - 1;
+            if let Some(idx) =
+                app.tree_rows.iter().rposition(|r| matches!(r, crate::tui::app::TreeRow::Entry(_)))
+            {
+                app.selected = idx;
             }
             false
         }
@@ -96,6 +100,15 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
         }
         KeyCode::Char('n') => {
             app.enter_insert();
+            false
+        }
+        KeyCode::Char('e') => {
+            app.enter_edit();
+            false
+        }
+        #[cfg(feature = "git")]
+        KeyCode::Char('g') => {
+            app.enter_git();
             false
         }
         _ => false,
@@ -250,6 +263,34 @@ fn handle_help_key(app: &mut App, key: KeyEvent) -> bool {
     match key.code {
         KeyCode::Esc | KeyCode::Char('q' | '?') => {
             app.mode = Mode::Normal;
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Handle keys in the git status / history view.
+#[cfg(feature = "git")]
+fn handle_git_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.mode = Mode::Normal;
+            false
+        }
+        KeyCode::Char('p') => {
+            app.git_pull();
+            false
+        }
+        KeyCode::Char('P') => {
+            app.git_push();
+            false
+        }
+        KeyCode::Char('r') => {
+            app.reload_git();
+            false
+        }
+        KeyCode::Char('?') => {
+            app.mode = Mode::Help;
             false
         }
         _ => false,

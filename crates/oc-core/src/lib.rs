@@ -1,5 +1,6 @@
 pub mod api_key;
 pub mod approval;
+pub mod approval_log;
 pub mod caip;
 pub mod chain;
 pub mod config;

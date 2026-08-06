@@ -14,8 +14,10 @@
 //! but for T17 scaffolding, one-request-per-connection keeps the client
 //! stateless and avoids lifetime issues across `&self` borrows.
 
-use oc_keyagent::{KeyAgentRequest, KeyAgentResponse};
-use prost::Message;
+use oc_keyagent::{
+    KeyAgentRequest, KeyAgentResponse,
+    frame::{Frame, FrameError},
+};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
@@ -55,8 +57,11 @@ impl KeyAgentClient {
     pub async fn send(&self, req: &KeyAgentRequest) -> Result<KeyAgentResponse, NetAgentError> {
         let mut stream = UnixStream::connect(&self.sock_path).await?;
 
-        // Encode + send request frame.
-        let payload = req.encode_to_vec();
+        // Encode + send request frame. The typed `Frame` wrapper handles the
+        // prost encode; the async transport writes the length-prefixed bytes.
+        let payload = Frame::new(req.clone())
+            .encode()
+            .map_err(|e| NetAgentError::KeyAgentWire(format!("request encode failed: {e}")))?;
         if payload.len() > MAX_FRAME_SIZE as usize {
             return Err(NetAgentError::KeyAgentWire(format!(
                 "request too large: {} bytes (max {MAX_FRAME_SIZE})",
@@ -92,13 +97,19 @@ impl KeyAgentClient {
             .await
             .map_err(|e| NetAgentError::KeyAgentWire(format!("reading payload: {e}")))?;
 
-        KeyAgentResponse::decode(buf.as_slice()).map_err(NetAgentError::ProstDecode)
+        Frame::<KeyAgentResponse>::decode(buf.as_slice()).map(|f| f.into_inner()).map_err(|e| {
+            match e {
+                FrameError::Decode(de) => NetAgentError::ProstDecode(de),
+                other => NetAgentError::KeyAgentWire(format!("response decode failed: {other}")),
+            }
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use oc_keyagent::{KeyAgentRequest, KeyAgentRequestKind, proto::Empty};
+    use prost::Message;
     use tokio::net::UnixListener;
 
     use super::*;

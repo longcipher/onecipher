@@ -22,6 +22,7 @@ pub mod response;
 pub mod sandbox;
 pub mod server;
 pub mod signing_core_error;
+pub mod telemetry;
 
 pub use audit::{AuditEntry, AuditError, AuditLog, EventType};
 pub use engine::{SignRequest, SignResult, SigningEngine};
@@ -40,6 +41,10 @@ pub use response::{KeyAgentResponse, KeyAgentResponseKind};
 pub use sandbox::apply_sandbox;
 pub use server::{handle_conn, run};
 pub use signing_core_error::SigningCoreError;
+pub use telemetry::{
+    RecordKind, TelemetryBatch, TelemetryBuffer, TelemetryLevel, TelemetryRecord,
+    TelemetrySubscriber,
+};
 
 /// Type alias for the process-wide key cache.
 ///

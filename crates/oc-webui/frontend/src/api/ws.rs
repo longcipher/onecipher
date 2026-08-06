@@ -83,6 +83,13 @@ pub fn connect_ws(approvals: RwSignal<Vec<PendingApproval>>) {
             Ok(e) => e,
             Err(_) => return,
         };
+
+        // Converge the data cache first, so any component that re-renders as a
+        // result of the signal updates below reads post-invalidation state.
+        // Skipping this is what used to leave resolved approvals and spent
+        // balances on screen until a manual reload.
+        crate::cache::invalidate::handle_invalidation(&event);
+
         match event {
             WsEvent::PendingApproval { approval } => {
                 approvals.update(|list| {
@@ -96,7 +103,13 @@ pub fn connect_ws(approvals: RwSignal<Vec<PendingApproval>>) {
                     list.retain(|a| a.id != id);
                 });
             }
-            _ => {}
+            WsEvent::AutoLocked => {
+                // The queue is authorized state too — clear it alongside the
+                // cache rather than leaving pending items rendered behind the
+                // lock screen.
+                approvals.update(Vec::clear);
+            }
+            WsEvent::AutoLockWarning { .. } => {}
         }
     });
     ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
