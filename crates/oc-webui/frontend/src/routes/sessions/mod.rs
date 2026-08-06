@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-use crate::cache::{Scene, read_or_fetch};
+use crate::cache::{Scene, invalidate_scene, read_or_fetch};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Session {
@@ -12,8 +12,8 @@ pub struct Session {
 
 #[component]
 pub fn SessionsPage() -> impl IntoView {
-    let sessions = read_or_fetch::<Vec<Session>, _>(Scene::Sessions, "list", async {
-        crate::api::get_json::<Vec<Session>>("/sessions").await
+    let sessions = read_or_fetch(Scene::Sessions, "list", || {
+        crate::api::get_json::<Vec<Session>>("/sessions")
     });
 
     view! {
@@ -43,7 +43,11 @@ pub fn SessionsPage() -> impl IntoView {
                                 on:click=move |_| {
                                     let t = topic_clone.clone();
                                     leptos::task::spawn_local(async move {
-                                        let _ = crate::api::delete(&format!("/sessions/{}", t)).await;
+                                        if crate::api::delete(&format!("/sessions/{}", t)).await.is_ok() {
+                                            // Refetch the list; without this the
+                                            // disconnected dApp stays on screen.
+                                            invalidate_scene(Scene::Sessions);
+                                        }
                                     });
                                 }
                                 style="margin-top:0.5rem;padding:0.25rem 0.75rem;background:var(--oc-danger);color:white;border:none;border-radius:var(--oc-radius);cursor:pointer;font-size:0.8rem;"

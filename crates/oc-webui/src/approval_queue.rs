@@ -4,7 +4,10 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
-use oc_core::approval::{ApprovalDecision, PendingApproval};
+use oc_core::{
+    approval::{ApprovalDecision, PendingApproval},
+    approval_log::ApprovalLog,
+};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
@@ -41,6 +44,8 @@ pub struct ApprovalQueue {
     pending: Arc<DashMap<Uuid, QueueEntry>>,
     /// Broadcast channel for WebSocket events.
     ws_tx: broadcast::Sender<WsEvent>,
+    /// Optional persistent log for crash recovery (JSONL WAL).
+    log: Option<Arc<ApprovalLog>>,
 }
 
 impl ApprovalQueue {
@@ -49,7 +54,16 @@ impl ApprovalQueue {
     /// `ws_capacity` sets the broadcast channel buffer size.
     pub fn new(ws_capacity: usize) -> Self {
         let (ws_tx, _) = broadcast::channel(ws_capacity);
-        Self { pending: Arc::new(DashMap::new()), ws_tx }
+        Self { pending: Arc::new(DashMap::new()), ws_tx, log: None }
+    }
+
+    /// Create a new approval queue with a persistent approval log.
+    ///
+    /// Pending approvals are appended to the log on insert and resolved
+    /// events on resolve, enabling daemon-restart recovery.
+    pub fn with_log(ws_capacity: usize, log: Arc<ApprovalLog>) -> Self {
+        let (ws_tx, _) = broadcast::channel(ws_capacity);
+        Self { pending: Arc::new(DashMap::new()), ws_tx, log: Some(log) }
     }
 
     /// Subscribe to WebSocket events (for new WS connections).
@@ -79,7 +93,19 @@ impl ApprovalQueue {
                     let _ = tx.send(decision.clone());
                 }
                 // Broadcast resolved event
-                let _ = self.ws_tx.send(WsEvent::ApprovalResolved { id, decision });
+                let _ =
+                    self.ws_tx.send(WsEvent::ApprovalResolved { id, decision: decision.clone() });
+                // Persist the resolution for crash recovery.
+                if let Some(log) = &self.log {
+                    let (decision_str, reason) = match &decision {
+                        ApprovalDecision::Approve => ("approved", String::new()),
+                        ApprovalDecision::Reject { reason } => ("rejected", reason.clone()),
+                        ApprovalDecision::Timeout => ("timeout", String::new()),
+                    };
+                    if let Err(e) = log.append_resolved(id, decision_str, &reason) {
+                        tracing::warn!(error = %e, "failed to log resolved approval");
+                    }
+                }
                 Ok(())
             }
             None => Err(AlreadyResolved),
@@ -91,6 +117,12 @@ impl ApprovalQueue {
         let id = approval.id;
         // Broadcast pending event
         let _ = self.ws_tx.send(WsEvent::PendingApproval { approval: Box::new(approval.clone()) });
+        // Persist the pending approval for crash recovery.
+        if let Some(log) = &self.log {
+            if let Err(e) = log.append_pending(&approval) {
+                tracing::warn!(error = %e, "failed to log pending approval");
+            }
+        }
         self.pending.insert(id, QueueEntry { approval, resp_tx: Some(resp_tx) });
     }
 
@@ -235,5 +267,22 @@ mod tests {
         let list = queue.list_pending();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, id);
+    }
+
+    #[test]
+    fn replay_orphans_returns_listed_pending() {
+        let queue = ApprovalQueue::new(16);
+        let id = Uuid::new_v4();
+        queue.replay_orphans(vec![make_approval(id)]);
+
+        let list = queue.list_pending();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, id);
+
+        // A replayed orphan (no response channel) can still be rejected to
+        // clear the queue.
+        let result = queue.resolve(id, ApprovalDecision::Reject { reason: "cleared".into() });
+        assert!(result.is_ok());
+        assert!(queue.list_pending().is_empty());
     }
 }

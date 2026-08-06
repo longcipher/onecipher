@@ -482,10 +482,52 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
 ///   via UDS.
 /// - **Control socket** (tokio task): accepts `CONNECT <uri>` and `PAIR` commands from `onecipher
 ///   wc connect/pair` CLI calls. Injects pairing URIs into the WC server via a tokio mpsc channel.
+///
+/// Install the Key-Agent telemetry subscriber (P1 3.1).
+///
+/// The verbosity comes from `OC_TELEMETRY_LEVEL` (`trace`/`debug`/`info`/
+/// `warn`/`error`, default `info`). Setting it to `off` skips installation
+/// entirely, which leaves the ring buffer disabled and makes every
+/// `tracing` macro a no-op.
+///
+/// Failure is non-fatal: a daemon that cannot record spans must still sign.
+fn init_telemetry() {
+    use oc_keyagent::telemetry::{self, TelemetryLevel};
+
+    let raw = std::env::var("OC_TELEMETRY_LEVEL").unwrap_or_else(|_| "info".to_string());
+    let level = match raw.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" | "0" => {
+            eprintln!("telemetry: disabled (OC_TELEMETRY_LEVEL={raw})");
+            return;
+        }
+        "trace" => TelemetryLevel::Trace,
+        "debug" => TelemetryLevel::Debug,
+        "warn" | "warning" => TelemetryLevel::Warn,
+        "error" => TelemetryLevel::Error,
+        // Anything unrecognized falls back to the default rather than
+        // aborting startup over a typo'd env var.
+        _ => TelemetryLevel::Info,
+    };
+
+    if telemetry::init(level) {
+        eprintln!("telemetry: buffering at {level} (drain via DrainTelemetry RPC)");
+    } else {
+        eprintln!("telemetry: a global subscriber is already installed; skipping");
+    }
+}
+
 fn run_daemon() -> Result<(), CliError> {
     use std::os::unix::fs::PermissionsExt;
 
     eprintln!("onecipher daemon starting...");
+
+    // --- Cross-boundary observability (P1 3.1) ---
+    // Installed before anything else so startup spans are captured. The
+    // Key-Agent cannot export telemetry itself (R56: no tokio/HTTP client;
+    // R12: no non-UDS sockets), so it buffers redacted records in a bounded
+    // ring that the Network-Agent drains over the control UDS.
+    init_telemetry();
+
     let engine = oc_keyagent::SigningEngine::open_default()
         .map_err(|e| CliError::DaemonInit(format!("key engine: {e}")))?;
     let state_dir = engine.state_dir().to_path_buf();
@@ -515,10 +557,17 @@ fn run_daemon() -> Result<(), CliError> {
     let relay_url =
         std::env::var("OC_WC_RELAY_URL").unwrap_or_else(|_| "wss://relay.walletconnect.com".into());
     let state_dir_str = state_dir.to_string_lossy().to_string();
+    let ka_sock_for_telemetry = key_agent_sock.clone();
+    let ka_sock_for_webui = key_agent_sock.clone();
     let ka_sock_for_wc = key_agent_sock;
 
     // Channel: control socket → WC server (pairing URI injection)
     let (pairing_tx, pairing_rx) = tokio::sync::mpsc::channel::<oc_walletconnect::PairingUri>(32);
+
+    // Approval channel shared between the WC method router (sender) and the
+    // Web UI queue (receiver). Created unconditionally so the daemon can wire
+    // it into the router even when the Web UI feature is compiled out.
+    let (approval_tx, approval_rx) = tokio::sync::mpsc::channel(64);
 
     rt.block_on(async {
         // Bind control socket (tokio UDS, mode 0600)
@@ -537,19 +586,39 @@ fn run_daemon() -> Result<(), CliError> {
         let ctrl_tx = pairing_tx.clone();
         let ctrl_task = tokio::spawn(control_socket_loop(ctrl_listener, ctrl_tx));
 
-        // Spawn WC v2 server (consumes pairing_rx)
+        // Spawn WC v2 server (consumes pairing_rx). When the Web UI is
+        // enabled, the approval channel is wired into the router so signing
+        // requests are gated by the browser approval flow.
         let wc_task = tokio::spawn(async move {
-            if let Err(e) = oc_netagent::run_server_controlled(
+            #[cfg(feature = "webui")]
+            let result = oc_netagent::run_server_controlled_with_approvals(
+                &ka_sock_for_wc,
+                &relay_url,
+                &state_dir_str,
+                pairing_rx,
+                Some(approval_tx),
+                None,
+            )
+            .await;
+            #[cfg(not(feature = "webui"))]
+            let result = oc_netagent::run_server_controlled(
                 &ka_sock_for_wc,
                 &relay_url,
                 &state_dir_str,
                 pairing_rx,
             )
-            .await
-            {
+            .await;
+            if let Err(e) = result {
                 eprintln!("WC v2 server error: {e}");
             }
         });
+
+        // --- Telemetry drain loop (P1 3.1) ---
+        // Pulls the Key-Agent's redacted span buffer over the UDS this side
+        // already owns, and hands each batch to the configured sink. Skipped
+        // when telemetry is off so an idle daemon does not poll a permanently
+        // empty buffer.
+        let telemetry_task = spawn_telemetry_drain(ka_sock_for_telemetry);
 
         // --- Web UI server (conditionally spawned) ---
         // Compiled out entirely without the `webui` feature: `webauthn-rs` is
@@ -561,13 +630,45 @@ fn run_daemon() -> Result<(), CliError> {
         let webui_handle: Option<tokio::task::JoinHandle<()>> = {
             let config = oc_core::Config::load_or_default();
             if config.webui.enabled {
-                let (approval_tx, approval_rx) = tokio::sync::mpsc::channel(64);
-                // Store approval_tx for later injection into WcMethodRouter (W1.9 plumbing).
-                // For now, the channel exists but isn't connected to the router yet.
-                let _ = approval_tx;
-
-                match oc_webui::run_webui_server(&config.webui, state_dir.clone(), approval_rx)
-                    .await
+                // Dual registration: a browser passkey registered in the Web
+                // UI is mirrored into the Key-Agent's PasskeyPubkeyStore so the
+                // same credential can authorize dApp signing. The closure is
+                // built here (in oc-cli, which links oc-keyagent) rather than
+                // inside oc-webui — pulling oc-keyagent into oc-webui would
+                // drag BoringSSL into that crate's graph and break the
+                // OpenSSL/BoringSSL link ordering in this binary.
+                let dual_register: Option<oc_webui::routes::auth::DualRegistrationFn> =
+                    Some(std::sync::Arc::new(move |cred_id, algorithm, pubkey| {
+                        use oc_keyagent::{
+                            KeyAgentRequest, KeyAgentRequestKind, frame::FrameClient,
+                            proto::RegisterPasskeyRequest,
+                        };
+                        let req = KeyAgentRequest {
+                            kind: Some(KeyAgentRequestKind::RegisterPasskey(
+                                RegisterPasskeyRequest {
+                                    wallet_id: String::new(),
+                                    credential_id: cred_id.to_string(),
+                                    algorithm: algorithm.to_string(),
+                                    public_key: pubkey.to_vec(),
+                                },
+                            )),
+                        };
+                        let sock = ka_sock_for_webui.clone();
+                        match FrameClient::new(sock).send_request(&req) {
+                            Ok(resp) if !resp.is_error() => true,
+                            other => {
+                                eprintln!("webui dual registration warning: {other:?}");
+                                false
+                            }
+                        }
+                    }));
+                match oc_webui::run_webui_server(
+                    &config.webui,
+                    state_dir.clone(),
+                    approval_rx,
+                    dual_register,
+                )
+                .await
                 {
                     Ok((handle, port)) => {
                         // Persist bound port for CLI `onecipher webui open`
@@ -640,10 +741,45 @@ fn run_daemon() -> Result<(), CliError> {
             }
         };
 
+        // Stop draining before the Key-Agent socket goes away, so shutdown
+        // does not log a burst of spurious connect failures.
+        if let Some(task) = telemetry_task {
+            task.abort();
+        }
+
         // Cleanup control socket
         let _ = std::fs::remove_file(&ctrl_sock_path);
         result
     })
+}
+
+/// Spawn the Key-Agent telemetry drain loop (P1 3.1).
+///
+/// Returns `None` when telemetry is disabled — there is no point polling a
+/// buffer that is never written to.
+///
+/// Tunables:
+/// - `OC_TELEMETRY_LEVEL=off` disables the whole subsystem (see [`init_telemetry`]).
+/// - `OC_TELEMETRY_INTERVAL_SECS` overrides the poll interval (default 5s, clamped to >= 1s so a
+///   typo cannot turn this into a busy loop).
+fn spawn_telemetry_drain(key_agent_sock: String) -> Option<tokio::task::JoinHandle<()>> {
+    if !oc_keyagent::telemetry::global_buffer().is_enabled() {
+        return None;
+    }
+
+    let interval = std::env::var("OC_TELEMETRY_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map_or(oc_netagent::DEFAULT_DRAIN_INTERVAL, |s| std::time::Duration::from_secs(s.max(1)));
+
+    let client = oc_netagent::KeyAgentClient::new(key_agent_sock);
+    let sink = std::sync::Arc::new(oc_netagent::StdoutSink);
+
+    eprintln!("telemetry: draining every {}s", interval.as_secs());
+    Some(tokio::spawn(async move {
+        oc_netagent::run_drain_loop(client, sink, interval, oc_netagent::TELEMETRY_BATCH_SIZE)
+            .await;
+    }))
 }
 
 /// Control socket accept loop — handles `CONNECT <uri>` and `PAIR [ttl]`

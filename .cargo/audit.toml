@@ -1,0 +1,23 @@
+# cargo-audit configuration.
+#
+# This file is read by `cargo audit` (invoked by the conformance
+# supply_chain.feature scenario and CI). It lets us record a *justified*
+# decision to accept an advisory instead of failing the build, so the gate
+# stays green without ever silently hiding a reachable vulnerability.
+
+[advisories]
+# RUSTSEC-2026-0235 — rkyv 0.7.46: "Insufficient archive validation can cause
+# out-of-bounds reads in archives containing Rc/Arc" (published 2026-05-13).
+#
+# Why this is accepted:
+# - rkyv is an OPTIONAL dependency of `rust_decimal`, activated only by the
+#   `rkyv` feature. OneCipher depends on rust_decimal solely for decimal
+#   arithmetic in `oc-pay` with the `serde` feature (`crates/oc-pay/Cargo.toml`).
+# - `cargo tree -p oc-pay -e features` confirms rkyv is never compiled in this
+#   workspace: the vulnerable archive-parsing code cannot be reached.
+# - The only published fix is rkyv >= 0.8.17, but rust_decimal 1.42.1 pins
+#   rkyv = "0.7.46" exactly, so the patched line is not resolvable here.
+#
+# Revisit when rust_decimal releases a version whose rkyv constraint allows
+# >= 0.8.17, then remove this entry. Tracked as a supply-chain follow-up.
+ignore = ["RUSTSEC-2026-0235"]

@@ -116,6 +116,16 @@ impl SessionStore {
         count
     }
 
+    /// Remove every session (auto-lock / lock trigger).
+    ///
+    /// Distinct from [`Self::gc`]: `gc` only drops sessions whose timeout has
+    /// elapsed, while `destroy_all` forces the whole vault lock immediately.
+    pub fn destroy_all(&self) -> usize {
+        let count = self.sessions.len();
+        self.sessions.clear();
+        count
+    }
+
     /// Number of active sessions.
     pub fn len(&self) -> usize {
         self.sessions.len()

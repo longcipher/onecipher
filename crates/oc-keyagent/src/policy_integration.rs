@@ -22,7 +22,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use oc_policy::{AlertSink, Decision, PayRequest, PolicyState, evaluate_11_step};
+use oc_policy::{
+    AlertSink, Decision, NoHostFacts, PayRequest, PolicyState, StrategyRegistry, WasmHostCalls,
+    evaluate_11_step, wasm_request_from_pay,
+};
 
 use crate::{
     audit::{AuditLog, EventType},
@@ -51,6 +54,9 @@ pub struct PolicyIntegration {
     state: PolicyState,
     state_path: PathBuf,
     audit: Arc<Mutex<AuditLog>>,
+    /// Runtime-loadable Wasm strategy plugins, consulted *after* the built-in
+    /// pipeline allows. Empty by default — strategies are opt-in.
+    strategies: StrategyRegistry,
 }
 
 impl PolicyIntegration {
@@ -84,7 +90,44 @@ impl PolicyIntegration {
         if policy.is_some() {
             state.policy = policy;
         }
-        Ok(Self { state, state_path: state_path.to_path_buf(), audit })
+        Ok(Self {
+            state,
+            state_path: state_path.to_path_buf(),
+            audit,
+            strategies: StrategyRegistry::new(),
+        })
+    }
+
+    /// Load Wasm strategy plugins from `<state_dir>/strategies/`.
+    ///
+    /// This is the hot-reload entry point: call it at startup and again on a
+    /// reload signal to pick up newly dropped `.wasm` / `.wat` files without
+    /// restarting the daemon. A missing directory is not an error — strategies
+    /// are optional.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KeyAgentError::Internal`] only if the directory exists but
+    /// cannot be read. Individual plugins that fail to compile are skipped
+    /// with a warning so one bad file cannot prevent startup.
+    pub fn load_strategies(&mut self, dir: &Path) -> Result<usize, KeyAgentError> {
+        let registry = StrategyRegistry::load_dir(dir)
+            .map_err(|e| KeyAgentError::Internal(format!("strategy registry load failed: {e}")))?;
+        let count = registry.len();
+        self.strategies = registry;
+        Ok(count)
+    }
+
+    /// Replace the strategy registry outright (used by tests and by the
+    /// daemon's reload path when plugins are sourced from somewhere other than
+    /// the default directory).
+    pub fn set_strategies(&mut self, registry: StrategyRegistry) {
+        self.strategies = registry;
+    }
+
+    /// The names of the currently loaded strategy plugins.
+    pub fn strategy_names(&self) -> Vec<String> {
+        self.strategies.names().map(str::to_string).collect()
     }
 
     /// Evaluate a `PayRequest` against the policy. Persists state,
@@ -98,6 +141,36 @@ impl PolicyIntegration {
     /// receives the decision as evaluated, even if the audit log write
     /// failed (the next evaluate will retry the append-only write).
     pub fn evaluate(&mut self, req: &PayRequest, session_key_id: &str) -> Decision {
+        self.evaluate_with_method(req, session_key_id, "pay")
+    }
+
+    /// [`Self::evaluate`], additionally telling the Wasm strategy plugins which
+    /// JSON-RPC method originated the request.
+    ///
+    /// `PayRequest` is payment-shaped and does not carry the method name, but a
+    /// strategy commonly wants to distinguish `eth_sendTransaction` from
+    /// `eth_signTypedData_v4`, so the caller supplies it here.
+    pub fn evaluate_with_method(
+        &mut self,
+        req: &PayRequest,
+        session_key_id: &str,
+        method: &str,
+    ) -> Decision {
+        self.evaluate_with_host(req, session_key_id, method, &NoHostFacts)
+    }
+
+    /// [`Self::evaluate_with_method`] with caller-supplied host facts.
+    ///
+    /// The plugins are consulted **only when the built-in pipeline allows**, so
+    /// a plugin can tighten policy but never overturn a core deny, and an
+    /// untrusted guest never observes an already-rejected request.
+    pub fn evaluate_with_host(
+        &mut self,
+        req: &PayRequest,
+        session_key_id: &str,
+        method: &str,
+        host: &dyn WasmHostCalls,
+    ) -> Decision {
         // 1. Capture prior counter + reasons to detect alert firing. `record_deny` inside
         //    `evaluate_11_step` clears `last_deny_reasons` when it fires the alert, so we must
         //    snapshot them BEFORE the call.
@@ -107,6 +180,17 @@ impl PolicyIntegration {
         // 2. Run the 11-step evaluation. `record_deny` inside this function fires `alert_sink` +
         //    resets the counter when the counter hits 3 (R78 / C-10).
         let decision = evaluate_11_step(req, session_key_id, &mut self.state);
+
+        // 2b. Consult the Wasm strategy plugins. Deny-wins, and only on allow.
+        let (decision, strategy_denial, strategy_warnings, strategy_errors) = self
+            .consult_strategies(
+                req,
+                method,
+                decision,
+                host,
+                prior_counter,
+                prior_deny_reasons.clone(),
+            );
 
         // 3. Persist PolicyState to disk (fsync + atomic rename, mode 0600). Errors are logged but
         //    do not change the decision.
@@ -130,9 +214,16 @@ impl PolicyIntegration {
             "asset": req.asset,
             "chain_id": req.chain_id,
             "recipient": req.recipient,
+            "method": method,
             "status": status,
             "deny_reason": deny_reason_value,
             "consecutive_deny_counter": self.state.consecutive_deny_counter,
+            // R76: a strategy plugin's verdict is part of the auditable record
+            // of *why* a request was allowed or denied, so it must be durable
+            // in the append-only log alongside the built-in decision.
+            "strategy_denied_by": strategy_denial,
+            "strategy_warnings": strategy_warnings,
+            "strategy_errors": strategy_errors,
         });
         if let Err(e) =
             audit_guard.append(EventType::PayX402, Some(session_key_id.to_string()), payload)
@@ -168,6 +259,76 @@ impl PolicyIntegration {
         }
 
         decision
+    }
+
+    /// Consult the Wasm strategy registry and fold its verdict into `decision`.
+    ///
+    /// Returns `(final_decision, denied_by, warnings, errors)` where the last
+    /// three are JSON values ready for the audit payload.
+    ///
+    /// Ordering guarantee: if `decision` is already a `Deny`, or no plugins are
+    /// loaded, the guests are **not** run at all. This is what makes the plugin
+    /// layer strictly additive — it can only tighten policy.
+    fn consult_strategies(
+        &mut self,
+        req: &PayRequest,
+        method: &str,
+        decision: Decision,
+        host: &dyn WasmHostCalls,
+        prior_counter: u32,
+        prior_reasons: Vec<oc_policy::DenyReason>,
+    ) -> (Decision, serde_json::Value, serde_json::Value, serde_json::Value) {
+        let null = serde_json::Value::Null;
+        if matches!(decision, Decision::Deny(_)) || self.strategies.is_empty() {
+            return (decision, null.clone(), null.clone(), null);
+        }
+
+        let wasm_req = wasm_request_from_pay(req, method);
+        let outcome = self.strategies.evaluate(&wasm_req, host);
+
+        let warnings = if outcome.warnings.is_empty() {
+            null.clone()
+        } else {
+            serde_json::json!(
+                outcome
+                    .warnings
+                    .iter()
+                    .map(|(p, m)| serde_json::json!({ "plugin": p, "message": m }))
+                    .collect::<Vec<_>>()
+            )
+        };
+        let errors = if outcome.errors.is_empty() {
+            null.clone()
+        } else {
+            serde_json::json!(
+                outcome
+                    .errors
+                    .iter()
+                    .map(|(p, e)| serde_json::json!({ "plugin": p, "error": e }))
+                    .collect::<Vec<_>>()
+            )
+        };
+
+        match &outcome.denied_by {
+            Some((plugin, reason, message)) => {
+                let denial = serde_json::json!({
+                    "plugin": plugin,
+                    "reason": reason,
+                    "message": message,
+                });
+                // The 11-step flow already committed the allow (spend +
+                // rate-limit slots). Undo it and record a deny instead, so a
+                // plugin-blocked request neither consumes budget nor escapes
+                // the R78 consecutive-deny alert.
+                let now_ms = self.state.now_ms();
+                self.state.rollback_allow(req, now_ms, prior_counter, prior_reasons);
+                self.state.record_deny(oc_policy::DenyReason::Unknown, &req.session_key_id, now_ms);
+                // R80 caps `DenyReason` at 9 variants, so a plugin deny maps to
+                // `Unknown`; the plugin identity survives in the audit payload.
+                (Decision::Deny(oc_policy::DenyReason::Unknown), denial, warnings, errors)
+            }
+            None => (decision, null, warnings, errors),
+        }
     }
 
     /// Current consecutive deny counter (for testing / observability).

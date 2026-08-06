@@ -330,6 +330,58 @@ impl PolicyState {
         self.last_deny_reasons.clear();
     }
 
+    /// Undo the most recent [`Self::record_allow`] for `req`.
+    ///
+    /// Needed when a later gate — the v3 Cedar rules or a Wasm strategy plugin —
+    /// overturns an allow that the 11-step flow already committed. Without this,
+    /// a request that is ultimately **blocked** would still consume budget and
+    /// occupy a rate-limit slot, so a plugin-denied burst would silently
+    /// exhaust the session key's daily cap.
+    ///
+    /// Only the entries this call actually appended are removed (the last entry
+    /// of each window, and only when it matches `now_ms` / `req.amount_usd`), so
+    /// calling it without a preceding `record_allow` is a no-op rather than a
+    /// corruption.
+    ///
+    /// `record_allow` also *clears* the consecutive-deny counter and reason
+    /// list, so the caller must pass the values captured **before** the
+    /// `evaluate_11_step` call in `prior_counter` / `prior_reasons`. Restoring
+    /// them is what lets the caller's subsequent [`Self::record_deny`] see the
+    /// true streak and fire the R78 alert on the third consecutive deny.
+    pub fn rollback_allow(
+        &mut self,
+        req: &PayRequest,
+        now_ms: u64,
+        prior_counter: u32,
+        prior_reasons: Vec<DenyReason>,
+    ) {
+        self.local_spent_usd = (self.local_spent_usd - req.amount_usd).max(0.0);
+        if self.minutely_window.back() == Some(&now_ms) {
+            self.minutely_window.pop_back();
+        }
+        if self.hourly_window.back() == Some(&now_ms) {
+            self.hourly_window.pop_back();
+        }
+        if self.daily_window.back() == Some(&(now_ms, req.amount_usd)) {
+            self.daily_window.pop_back();
+        }
+        if self.monthly_window.back() == Some(&(now_ms, req.amount_usd)) {
+            self.monthly_window.pop_back();
+        }
+        // Undo `record_allow`'s streak reset.
+        self.consecutive_deny_counter = prior_counter;
+        self.last_deny_reasons = prior_reasons;
+    }
+
+    /// The `now_ms` value [`evaluate_11_step`] would use for this state.
+    ///
+    /// Exposed so callers that need to pair [`Self::record_allow`] with
+    /// [`Self::rollback_allow`] can reproduce the exact timestamp, including
+    /// under a test `now_override`.
+    pub fn now_ms(&self) -> u64 {
+        self.now_override.unwrap_or_else(current_unix).saturating_mul(1000)
+    }
+
     /// Record a DENY decision: update `last_deny_at`, increment `consecutive_deny_counter`,
     /// push reason to `last_deny_reasons`. If counter reaches 3, fire `AlertSink` and reset.
     pub fn record_deny(&mut self, reason: DenyReason, session_key_id: &str, now_ms: u64) {

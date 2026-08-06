@@ -18,6 +18,25 @@ pipelining = true
 # Retry failed network fetches a few times before giving up.
 retry = 3
 
+# The final binary links BOTH BoringSSL (via hpx's boring-tls) AND OpenSSL
+# (via webauthn-rs's openssl). Both emit `-lssl -lcrypto`, and the linker
+# resolves `-lcrypto` to the FIRST matching library in `-L` order — so when
+# openssl-sys links the bare `libssl`/`libcrypto`, it can resolve to
+# BoringSSL's static `libcrypto.a` instead of homebrew's, which lacks
+# OpenSSL 3.2+ symbols (`_ERR_get_error_all`). Versioned library names
+# (`libcrypto.3.dylib`) are unique to Homebrew's OpenSSL keg and sidestep
+# the collision entirely.
+#
+# macOS-only: the versioned dylib names only exist in Homebrew's keg layout.
+# `force = false` means a caller-set env var wins, and `relative = false`
+# keeps the path absolute. Linux/Windows builds never see these because
+# openssl-sys on those targets resolves via pkg-config without the BoringSSL
+# -L ordering collision.
+[env]
+OPENSSL_LIBS = { value = "crypto.3:ssl.3", relative = false, force = false }
+OPENSSL_LIB_DIR = { value = "/opt/homebrew/opt/openssl@3/lib", relative = false, force = false }
+OPENSSL_INCLUDE_DIR = { value = "/opt/homebrew/opt/openssl@3/include", relative = false, force = false }
+
 [registries.crates-io]
 # Use the sparse protocol (default in 1.68+) for faster index fetches.
 protocol = "sparse"

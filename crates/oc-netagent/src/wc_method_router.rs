@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use oc_core::{ChainIdExt, TxSimulation};
+use oc_core::{ChainIdExt, TxSimulation, approval_log::ApprovalLog};
 use oc_keyagent::{
     KeyAgentRequest, KeyAgentRequestKind, KeyAgentResponse, KeyAgentResponseKind,
     proto::{
@@ -32,7 +32,6 @@ use crate::{
     approval::{
         ApprovalChannel, ApprovalDecision, PendingApproval, RiskLevel, RiskReason, RiskSource,
     },
-    approval_log::ApprovalLog,
     key_agent_client::KeyAgentClient,
 };
 
@@ -142,9 +141,15 @@ impl WcMethodRouter {
             expires_at_unix: now_secs + self.approval_timeout.as_secs(),
         };
 
-        // Log pending
+        // Log pending (sync fs append — run on the blocking pool to avoid
+        // stalling the async runtime on disk I/O).
         if let Some(log) = &self.approval_log {
-            if let Err(e) = log.append_pending(&pending).await {
+            let log = log.clone();
+            let pending = pending.clone();
+            if let Err(e) = tokio::task::spawn_blocking(move || log.append_pending(&pending))
+                .await
+                .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
+            {
                 tracing::warn!(error = %e, "failed to log pending approval");
             }
         }
@@ -152,14 +157,19 @@ impl WcMethodRouter {
         let id = pending.id;
         let decision = approval_channel.request(pending, self.approval_timeout).await;
 
-        // Log resolved
+        // Log resolved (sync fs append — run on the blocking pool).
         if let Some(log) = &self.approval_log {
             let (decision_str, reason) = match &decision {
                 ApprovalDecision::Approve => ("approved", String::new()),
                 ApprovalDecision::Reject { reason } => ("rejected", reason.clone()),
                 ApprovalDecision::Timeout => ("timeout", String::new()),
             };
-            if let Err(e) = log.append_resolved(id, decision_str, &reason).await {
+            let log = log.clone();
+            if let Err(e) =
+                tokio::task::spawn_blocking(move || log.append_resolved(id, decision_str, &reason))
+                    .await
+                    .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
+            {
                 tracing::warn!(error = %e, "failed to log resolved approval");
             }
         }

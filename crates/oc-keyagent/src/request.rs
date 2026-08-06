@@ -10,10 +10,10 @@
 //! (folded into `ListWallets` since both use `Empty`) RPCs are omitted.
 
 use crate::proto::{
-    CreateSessionKeyRequest, GenerateChallengeRequest, GenerateTotpRequest, GetBalanceRequest,
-    GetPaymentHistoryRequest, GetSecretRequest, ListSecretsRequest, PayX402Request,
-    RegisterPasskeyRequest, RevokeSessionKeyRequest, SignMessageRequest, SignTransactionRequest,
-    SignTypedDataRequest, SignUserOpRequest, UnlockVaultRequest,
+    CreateSessionKeyRequest, DrainTelemetryRequest, GenerateChallengeRequest, GenerateTotpRequest,
+    GetBalanceRequest, GetPaymentHistoryRequest, GetSecretRequest, ListSecretsRequest,
+    PayX402Request, RegisterPasskeyRequest, RevokeSessionKeyRequest, SignMessageRequest,
+    SignTransactionRequest, SignTypedDataRequest, SignUserOpRequest, UnlockVaultRequest,
 };
 
 /// A request sent from the Network-Agent to the Key-Agent over UDS.
@@ -29,7 +29,7 @@ pub struct KeyAgentRequest {
     /// The request payload (exactly one variant set).
     #[prost(
         oneof = "KeyAgentRequestKind",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18"
     )]
     pub kind: Option<KeyAgentRequestKind>,
 }
@@ -106,6 +106,14 @@ pub enum KeyAgentRequestKind {
     /// R56: same as GetSecret — Key-Agent returns "not implemented".
     #[prost(message, tag = "17")]
     GenerateTotp(GenerateTotpRequest),
+    /// `AgentService.DrainTelemetry` — pull buffered telemetry records (P1 3.1).
+    ///
+    /// Read-only and side-effect free apart from emptying the ring buffer.
+    /// Deliberately NOT Passkey-gated: it carries no key material and no
+    /// user-controlled field values (see `telemetry::SAFE_FIELDS` — everything
+    /// outside the allowlist is redacted before it ever reaches the buffer).
+    #[prost(message, tag = "18")]
+    DrainTelemetry(DrainTelemetryRequest),
 }
 
 #[cfg(test)]

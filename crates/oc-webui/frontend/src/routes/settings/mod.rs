@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-use crate::cache::{Scene, read_or_fetch};
+use crate::cache::{Scene, invalidate_scene, read_or_fetch};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
@@ -11,8 +11,8 @@ pub struct Settings {
 
 #[component]
 pub fn SettingsPage() -> impl IntoView {
-    let settings = read_or_fetch::<Settings, _>(Scene::Settings, "current", async {
-        crate::api::get_json::<Settings>("/settings").await
+    let settings = read_or_fetch(Scene::Settings, "current", || {
+        crate::api::get_json::<Settings>("/settings")
     });
     let (saved, set_saved) = signal(false);
 
@@ -54,8 +54,13 @@ pub fn SettingsPage() -> impl IntoView {
                                 on:click=move |_| {
                                     leptos::task::spawn_local(async move {
                                         let body = serde_json::json!({"auto_lock_secs": 300});
-                                        let _ = crate::api::patch_json::<_, serde_json::Value>("/settings", &body).await;
-                                        set_saved.set(true);
+                                        if crate::api::patch_json::<_, serde_json::Value>("/settings", &body).await.is_ok() {
+                                            // Re-read from the daemon rather than
+                                            // trusting the local patch: the server
+                                            // may clamp or reject fields.
+                                            invalidate_scene(Scene::Settings);
+                                            set_saved.set(true);
+                                        }
                                     });
                                 }
                                 style="padding:0.75rem 1.5rem;background:var(--oc-accent);color:white;border:none;border-radius:var(--oc-radius);font-weight:600;cursor:pointer;"

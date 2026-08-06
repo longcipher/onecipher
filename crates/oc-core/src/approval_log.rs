@@ -2,11 +2,17 @@
 //!
 //! Events are stored as JSONL in `~/.onecipher/logs/approval_queue.jsonl`.
 //! On startup, unresolved pending approvals are replayed back into the queue.
+//!
+//! This is a **synchronous** implementation (std::fs) deliberately placed in
+//! `oc-core` (a zero-network, zero-async types crate) so that both `oc-netagent`
+//! and `oc-webui` can share it without pulling `tokio`/`hpx`/`boring` into the
+//! Web UI dependency graph. The original async (tokio) version lived in
+//! `oc-netagent`; it was moved here and made sync so the Web UI can persist
+//! approvals without depending on the network agent.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
 use crate::approval::PendingApproval;
@@ -28,9 +34,9 @@ impl ApprovalLog {
     /// Open or create the approval log at the given directory.
     ///
     /// Creates `<dir>/logs/approval_queue.jsonl` with mode 0600 if it doesn't exist.
-    pub async fn open(state_dir: &Path) -> std::io::Result<Self> {
+    pub fn open(state_dir: &Path) -> std::io::Result<Self> {
         let logs_dir = state_dir.join("logs");
-        tokio::fs::create_dir_all(&logs_dir).await?;
+        std::fs::create_dir_all(&logs_dir)?;
         let path = logs_dir.join("approval_queue.jsonl");
         // Touch the file with restrictive permissions. This log is append-only,
         // so we must NOT use write-temp-then-rename — replacing the inode would
@@ -49,7 +55,7 @@ impl ApprovalLog {
     }
 
     /// Append a `pending` event for a new approval.
-    pub async fn append_pending(&self, approval: &PendingApproval) -> std::io::Result<()> {
+    pub fn append_pending(&self, approval: &PendingApproval) -> std::io::Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -59,16 +65,11 @@ impl ApprovalLog {
             at: now,
             approval: Box::new(approval.clone()),
         };
-        self.append_event(&event).await
+        self.append_event(&event)
     }
 
     /// Append a `resolved` event.
-    pub async fn append_resolved(
-        &self,
-        id: Uuid,
-        decision: &str,
-        reason: &str,
-    ) -> std::io::Result<()> {
+    pub fn append_resolved(&self, id: Uuid, decision: &str, reason: &str) -> std::io::Result<()> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -79,12 +80,12 @@ impl ApprovalLog {
             decision: decision.to_string(),
             reason: reason.to_string(),
         };
-        self.append_event(&event).await
+        self.append_event(&event)
     }
 
     /// Replay all unresolved (pending without matching resolved) approvals.
-    pub async fn replay_unresolved(&self) -> std::io::Result<Vec<PendingApproval>> {
-        let content = tokio::fs::read_to_string(&self.path).await?;
+    pub fn replay_unresolved(&self) -> std::io::Result<Vec<PendingApproval>> {
+        let content = std::fs::read_to_string(&self.path)?;
         let mut pending_map: std::collections::HashMap<Uuid, PendingApproval> =
             std::collections::HashMap::new();
 
@@ -110,8 +111,8 @@ impl ApprovalLog {
 
     /// Remove resolved entries older than `days` from the log,
     /// along with their matching pending events.
-    pub async fn gc_older_than(&self, days: u64) -> std::io::Result<usize> {
-        let content = tokio::fs::read_to_string(&self.path).await?;
+    pub fn gc_older_than(&self, days: u64) -> std::io::Result<usize> {
+        let content = std::fs::read_to_string(&self.path)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -155,31 +156,26 @@ impl ApprovalLog {
                 new_content.push('\n');
             }
             // Rebuild the file atomically. A torn write during compaction
-            // would lose approval records; the old code used `tokio::fs::write`
+            // would lose approval records; the old code used `fs::write`
             // which truncates first.
-            let p = self.path.clone();
-            tokio::task::spawn_blocking(move || {
-                oc_core::paths::write_atomic(
-                    &p,
-                    new_content.as_bytes(),
-                    oc_core::paths::MODE_PRIVATE_FILE,
-                )
-            })
-            .await
-            .map_err(std::io::Error::other)??;
+            crate::paths::write_atomic(
+                &self.path,
+                new_content.as_bytes(),
+                crate::paths::MODE_PRIVATE_FILE,
+            )?;
         }
 
         Ok(removed)
     }
 
-    async fn append_event(&self, event: &ApprovalLogEvent) -> std::io::Result<()> {
+    fn append_event(&self, event: &ApprovalLogEvent) -> std::io::Result<()> {
         let mut line = serde_json::to_string(event).map_err(std::io::Error::other)?;
         line.push('\n');
 
-        let mut file =
-            tokio::fs::OpenOptions::new().create(true).append(true).open(&self.path).await?;
-        file.write_all(line.as_bytes()).await?;
-        file.flush().await?;
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        use std::io::Write as _;
+        file.write_all(line.as_bytes())?;
+        file.flush()?;
         Ok(())
     }
 }
@@ -205,30 +201,30 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_append_and_replay() {
+    #[test]
+    fn test_append_and_replay() {
         let dir = tempfile::tempdir().unwrap();
-        let log = ApprovalLog::open(dir.path()).await.unwrap();
+        let log = ApprovalLog::open(dir.path()).unwrap();
 
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
 
-        log.append_pending(&make_approval(id1)).await.unwrap();
-        log.append_pending(&make_approval(id2)).await.unwrap();
-        log.append_resolved(id1, "approved", "").await.unwrap();
+        log.append_pending(&make_approval(id1)).unwrap();
+        log.append_pending(&make_approval(id2)).unwrap();
+        log.append_resolved(id1, "approved", "").unwrap();
 
-        let unresolved = log.replay_unresolved().await.unwrap();
+        let unresolved = log.replay_unresolved().unwrap();
         assert_eq!(unresolved.len(), 1);
         assert_eq!(unresolved[0].id, id2);
     }
 
-    #[tokio::test]
-    async fn test_gc_removes_old_resolved() {
+    #[test]
+    fn test_gc_removes_old_resolved() {
         let dir = tempfile::tempdir().unwrap();
-        let log = ApprovalLog::open(dir.path()).await.unwrap();
+        let log = ApprovalLog::open(dir.path()).unwrap();
 
         let id1 = Uuid::new_v4();
-        log.append_pending(&make_approval(id1)).await.unwrap();
+        log.append_pending(&make_approval(id1)).unwrap();
 
         // Manually write an old resolved event
         let old_event = ApprovalLogEvent::Resolved {
@@ -239,29 +235,27 @@ mod tests {
         };
         let mut line = serde_json::to_string(&old_event).unwrap();
         line.push('\n');
-        tokio::fs::write(dir.path().join("logs/approval_queue.jsonl"), line.as_bytes())
-            .await
-            .unwrap();
+        std::fs::write(dir.path().join("logs/approval_queue.jsonl"), line.as_bytes()).unwrap();
 
-        let removed = log.gc_older_than(7).await.unwrap();
+        let removed = log.gc_older_than(7).unwrap();
         assert_eq!(removed, 1);
 
         let content =
-            tokio::fs::read_to_string(dir.path().join("logs/approval_queue.jsonl")).await.unwrap();
+            std::fs::read_to_string(dir.path().join("logs/approval_queue.jsonl")).unwrap();
         assert!(content.trim().is_empty());
     }
 
-    #[tokio::test]
-    async fn test_replay_with_no_resolved_returns_all_pending() {
+    #[test]
+    fn test_replay_with_no_resolved_returns_all_pending() {
         let dir = tempfile::tempdir().unwrap();
-        let log = ApprovalLog::open(dir.path()).await.unwrap();
+        let log = ApprovalLog::open(dir.path()).unwrap();
 
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
-        log.append_pending(&make_approval(id1)).await.unwrap();
-        log.append_pending(&make_approval(id2)).await.unwrap();
+        log.append_pending(&make_approval(id1)).unwrap();
+        log.append_pending(&make_approval(id2)).unwrap();
 
-        let unresolved = log.replay_unresolved().await.unwrap();
+        let unresolved = log.replay_unresolved().unwrap();
         assert_eq!(unresolved.len(), 2);
     }
 }

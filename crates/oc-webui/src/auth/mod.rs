@@ -6,3 +6,4 @@ pub mod webauthn;
 
 pub use bootstrap::BootstrapToken;
 pub use session::{AuthSession, SessionStore};
+pub use webauthn::{StoredCredential, WebAuthnManager};

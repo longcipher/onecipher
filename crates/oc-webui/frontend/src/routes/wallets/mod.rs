@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use leptos_router::components::A;
 
-use crate::cache::{Scene, read_or_fetch};
+use crate::cache::{Scene, invalidate_scene, read_or_fetch};
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WalletInfo {
@@ -12,8 +12,8 @@ pub struct WalletInfo {
 
 #[component]
 pub fn WalletsPage() -> impl IntoView {
-    let wallets = read_or_fetch::<Vec<WalletInfo>, _>(Scene::Wallets, "list", async {
-        crate::api::get_json::<Vec<WalletInfo>>("/wallets").await
+    let wallets = read_or_fetch(Scene::Wallets, "list", || {
+        crate::api::get_json::<Vec<WalletInfo>>("/wallets")
     });
 
     view! {
@@ -88,7 +88,12 @@ pub fn WalletCreate() -> impl IntoView {
                 "label": if label_val.is_empty() { None } else { Some(label_val) },
             });
             match crate::api::post_json::<_, serde_json::Value>("/wallets", &body).await {
-                Ok(_) => set_created.set(true),
+                Ok(_) => {
+                    // The wallet list is cached; without this the new wallet
+                    // is missing when the user navigates back to it.
+                    invalidate_scene(Scene::Wallets);
+                    set_created.set(true);
+                }
                 Err(e) => set_error.set(Some(e.to_string())),
             }
             set_loading.set(false);
@@ -176,7 +181,10 @@ pub fn WalletImport() -> impl IntoView {
                 "mnemonic": mnemonic_val,
             });
             match crate::api::post_json::<_, serde_json::Value>("/wallets/import", &body).await {
-                Ok(_) => set_imported.set(true),
+                Ok(_) => {
+                    invalidate_scene(Scene::Wallets);
+                    set_imported.set(true);
+                }
                 Err(e) => set_error.set(Some(e.to_string())),
             }
             set_loading.set(false);

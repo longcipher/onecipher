@@ -503,6 +503,42 @@ pub struct GenerateTotpRequest {
     pub api_token: String,
 }
 
+// ---------------------------------------------------------------------------
+// Cross-boundary observability (P1 3.1)
+// ---------------------------------------------------------------------------
+
+/// `AgentService.DrainTelemetry` — pull buffered telemetry records.
+///
+/// The Key-Agent cannot export spans itself (R56: no tokio / reqwest / OTLP
+/// exporter). Instead it buffers structured records in a bounded ring and the
+/// Network-Agent drains them over the control UDS it is already connected to.
+#[derive(Clone, Copy, PartialEq, Eq, prost::Message)]
+pub struct DrainTelemetryRequest {
+    /// Maximum number of records to return in this batch. `0` means "use the
+    /// server default" so an un-set field is not interpreted as "drain none".
+    #[prost(uint32, tag = "1")]
+    pub max_records: u32,
+}
+
+/// Response to [`DrainTelemetryRequest`].
+///
+/// The batch is carried as a JSON document rather than a nested prost message
+/// so the record schema can evolve without a wire break: the Network-Agent
+/// deserializes it into `oc_keyagent::telemetry::TelemetryBatch`.
+#[derive(Clone, PartialEq, Eq, prost::Message)]
+pub struct DrainTelemetryResponse {
+    /// JSON-encoded `TelemetryBatch`.
+    #[prost(string, tag = "1")]
+    pub batch_json: String,
+    /// Number of records in `batch_json` (denormalized so a caller can decide
+    /// whether to drain again without parsing the payload).
+    #[prost(uint32, tag = "2")]
+    pub record_count: u32,
+    /// Records dropped by ring-buffer overflow since the previous drain.
+    #[prost(uint64, tag = "3")]
+    pub dropped: u64,
+}
+
 // ===========================================================================
 // Enums
 // ===========================================================================

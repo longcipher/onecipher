@@ -11,12 +11,12 @@
 #![forbid(unsafe_code)]
 
 pub mod approval;
-pub mod approval_log;
 pub mod error;
 pub mod intent;
 pub mod key_agent_client;
 pub mod rpc_client;
 pub mod sim;
+pub mod telemetry_drain;
 pub mod wc_method_router;
 pub mod wc_pairing;
 pub mod wc_session_store;
@@ -31,8 +31,15 @@ pub use intent::{
     MessageEncoding, MockRpcClient, RpcClient, RpcError, execute_intent, simulate_intent,
 };
 pub use key_agent_client::KeyAgentClient;
+// The approval log (JSONL WAL for crash recovery) lives in `oc-core` so the
+// Web UI can persist approvals without depending on this network crate.
+pub use oc_core::approval_log::ApprovalLog;
 pub use rpc_client::HpxRpcClient;
 pub use sim::{SimError, simulate_evm_tx};
+pub use telemetry_drain::{
+    DEFAULT_BATCH_SIZE as TELEMETRY_BATCH_SIZE, DEFAULT_DRAIN_INTERVAL, DrainStats, MemorySink,
+    StdoutSink, TelemetrySink, drain_once, drain_until_empty, run_drain_loop,
+};
 pub use wc_method_router::WcMethodRouter;
 pub use wc_pairing::{PairingError, generate_pairing_uri};
 pub use wc_session_store::{SessionStore, SessionStoreError};
@@ -93,10 +100,63 @@ pub async fn run_server_controlled(
     key_agent_sock: &str,
     relay_url: &str,
     state_dir: &str,
+    pairing_rx: tokio::sync::mpsc::Receiver<oc_walletconnect::PairingUri>,
+) -> Result<(), NetAgentError> {
+    run_server_controlled_with_approvals(
+        key_agent_sock,
+        relay_url,
+        state_dir,
+        pairing_rx,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Run the WC v2 wallet server with a control channel for dynamic pairing
+/// injection, plus an optional Web UI approval channel and persistent log.
+///
+/// This is the full-featured entry point used by the daemon. When `approvals`
+/// is `Some`, signing requests are gated by the Web UI approval flow; the
+/// `approval_log` (if provided) persists pending/resolved approvals for
+/// daemon-restart recovery. The plain [`run_server_controlled`] is a thin
+/// wrapper passing `None` for both.
+pub async fn run_server_controlled_with_approvals(
+    key_agent_sock: &str,
+    relay_url: &str,
+    state_dir: &str,
     mut pairing_rx: tokio::sync::mpsc::Receiver<oc_walletconnect::PairingUri>,
+    approvals: Option<
+        tokio::sync::mpsc::Sender<(
+            oc_core::approval::PendingApproval,
+            tokio::sync::oneshot::Sender<oc_core::approval::ApprovalDecision>,
+        )>,
+    >,
+    approval_log: Option<std::sync::Arc<oc_core::approval_log::ApprovalLog>>,
 ) -> Result<(), NetAgentError> {
     let key_agent = KeyAgentClient::new(key_agent_sock);
-    let router = WcMethodRouter::new(key_agent);
+    let router = match approvals {
+        Some(tx) => {
+            let (channel, mut rx) = ApprovalChannel::new(64);
+            // Bridge the router's approval channel into the daemon's mpsc
+            // sender that feeds the Web UI queue.
+            tokio::spawn(async move {
+                while let Some((approval, resp_tx)) = rx.recv().await {
+                    if tx.send((approval, resp_tx)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+            WcMethodRouter::with_approval(
+                key_agent,
+                channel,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                std::time::Duration::from_secs(300),
+                approval_log,
+            )
+        }
+        None => WcMethodRouter::new(key_agent),
+    };
     let store = SessionStore::open(state_dir)?;
 
     let cfg = oc_walletconnect::WcWalletConfig {

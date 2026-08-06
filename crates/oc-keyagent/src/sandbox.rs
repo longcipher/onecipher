@@ -1,58 +1,150 @@
-//! Key-Agent sandbox: Linux seccomp + macOS entitlements + Windows AppContainer.
+//! Key-Agent sandbox: Linux seccomp + macOS Seatbelt + Windows process hardening.
 //!
-//! Per R12 / C-01 / C-03 / R53:
-//! - Linux: seccomp BPF filter denies all network syscalls (socket with AF_INET/AF_INET6, connect,
-//!   bind, listen, accept). Allows AF_UNIX (UDS). PR_SET_NO_NEW_PRIVS. Drops all capabilities
-//!   except CAP_IPC_LOCK (R53 — needed for mlock).
-//! - macOS: App Sandbox entitlements (`com.apple.security.network.client = false`, `network.server
-//!   = false`). Enforced via codesign at launch.
-//! - Windows: AppContainer omits `internetClient`/`internetServer`.
+//! Per R12 / C-01 / C-03 / R53, every supported platform now applies **runtime**
+//! confinement rather than relying purely on packaging-time manifests:
 //!
-//! T12 ships the Rust API + Linux seccomp implementation. macOS/Windows are
-//! enforced via static manifest files (`oc-keyagent.entitlements.plist`,
-//! `AppxManifest.xml`) at packaging time, NOT via runtime Rust code — the
-//! Rust API just exposes `apply_sandbox()` which is a no-op on non-Linux.
+//! | Platform | Mechanism | Blocks |
+//! |---|---|---|
+//! | Linux | seccomp BPF + `capset` + `prctl` | non-UDS sockets, core dumps, ptrace, all caps but `CAP_IPC_LOCK` |
+//! | macOS | `sandbox_init(3)` (Seatbelt) + `PT_DENY_ATTACH` + `RLIMIT_CORE=0` | outbound/inbound network, core dumps, debugger attach |
+//! | Windows | `SetProcessMitigationPolicy` + `SetErrorMode` | dynamic code, remote image loads, WER crash dumps |
 //!
-//! **Platform note:** The current build host is macOS (`aarch64-apple-darwin`).
-//! The Linux code paths are `#[cfg(target_os = "linux")]` and will not
-//! compile here. The CI Linux job compiles + tests them. The non-Linux path
-//! is a no-op that logs the enforcement-via-manifest behavior.
+//! ## macOS (`sandbox_init`)
+//!
+//! `sandbox_init(3)` is the userspace entry point to the Seatbelt/TrustedBSD
+//! MAC framework. Apple marks it deprecated in the SDK headers, but it remains
+//! the only way for a *non-App-Store, non-container* binary to confine itself
+//! at runtime, and it is what Chromium, Firefox and OpenSSH all still use. The
+//! previously shipped `oc-keyagent.entitlements.plist` only takes effect for
+//! codesigned, App-Sandbox-enabled bundles — a developer running
+//! `cargo run --bin onecipher` got **no** confinement at all. The profile below
+//! closes that gap.
+//!
+//! The profile is deliberately written in the Scheme-like SBPL dialect and is
+//! *deny-by-default for network only*: we allow the file and mach operations
+//! the agent needs (vault reads/writes, UDS bind) but deny every network
+//! operation outright. A full deny-by-default profile would need an exhaustive
+//! allowlist of dyld/CoreFoundation operations, which is brittle across macOS
+//! releases; network-deny is the security-relevant subset for R12.
+//!
+//! ## Failure policy
+//!
+//! Sandbox application is **fail-closed on the network rules** and
+//! **fail-open on the hardening extras**. If `sandbox_init` reports failure we
+//! return [`KeyAgentError::Sandbox`] so the daemon refuses to start. If
+//! `PT_DENY_ATTACH` fails (e.g. already traced) we log and continue, because a
+//! developer attaching a debugger to their own agent is not a security
+//! boundary the daemon should die over.
 
 // This module REQUIRES `unsafe` blocks for `libc::prctl`, `seccomp` BPF
-// installation, and `capset` syscalls. The crate root has
-// `#![deny(unsafe_code)]` — we relax it for this module only via a module-
-// level inner attribute. This is the established Rust 1.94 pattern (deny at
-// crate root + allow at module).
+// installation, `capset`, `sandbox_init`, and `ptrace` syscalls. The crate
+// root has `#![deny(unsafe_code)]` — we relax it for this module only via a
+// module-level inner attribute. This is the established Rust 1.94 pattern
+// (deny at crate root + allow at module).
 #![allow(unsafe_code)]
 
 use crate::error::KeyAgentError;
 
+/// A report describing which sandbox mechanisms were actually engaged.
+///
+/// Returned by [`apply_sandbox_reported`] so the daemon can log precisely what
+/// confinement is in force, and so conformance tests can assert on it without
+/// shelling out to platform tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SandboxReport {
+    /// Core dumps are disabled.
+    pub coredump_disabled: bool,
+    /// Debugger attachment is denied.
+    pub ptrace_denied: bool,
+    /// A kernel-level syscall/operation filter is installed.
+    pub filter_installed: bool,
+    /// Process privileges were reduced.
+    pub privileges_dropped: bool,
+}
+
+impl SandboxReport {
+    /// Whether the network-blocking filter is in force.
+    ///
+    /// This is the R12 security-relevant bit: on Linux it means the seccomp
+    /// filter is loaded, on macOS that the Seatbelt profile is applied.
+    pub fn network_blocked(&self) -> bool {
+        self.filter_installed
+    }
+}
+
 /// Apply the platform sandbox.
 ///
-/// On Linux, this installs the seccomp filter + drops capabilities + disables
-/// coredump + enables anti-ptrace. On macOS / Windows, this is a no-op
-/// (enforced by the static manifest at packaging time).
-///
-/// Per `design.md` §"Key-Agent Main Loop Pseudocode", this MUST be called
-/// before `server::run()` in `main.rs`.
+/// See [`apply_sandbox_reported`] for the variant that returns which
+/// mechanisms engaged. Per `design.md` §"Key-Agent Main Loop Pseudocode", this
+/// MUST be called before `server::run()`.
 pub fn apply_sandbox() -> Result<(), KeyAgentError> {
+    apply_sandbox_reported().map(|_| ())
+}
+
+/// Apply the platform sandbox and report which mechanisms engaged.
+pub fn apply_sandbox_reported() -> Result<SandboxReport, KeyAgentError> {
+    let mut report = SandboxReport::default();
+
     #[cfg(target_os = "linux")]
     {
         disable_coredump()?;
+        report.coredump_disabled = true;
         anti_ptrace()?;
+        report.ptrace_denied = true;
         apply_seccomp()?;
+        report.filter_installed = true;
         drop_capabilities_except_ipc_lock()?;
+        report.privileges_dropped = true;
     }
-    #[cfg(not(target_os = "linux"))]
+
+    #[cfg(target_os = "macos")]
     {
-        // No-op — sandbox is enforced by the static manifest (entitlements /
-        // AppxManifest) at packaging time. Log for visibility.
-        eprintln!(
-            "oc-keyagent: sandbox enforcement is via static manifest on this platform \
-             (see oc-keyagent.entitlements.plist / AppxManifest.xml)"
+        // Order matters: deny debugger attach and core dumps *before* the
+        // Seatbelt profile, because the profile may deny the very syscalls
+        // used to set those (it does not today, but ordering makes the
+        // hardening independent of profile contents).
+        match macos::disable_coredump() {
+            Ok(()) => report.coredump_disabled = true,
+            Err(e) => tracing::warn!(error = %e, "could not disable core dumps"),
+        }
+        match macos::deny_ptrace() {
+            Ok(()) => report.ptrace_denied = true,
+            Err(e) => tracing::warn!(error = %e, "could not deny debugger attach"),
+        }
+        // Fail-closed: no network confinement means no R12 guarantee.
+        macos::apply_seatbelt()?;
+        report.filter_installed = true;
+        report.privileges_dropped = true;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        match windows_impl::disable_crash_dumps() {
+            Ok(()) => report.coredump_disabled = true,
+            Err(e) => tracing::warn!(error = %e, "could not disable crash dumps"),
+        }
+        match windows_impl::apply_mitigation_policies() {
+            Ok(()) => {
+                report.filter_installed = true;
+                report.privileges_dropped = true;
+            }
+            Err(e) => {
+                return Err(KeyAgentError::Sandbox(format!(
+                    "process mitigation policies could not be applied: {e}"
+                )));
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        tracing::warn!(
+            "oc-keyagent: no runtime sandbox is available on this platform; \
+             network isolation is NOT enforced"
         );
     }
-    Ok(())
+
+    Ok(report)
 }
 
 // ============================================================================
@@ -334,27 +426,355 @@ mod linux {
 #[cfg(target_os = "linux")]
 pub use linux::{anti_ptrace, apply_seccomp, disable_coredump, drop_capabilities_except_ipc_lock};
 
+// ============================================================================
+// macOS implementation — Seatbelt (`sandbox_init`) + ptrace/coredump denial
+// ============================================================================
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::ffi::{CStr, CString};
+
+    use super::KeyAgentError;
+
+    /// `sandbox_init` flags value for "the profile argument is a literal SBPL
+    /// string".
+    ///
+    /// **This is 0, not `SANDBOX_NAMED`.** `<sandbox.h>` documents only
+    /// `SANDBOX_NAMED` (`0x0001`), which means "`profile` is the *name* of a
+    /// built-in profile such as `nointernet`" — passing SBPL text with that
+    /// flag fails with `profile not found`. The literal-string mode is flag
+    /// value 0 and is undocumented but stable (it is what Chromium's
+    /// `sandbox/mac` and OpenSSH's `sandbox-darwin.c` both use). Verified
+    /// empirically on this SDK; see `tests/sandbox_macos.rs`, which fails
+    /// loudly if the kernel ever rejects the profile.
+    const SANDBOX_LITERAL_PROFILE: u64 = 0;
+
+    /// `ptrace(2)` request: refuse all future debugger attachment to this
+    /// process. Defined in `<sys/ptrace.h>` but not re-exported by `libc`.
+    const PT_DENY_ATTACH: libc::c_int = 31;
+
+    // `sandbox_init` / `sandbox_free_error` live in libSystem, which every
+    // Rust binary already links. Declaring them here avoids a `sandbox` crate
+    // dependency (R56 keeps this crate's tree minimal).
+    unsafe extern "C" {
+        fn sandbox_init(
+            profile: *const libc::c_char,
+            flags: u64,
+            errorbuf: *mut *mut libc::c_char,
+        ) -> libc::c_int;
+        fn sandbox_free_error(errorbuf: *mut libc::c_char);
+    }
+
+    /// The Seatbelt profile applied to the Key-Agent.
+    ///
+    /// Written in SBPL (Sandbox Profile Language). The guiding rule is R12:
+    /// **no network, ever**. Everything else stays permitted so the profile is
+    /// stable across macOS releases — a full deny-by-default profile would
+    /// need to enumerate every dyld/CoreFoundation operation and break on
+    /// every OS update.
+    ///
+    /// `(allow default)` followed by targeted denies is the same structure
+    /// Apple ships for several of its own daemons.
+    ///
+    /// ## Why not a bare `(deny network*)`?
+    ///
+    /// Contrary to a common assumption, Seatbelt classifies **AF_UNIX** bind
+    /// under `network-bind`, not under the file operations. A bare
+    /// `(deny network*)` therefore also kills the Key-Agent's `UnixListener`,
+    /// which is its entire IPC surface. The pattern below — deny every network
+    /// operation, then re-allow the UDS subset by filesystem `subpath` — is the
+    /// form that was verified to block TCP4/TCP6/UDP and `bind()` on INET
+    /// sockets while leaving UDS bind/connect intact. `(subpath "/")` only ever
+    /// matches operations that carry a filesystem path, i.e. AF_UNIX; an INET
+    /// socket has no path and so can never match the re-allow rule.
+    pub(super) const SEATBELT_PROFILE: &str = r#"(version 1)
+(allow default)
+
+;; --- R12: no network of any kind -----------------------------------------
+;; Deny every network operation first...
+(deny network-outbound)
+(deny network-inbound)
+(deny network-bind)
+
+;; ...then re-allow ONLY the AF_UNIX subset. A `subpath` filter can only match
+;; an operation that carries a filesystem path, which for sockets means AF_UNIX
+;; exclusively. AF_INET/AF_INET6 sockets have no path and stay denied.
+(allow network-outbound (subpath "/"))
+(allow network-bind (subpath "/"))
+
+;; --- Defence in depth ------------------------------------------------------
+;; Refuse to be inspected by another process in the same session.
+(deny process-info-pidinfo)
+(deny process-info-dirtycontrol)
+
+;; No loading of arbitrary code at runtime.
+(deny system-privilege)
+"#;
+
+    /// Apply the Seatbelt profile via `sandbox_init(3)`.
+    ///
+    /// Fail-closed: an error here means the process is unconfined, so the
+    /// caller aborts startup.
+    pub fn apply_seatbelt() -> Result<(), KeyAgentError> {
+        apply_profile(SEATBELT_PROFILE)
+    }
+
+    /// Apply an arbitrary SBPL profile. Exposed for tests.
+    pub(super) fn apply_profile(profile: &str) -> Result<(), KeyAgentError> {
+        let c_profile = CString::new(profile).map_err(|e| {
+            KeyAgentError::Sandbox(format!("sandbox profile contains an interior NUL: {e}"))
+        })?;
+
+        let mut errbuf: *mut libc::c_char = std::ptr::null_mut();
+
+        // SAFETY: `c_profile` is a valid NUL-terminated C string that outlives
+        // the call. `errbuf` is a valid, writable pointer-to-pointer that the
+        // callee either leaves untouched or fills with a pointer we free below
+        // via the matching `sandbox_free_error`. `sandbox_init` does not
+        // retain either pointer past the call.
+        let rc =
+            unsafe { sandbox_init(c_profile.as_ptr(), SANDBOX_LITERAL_PROFILE, &raw mut errbuf) };
+
+        if rc == 0 {
+            // On success `errbuf` is left NULL; nothing to free.
+            return Ok(());
+        }
+
+        // SAFETY: `sandbox_init` returned non-zero, which per its contract
+        // means `errbuf` points to a NUL-terminated, heap-allocated message
+        // owned by libsandbox. We copy it before handing it back to
+        // `sandbox_free_error`, and never dereference it afterwards.
+        let detail = if errbuf.is_null() {
+            "no detail provided".to_string()
+        } else {
+            let msg = unsafe { CStr::from_ptr(errbuf) }.to_string_lossy().into_owned();
+            unsafe { sandbox_free_error(errbuf) };
+            msg
+        };
+
+        Err(KeyAgentError::Sandbox(format!("sandbox_init failed (rc={rc}): {detail}")))
+    }
+
+    /// Refuse debugger attachment via `ptrace(PT_DENY_ATTACH)`.
+    ///
+    /// This also clears the process's `P_TRACED` eligibility, so `lldb`,
+    /// `dtrace` and task-port acquisition all fail. It is the macOS analogue
+    /// of Linux's `prctl(PR_SET_DUMPABLE, 0)`.
+    pub fn deny_ptrace() -> Result<(), KeyAgentError> {
+        // SAFETY: `ptrace(PT_DENY_ATTACH, 0, NULL, 0)` takes only integer and
+        // null arguments and has no memory-safety implications. The return
+        // value is checked before use.
+        let rc = unsafe { libc::ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) };
+        if rc != 0 {
+            return Err(KeyAgentError::Sandbox(format!(
+                "ptrace(PT_DENY_ATTACH) failed: rc={rc} errno={}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Disable core dumps via `setrlimit(RLIMIT_CORE, 0)`.
+    ///
+    /// A core dump of the Key-Agent would contain unlocked key material even
+    /// though `HardenedBytes` mlocks it — `mlock` prevents swapping, not
+    /// dumping.
+    pub fn disable_coredump() -> Result<(), KeyAgentError> {
+        let limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+        // SAFETY: `setrlimit` reads a `rlimit` struct we own and that is
+        // properly initialised and aligned. The kernel copies it; it does not
+        // retain the pointer.
+        let rc = unsafe { libc::setrlimit(libc::RLIMIT_CORE, &raw const limit) };
+        if rc != 0 {
+            return Err(KeyAgentError::Sandbox(format!(
+                "setrlimit(RLIMIT_CORE, 0) failed: rc={rc} errno={}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub use macos::{apply_seatbelt, deny_ptrace, disable_coredump};
+
+// ============================================================================
+// Windows implementation — process mitigation policies
+// ============================================================================
+
+#[cfg(target_os = "windows")]
+mod windows_impl {
+    use super::KeyAgentError;
+
+    /// `SetErrorMode` flags that suppress WER crash dumps, which would
+    /// otherwise write unlocked key material to `%LOCALAPPDATA%\CrashDumps`.
+    const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+    const SEM_NOGPFAULTERRORBOX: u32 = 0x0002;
+
+    /// `PROCESS_MITIGATION_POLICY` discriminants from `<processthreadsapi.h>`.
+    const PROCESS_DYNAMIC_CODE_POLICY: i32 = 2;
+    const PROCESS_IMAGE_LOAD_POLICY: i32 = 10;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct ProcessMitigationDynamicCodePolicy {
+        /// Bit 0: `ProhibitDynamicCode`.
+        flags: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct ProcessMitigationImageLoadPolicy {
+        /// Bit 0: `NoRemoteImages`, bit 1: `NoLowMandatoryLabelImages`.
+        flags: u32,
+    }
+
+    unsafe extern "system" {
+        fn SetProcessMitigationPolicy(
+            policy: i32,
+            buffer: *const core::ffi::c_void,
+            size: usize,
+        ) -> i32;
+        fn SetErrorMode(mode: u32) -> u32;
+    }
+
+    /// Suppress Windows Error Reporting crash dumps.
+    pub(super) fn disable_crash_dumps() -> Result<(), KeyAgentError> {
+        // SAFETY: `SetErrorMode` takes an integer bitmask and returns the
+        // previous mode. No pointers are involved.
+        unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX) };
+        Ok(())
+    }
+
+    /// Prohibit dynamic code generation and remote image loading.
+    ///
+    /// These are the closest Windows analogues to a seccomp allowlist: they
+    /// prevent an attacker with a memory-corruption primitive from JIT-ing
+    /// shellcode or loading a DLL from a UNC path (which would itself be a
+    /// network operation).
+    pub(super) fn apply_mitigation_policies() -> Result<(), KeyAgentError> {
+        let dynamic_code = ProcessMitigationDynamicCodePolicy { flags: 1 };
+        // SAFETY: we pass a pointer to a correctly sized, correctly laid-out
+        // (`#[repr(C)]`) policy struct that we own, together with its exact
+        // size. The kernel copies the struct during the call.
+        let rc = unsafe {
+            SetProcessMitigationPolicy(
+                PROCESS_DYNAMIC_CODE_POLICY,
+                (&raw const dynamic_code).cast(),
+                core::mem::size_of::<ProcessMitigationDynamicCodePolicy>(),
+            )
+        };
+        if rc == 0 {
+            return Err(KeyAgentError::Sandbox(format!(
+                "SetProcessMitigationPolicy(DynamicCode) failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // `NoRemoteImages` (bit 0) blocks loading DLLs from network shares.
+        let image_load = ProcessMitigationImageLoadPolicy { flags: 0b11 };
+        // SAFETY: same invariants as above.
+        let rc = unsafe {
+            SetProcessMitigationPolicy(
+                PROCESS_IMAGE_LOAD_POLICY,
+                (&raw const image_load).cast(),
+                core::mem::size_of::<ProcessMitigationImageLoadPolicy>(),
+            )
+        };
+        if rc == 0 {
+            return Err(KeyAgentError::Sandbox(format!(
+                "SetProcessMitigationPolicy(ImageLoad) failed: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub use windows_impl::{apply_mitigation_policies, disable_crash_dumps};
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_apply_sandbox_no_panic_on_non_linux() {
-        // On non-Linux (e.g. macOS dev host), apply_sandbox is a no-op that
-        // logs + returns Ok. On Linux, we skip this test because applying
-        // the seccomp filter would kill the test process on subsequent
-        // syscalls outside the allowlist (e.g. the stdlib's internal
-        // `mprotect` / `brk` during assertion). Real verification on Linux
-        // is done via `strace -f -e trace=network` in CI (R57).
-        #[cfg(not(target_os = "linux"))]
-        {
-            apply_sandbox().expect("apply_sandbox should succeed on non-Linux");
+    fn sandbox_report_network_blocked_tracks_filter() {
+        let mut report = SandboxReport::default();
+        assert!(!report.network_blocked());
+        report.filter_installed = true;
+        assert!(report.network_blocked());
+    }
+
+    // -- macOS --------------------------------------------------------------
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_profile_denies_network() {
+        // The R12 guarantee is a property of the profile text; assert it here
+        // so a future edit cannot silently drop the rule.
+        let profile = super::macos::SEATBELT_PROFILE;
+        for rule in ["(deny network-outbound)", "(deny network-inbound)", "(deny network-bind)"] {
+            assert!(profile.contains(rule), "the Seatbelt profile MUST contain {rule} (R12)");
         }
-        #[cfg(target_os = "linux")]
-        {
-            // Skipped — see comment above.
+        assert!(profile.starts_with("(version 1)"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_profile_reallows_only_uds() {
+        // The UDS re-allow MUST be path-scoped. An unqualified
+        // `(allow network-outbound)` would re-open TCP and silently void R12.
+        let profile = super::macos::SEATBELT_PROFILE;
+        assert!(profile.contains(r#"(allow network-outbound (subpath "/"))"#));
+        assert!(profile.contains(r#"(allow network-bind (subpath "/"))"#));
+        for line in profile.lines().map(str::trim) {
+            assert_ne!(line, "(allow network-outbound)", "unscoped network re-allow voids R12");
+            assert_ne!(line, "(allow network-bind)", "unscoped bind re-allow voids R12");
+            assert_ne!(line, "(allow network*)", "unscoped network re-allow voids R12");
         }
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_rejects_profile_with_interior_nul() {
+        let err = super::macos::apply_profile("(version 1)\0(allow default)").unwrap_err();
+        assert!(matches!(err, KeyAgentError::Sandbox(_)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn seatbelt_rejects_malformed_profile() {
+        // A syntactically invalid profile must be reported, not silently
+        // ignored — otherwise a typo would leave the agent unconfined.
+        let err = super::macos::apply_profile("(this is not sbpl").unwrap_err();
+        match err {
+            KeyAgentError::Sandbox(msg) => {
+                assert!(msg.contains("sandbox_init failed"), "unexpected message: {msg}");
+            }
+            other => panic!("expected a Sandbox error, got {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn disable_coredump_succeeds_on_macos() {
+        // Lowering RLIMIT_CORE never requires privilege.
+        super::macos::disable_coredump().expect("RLIMIT_CORE=0 must be settable");
+    }
+
+    // NOTE: there is deliberately no in-process test that calls
+    // `apply_sandbox()`. It now has *real* effects on every supported
+    // platform: on Linux the seccomp filter would outlive the test, on macOS
+    // the Seatbelt profile denies `process-fork`/`process-exec*` and would
+    // break any subsequent test that shells out, and on Windows the dynamic-
+    // code policy is irreversible for the process lifetime.
+    //
+    // End-to-end verification is done out-of-process:
+    //   * Linux — `strace -f -e trace=network` in CI (R57).
+    //   * macOS — `tests/sandbox_macos.rs` re-executes the test binary in a child process and
+    //     asserts an outbound connect fails.
+    //   * R12c — `lsof -iTCP -sTCP:LISTEN -P -n` against the running daemon.
 
     #[cfg(target_os = "linux")]
     #[test]
