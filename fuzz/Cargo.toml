@@ -1,0 +1,46 @@
+[workspace]
+
+[package]
+name = "onecipher-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oc-core]
+path = "../crates/oc-core"
+
+[dependencies.oc-keyagent]
+path = "../crates/oc-keyagent"
+
+[dependencies.prost]
+version = "0.14"
+
+[[bin]]
+name = "frame_read"
+path = "fuzz_targets/frame_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "caip_parse"
+path = "fuzz_targets/caip_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "prost_decode"
+path = "fuzz_targets/prost_decode.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

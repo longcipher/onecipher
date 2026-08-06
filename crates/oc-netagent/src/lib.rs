@@ -12,8 +12,10 @@
 
 pub mod approval;
 pub mod error;
+pub mod http_rpc;
 pub mod intent;
 pub mod key_agent_client;
+pub mod otlp;
 pub mod rpc_client;
 pub mod sim;
 pub mod telemetry_drain;
@@ -26,6 +28,7 @@ pub use approval::{
     RiskSource, TokenDelta, TokenDirection, TxSimulation,
 };
 pub use error::NetAgentError;
+pub use http_rpc::{LocalRpcServer, LocalRpcServerConfig};
 pub use intent::{
     CallData, Intent, IntentError, IntentKind, IntentResult, IntentStatus, IntentSummary,
     MessageEncoding, MockRpcClient, RpcClient, RpcError, execute_intent, simulate_intent,
@@ -34,6 +37,7 @@ pub use key_agent_client::KeyAgentClient;
 // The approval log (JSONL WAL for crash recovery) lives in `oc-core` so the
 // Web UI can persist approvals without depending on this network crate.
 pub use oc_core::approval_log::ApprovalLog;
+pub use otlp::{OtlpSink, OtlpSinkConfig};
 pub use rpc_client::HpxRpcClient;
 pub use sim::{SimError, simulate_evm_tx};
 pub use telemetry_drain::{

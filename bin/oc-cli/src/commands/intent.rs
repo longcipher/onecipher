@@ -1,4 +1,4 @@
-//! Intent CLI (Stage 2.5). Exposes the [`oc_intent`] lifecycle to AI Agents:
+//! Intent CLI (Stage 2.5). Exposes the [`oc_netagent::intent`] lifecycle to AI Agents:
 //!
 //! - `onecipher intent submit --json '...' --chain eip155:8453 --session-key sk-1` Simulates the
 //!   intent, prints a human-readable summary, prompts for confirmation (unless `--yes`), then
