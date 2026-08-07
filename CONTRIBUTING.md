@@ -38,13 +38,14 @@ These invariants are enforced by CI and must never be violated:
 
 ```bash
 just test      # unit + integration tests
-just bdd       # BDD conformance scenarios (cucumber)
-just test-all  # everything
+just mutants   # mutation testing (cargo-mutants)
+just test-all   # alias for `just test`
 ```
 
 - Unit tests: colocated with implementation (`#[cfg(test)]`)
 - Property tests: `proptest` for invariant checking
-- BDD: Gherkin features in `specs/` drive cucumber scenarios in `crates/oc-conformance/`
+- Mutation tests: `cargo-mutants` to verify test quality — surviving mutants
+  indicate gaps that need new tests or stronger assertions
 
 ## Commit Messages
 

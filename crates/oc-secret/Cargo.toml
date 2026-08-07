@@ -28,7 +28,7 @@ oc-vault = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-totp-rs = { workspace = true, features = ["otpauth"] }
+totp-rs = { workspace = true, features = ["otpauth", "std"] }
 uuid = { workspace = true }
 zeroize = { workspace = true, features = ["derive"] }
 

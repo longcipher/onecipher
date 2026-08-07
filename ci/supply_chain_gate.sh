@@ -2,9 +2,7 @@
 #
 # T41 supply-chain gate — mandatory in CI, graceful locally.
 #
-# The BDD scenarios in `supply_chain.feature` SKIP when a tool is missing so
-# that local development without cargo-cyclonedx/cargo-vet/cargo-audit still
-# passes. CI must not silently skip: this script turns each available tool into
+# CI must not silently skip: this script turns each available tool into
 # a hard gate (fails the job on a real finding) and reports a clear status for
 # tools that are not installed.
 #
@@ -54,7 +52,7 @@ run_gate() {
 run_gate "cargo-audit CVE scan" "audit"
 
 # 2. Vet check for the isolated (R56) crates' dependency trees.
-#    cargo-vet filters by package; run on the whole tree like the BDD step.
+#    cargo-vet filters by package; run on the whole tree.
 run_gate "cargo-vet supply-chain review" "vet"
 
 if [[ "$status" -ne 0 ]]; then

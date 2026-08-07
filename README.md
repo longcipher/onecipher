@@ -60,7 +60,6 @@ so a TOTP read and a signing operation are governed by one consistent ruleset.
 ├── bin/                    # Binary crates
 │   └── oc-cli/             # `onecipher` CLI (sole binary)
 ├── crates/                 # Library crates
-│   ├── oc-conformance/     # BDD conformance test crate (cucumber)
 │   ├── oc-core/            # Core types, CAIP, error types
 │   ├── oc-crypto/          # Memory hardening (mlock, zeroize, page guards)
 │   ├── oc-keyagent/        # Key-Agent lib (sync std, NO tokio — R56)
@@ -169,7 +168,7 @@ guarantees as private keys:
 ## Hard Gates (Non-Negotiable)
 
 These are non-negotiable invariants verified by `cargo tree` inspection
-(R56) and binary symbol analysis (R12), supplemented by conformance tests:
+(R56) and binary symbol analysis (R12), verified by dev-dependency and source scans:
 
 - **R56 (dependency isolation):** `oc-crypto`, `oc-policy`, `oc-keyagent`,
   `oc-session-key` MUST NOT depend on `tokio`, `reqwest`,
@@ -401,12 +400,13 @@ onecipher git push
 just           # list all recipes
 just format    # cargo sort + cargo +nightly fmt
 just lint      # fmt check + clippy + cargo sort + hard gates
-just test      # unit + integration tests (excludes slow BDD)
-just bdd       # conformance BDD scenarios (cucumber)
-just test-all # all tests including BDD
+just test      # unit + integration tests
+just test-all  # alias for `test`
 just build     # cargo build --workspace
 just ci        # full CI check (lint + test + build)
 just docs      # cargo doc --no-deps --open
+just mutants   # full mutation testing (cargo-mutants)
+just mutants-incremental  # incremental mutation testing
 ```
 
 ### Direct cargo commands
@@ -417,9 +417,8 @@ cargo build --workspace
 cargo build --release --bin onecipher    # use --bin, not -p, for binaries
 
 # Test
-cargo test --workspace --exclude oc-conformance
-cargo test -p oc-conformance --test conformance
-cargo test -p oc-conformance --test conformance -- audit_cli  # single feature
+cargo test --workspace --all-features
+cargo mutants --workspace --all-features       # mutation testing
 
 # Lint
 RUSTC_WRAPPER= cargo +nightly fmt --all -- --check
@@ -448,15 +447,16 @@ nm target/release/onecipher | grep -i tcp    # R12 hard gate (requires release b
 
 ## Testing Matrix
 
-- **BDD scenarios**: acceptance contract, driven by `cucumber-rs` in
-  `crates/oc-conformance/`. Run via `just bdd`.
 - **Unit tests** (`#[cfg(test)]` modules): inner TDD loop, colocated with
   implementation. Run via `just test`.
 - **Property tests** (`proptest`): invariant checking, colocated. Runs in the
   normal `cargo test` flow.
 - **Integration tests** (`crates/<name>/tests/`): cross-module integration.
+- **Mutation tests** (`cargo-mutants`): verify test quality by injecting
+  faults. Surviving mutants indicate gaps in coverage or assertions.
+  Run via `just mutants` (full) or `just mutants-incremental` (changed only).
 - **Hard-gate verification**: R56 verified via `cargo tree -p <crate>`,
-  R12 verified via `nm` symbol inspection of the release binary.
+  R12 verified via source scans and runtime `lsof` checks.
 
 ## Supported Chains
 

@@ -4,7 +4,9 @@
 //! Uses the `totp-rs` crate. Per R56, no async runtime is involved — OTP
 //! generation is a pure CPU operation (HMAC-SHA1 over a counter).
 
-use totp_rs::{Algorithm, TOTP, TotpUrlError};
+// The dependency `totp-rs` also exposes a `TotpError` type; rename it on import
+// to avoid a clash with the local `TotpError` defined below.
+use totp_rs::{Algorithm, Builder, Totp, TotpError as TotpRsError};
 
 /// Errors returned by OTP operations.
 #[derive(Debug, thiserror::Error)]
@@ -19,8 +21,8 @@ pub enum TotpError {
     Hotp(String),
 }
 
-impl From<TotpUrlError> for TotpError {
-    fn from(e: TotpUrlError) -> Self {
+impl From<TotpRsError> for TotpError {
+    fn from(e: TotpRsError) -> Self {
         Self::InvalidUri(e.to_string())
     }
 }
@@ -35,8 +37,8 @@ const DEFAULT_SKEW: u8 = 1;
 /// The URI must follow the standard format:
 /// `otpauth://totp/<issuer>:<account>?secret=<base32>&issuer=<issuer>&digits=6&period=30`
 pub fn generate_totp(otpauth_uri: &str) -> Result<String, TotpError> {
-    let totp = TOTP::from_url(otpauth_uri)?;
-    totp.generate_current().map_err(|e| TotpError::Generation(e.to_string()))
+    let totp = Totp::from_url(otpauth_uri)?;
+    Ok(totp.generate_current().to_string())
 }
 
 /// Generate the current TOTP code from a raw base32-encoded secret.
@@ -51,16 +53,17 @@ pub fn generate_totp_from_secret(
 ) -> Result<String, TotpError> {
     let secret = base32_decode(base32_secret)
         .map_err(|e| TotpError::InvalidSecret(format!("base32 decode failed: {e}")))?;
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        DEFAULT_DIGITS,
-        DEFAULT_SKEW,
-        DEFAULT_STEP,
-        secret,
-        Some(issuer.to_string()),
-        account.to_string(),
-    )?;
-    totp.generate_current().map_err(|e| TotpError::Generation(e.to_string()))
+    let totp = Builder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_digits(DEFAULT_DIGITS as u8)
+        .with_skew(u16::from(DEFAULT_SKEW))
+        .with_step_duration(DEFAULT_STEP)
+        .with_secret(secret)
+        .with_issuer(Some(issuer.to_string()))
+        .with_account_name(account.to_string())
+        .build()
+        .map_err(|e| TotpError::Generation(e.to_string()))?;
+    Ok(totp.generate_current().to_string())
 }
 
 /// Build an `otpauth://` URI from a base32 secret, issuer, and account name.
@@ -70,16 +73,17 @@ pub fn generate_totp_from_secret(
 pub fn build_otpauth_uri(secret: &str, issuer: &str, account: &str) -> Result<String, TotpError> {
     let decoded = base32_decode(secret)
         .map_err(|e| TotpError::InvalidSecret(format!("base32 decode failed: {e}")))?;
-    let totp = TOTP::new(
-        Algorithm::SHA1,
-        DEFAULT_DIGITS,
-        DEFAULT_SKEW,
-        DEFAULT_STEP,
-        decoded,
-        Some(issuer.to_string()),
-        account.to_string(),
-    )?;
-    Ok(totp.get_url())
+    let totp = Builder::new()
+        .with_algorithm(Algorithm::SHA1)
+        .with_digits(DEFAULT_DIGITS as u8)
+        .with_skew(u16::from(DEFAULT_SKEW))
+        .with_step_duration(DEFAULT_STEP)
+        .with_secret(decoded)
+        .with_issuer(Some(issuer.to_string()))
+        .with_account_name(account.to_string())
+        .build()
+        .map_err(|e| TotpError::Generation(e.to_string()))?;
+    totp.to_url().map_err(|e| TotpError::Generation(e.to_string()))
 }
 
 /// Generate an HOTP code (RFC 4226) from an `otpauth://` URI and a counter.
@@ -138,16 +142,14 @@ fn generate_hotp_code(
 ) -> Result<String, TotpError> {
     // step=1 and skew=0: `generate(time)` computes HMAC over `time / 1 = time`,
     // which is exactly the HOTP counter as a big-endian u64.
-    let totp = TOTP::new_unchecked(
-        *algorithm,
-        digits,
-        0, // skew: not meaningful for HOTP
-        1, // step: 1 so counter maps directly
-        secret.to_vec(),
-        None,
-        String::new(),
-    );
-    Ok(totp.generate(counter))
+    let totp = Builder::new()
+        .with_algorithm(*algorithm)
+        .with_digits(digits as u8)
+        .with_skew(0u16) // skew: not meaningful for HOTP
+        .with_step_duration(1) // step: 1 so counter maps directly
+        .with_secret(secret.to_vec())
+        .build_noncompliant();
+    Ok(totp.generate(counter).to_string())
 }
 
 /// Parse an `otpauth://hotp/` URI into its component parts.

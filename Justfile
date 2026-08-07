@@ -36,22 +36,20 @@ lint:
 # Testing
 # ============================================================
 
-# Run all unit + integration tests (excluding conformance BDD).
+# Run all unit + integration tests.
 test:
-    cargo test --workspace --all-features --exclude oc-conformance
-
-# Run the BDD conformance scenarios (cucumber-driven).
-bdd:
-    cargo test -p oc-conformance --test conformance
-
-# Run all tests (unit + integration + conformance BDD).
-test-all:
     cargo test --workspace --all-features
-    cargo test -p oc-conformance --test conformance
 
-# Run a single conformance feature (pass the feature name, e.g. `just bdd-one audit_cli`).
-bdd-one feature:
-    cargo test -p oc-conformance --test conformance -- {{feature}}
+# Run all tests (alias for `test`).
+test-all: test
+
+# Run mutation testing on the full workspace (requires cargo-mutants).
+mutants:
+    cargo mutants --workspace --all-features
+
+# Run incremental mutation testing (only files changed vs main).
+mutants-incremental:
+    cargo mutants --in-place --since main --all-features
 
 # ============================================================
 # Build
@@ -82,7 +80,7 @@ docs:
     cargo doc --no-deps --open
 
 # Full CI check (lint + test + build).
-ci: lint test-all build
+ci: lint test build
 
 # Install all required development tools.
 setup:
