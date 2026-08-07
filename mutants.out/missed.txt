@@ -1,0 +1,17 @@
+crates/oc-crypto/src/hardened.rs:118:9: replace <impl Drop for HardenedBytes>::drop with ()
+crates/oc-crypto/src/hardened.rs:120:16: replace == with != in <impl Drop for HardenedBytes>::drop
+crates/oc-crypto/src/key_cache.rs:75:56: replace > with >= in Inner<V>::evict_expired
+crates/oc-crypto/src/key_cache.rs:145:58: replace > with >= in KeyCache<V>::get
+crates/oc-crypto/src/key_cache.rs:196:9: replace KeyCache<V>::evict_expired with ()
+crates/oc-crypto/src/key_cache.rs:207:9: replace KeyCache<V>::is_empty -> bool with true
+crates/oc-crypto/src/key_cache.rs:207:9: replace KeyCache<V>::is_empty -> bool with false
+crates/oc-crypto/src/key_cache.rs:207:20: replace == with != in KeyCache<V>::is_empty
+crates/oc-crypto/src/key_cache.rs:229:9: replace <impl Drop for KeyCache<V>>::drop with ()
+crates/oc-crypto/src/page_guard.rs:23:5: replace lock -> Result<(), MemGuardError> with Ok(())
+crates/oc-crypto/src/page_guard.rs:23:12: replace == with != in lock
+crates/oc-crypto/src/page_guard.rs:37:16: replace == with != in lock
+crates/oc-crypto/src/page_guard.rs:60:5: replace dont_dump -> Result<(), MemGuardError> with Ok(())
+crates/oc-crypto/src/page_guard.rs:60:12: replace == with != in dont_dump
+crates/oc-crypto/src/page_guard.rs:66:16: replace != with == in dont_dump
+crates/oc-crypto/src/page_guard.rs:85:5: replace unlock with ()
+crates/oc-crypto/src/page_guard.rs:85:12: replace == with != in unlock

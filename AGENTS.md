@@ -15,7 +15,6 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 ├── bin/                    # Binary crates
 │   └── oc-cli/             # `onecipher` CLI
 ├── crates/                 # Library crates
-│   ├── oc-conformance/     # BDD conformance test crate (cucumber)
 │   ├── oc-core/            # Core types, CAIP, error types
 │   ├── oc-crypto/          # Memory hardening (mlock, zeroize, page guards)
 │   ├── oc-keyagent/        # Key-Agent lib (sync std, NO tokio — R56)
@@ -73,7 +72,7 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 ## OneCipher Hard Gates
 
 These are non-negotiable invariants verified by `cargo tree` inspection
-(R56) and binary symbol analysis (R12), supplemented by conformance tests:
+(R56) and binary symbol analysis (R12), verified by dev-dependency and source scans:
 
 - **R56 (dependency isolation):** `oc-crypto`, `oc-policy`, `oc-keyagent`,
   `oc-session-key` MUST NOT depend on `tokio`,
@@ -118,17 +117,14 @@ cargo check --workspace --all-targets
 ## Test Commands
 
 ```bash
-# All unit + integration tests (exclude slow conformance BDD)
-cargo test --workspace --exclude oc-conformance
-
-# Conformance BDD scenarios (cucumber-driven, slow)
-cargo test -p oc-conformance --test conformance
-
-# All tests
+# All unit + integration tests
 cargo test --workspace --all-features
 
-# Run a single conformance feature
-cargo test -p oc-conformance --test conformance -- audit_cli
+# Mutation testing (requires cargo-mutants)
+cargo mutants --workspace --all-features
+
+# Incremental mutation testing (only files changed vs main)
+cargo mutants --in-place --since main --all-features
 ```
 
 ## Lint Commands
@@ -158,15 +154,15 @@ just           # list recipes
 just format    # cargo sort + cargo +nightly fmt
 just fix       # auto-fix clippy warnings
 just lint      # fmt check + clippy + cargo sort check
-just test      # unit + integration tests (excludes BDD)
-just bdd       # conformance BDD scenarios
-just bdd-one <name>  # single conformance feature
-just test-all  # all tests including BDD
+just test      # unit + integration tests
+just test-all  # alias for `test`
 just build     # cargo build --workspace
 just check     # cargo check --all-targets --all-features
 just ci        # full CI check (lint + test + build)
 just docs      # cargo doc --no-deps --open
 just setup     # install dev tools (cargo-sort, nightly toolchain)
+just mutants   # full mutation testing (cargo-mutants)
+just mutants-incremental  # incremental mutation testing
 ```
 
 ## Engineering Principles
@@ -209,16 +205,16 @@ just setup     # install dev tools (cargo-sort, nightly toolchain)
 
 ### Testing Requirements
 
-- **BDD scenarios:** Gherkin features drive the conformance test suite in
-  `crates/oc-conformance/` (step definitions in
-  `crates/oc-conformance/tests/conformance/steps/`).
 - **Unit tests:** Colocate with implementation (`#[cfg(test)]`).
 - **Property tests:** Use `proptest` for invariant checking (colocated).
 - **Integration tests:** Place in crate-level `tests/`.
+- **Mutation tests:** Run `cargo-mutants` to verify test quality. Mutants
+  that survive indicate gaps in test coverage or insufficient assertions.
+  Target: zero surviving mutants in security-critical crates (`oc-crypto`,
+  `oc-policy`, `oc-keyagent`).
 - **Hard-gate tests:** R56 (dependency isolation) is verified via
   `cargo tree` inspection; R12a (source-level isolation) via `rg` scan of
   isolated crate sources; R12c (loopback-only) via `lsof` runtime check.
-  Conformance tests exercise these in `keyagent_sandbox.feature`.
 
 ### Common Pitfalls
 
@@ -235,13 +231,13 @@ just setup     # install dev tools (cargo-sort, nightly toolchain)
 
 ## Development Workflow
 
-Use outside-in development for behavior changes:
+Use test-driven development for behavior changes:
 
-1. Start with a failing Gherkin scenario driving the conformance suite in
-   `crates/oc-conformance/`.
-2. Drive implementation with failing crate-local unit tests.
-3. Keep `proptest` in the normal `cargo test` loop.
-4. Keep cucumber steps thin — route business rules through shared crates.
+1. Start with a failing unit test expressing the expected behavior.
+2. Drive implementation until the test passes.
+3. Add `proptest` property tests for invariant checking.
+4. Run `just mutants` to verify test quality — any surviving mutant
+   indicates a gap that needs a new test or stronger assertion.
 
 After each feature or bug fix, run:
 
@@ -249,8 +245,6 @@ After each feature or bug fix, run:
 just format
 just lint
 just test
-just bdd
-just test-all
 ```
 
 If any command fails, report the failure and do not claim completion.

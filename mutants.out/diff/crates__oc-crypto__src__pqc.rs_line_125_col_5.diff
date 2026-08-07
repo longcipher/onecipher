@@ -1,0 +1,27 @@
+--- crates/oc-crypto/src/pqc.rs
++++ replace hybrid_kem_combine -> Result<HardenedBytes, PqcError> with Ok(Default::default())
+@@ -117,23 +117,17 @@
+ /// does not compromise the key.
+ ///
+ /// When ML-KEM-768 support is added (pending `age` crate dependency resolution),
+ /// pass the ML-KEM shared secret as `pq_shared`.
+ pub fn hybrid_kem_combine(
+     x25519_shared: &[u8; 32],
+     pq_shared: &HardenedBytes,
+ ) -> Result<HardenedBytes, PqcError> {
+-    use sha2::{Digest, Sha256};
+-    let mut hasher = Sha256::new();
+-    hasher.update(b"hybrid-kem-x25519-mlkem768-v1");
+-    hasher.update(x25519_shared);
+-    hasher.update(pq_shared.expose());
+-    let hash = hasher.finalize();
+-    Ok(HardenedBytes::from_slice(&hash)?)
++    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+ 
+     #[test]
+     fn test_ml_dsa_65_roundtrip() {

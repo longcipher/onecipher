@@ -1,0 +1,32 @@
+--- crates/oc-crypto/src/hardened.rs
++++ replace HardenedBytes::from_vec -> Result<Self, MemGuardError> with Ok(Default::default())
+@@ -58,28 +58,17 @@
+     }
+ 
+     /// Convert an owned `Vec<u8>` into a `HardenedBytes` without re-allocating.
+     ///
+     /// The Vec is shrunk to its exact length via `into_boxed_slice`, then
+     /// page-locked and marked DONT_DUMP. On `dont_dump` failure after a
+     /// successful `lock`, the lock is undone and the error is propagated.
+     pub fn from_vec(data: Vec<u8>) -> Result<Self, MemGuardError> {
+-        if data.is_empty() {
+-            return Ok(Self { inner: Box::default() });
+-        }
+-        let len = data.len();
+-        let inner = data.into_boxed_slice();
+-        let ptr = inner.as_ptr();
+-        page_guard::lock(ptr, len)?;
+-        if let Err(e) = page_guard::dont_dump(ptr, len) {
+-            page_guard::unlock(ptr, len);
+-            return Err(e);
+-        }
+-        Ok(Self { inner })
++        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Expose the underlying bytes. Use with care.
+     ///
+     /// Inherent method that matches the historical `SecretBytes::expose` API
+     /// name, so callers migrated from `oc_signer::SecretBytes` need no rename.
+     pub fn expose(&self) -> &[u8] {
+         &self.inner

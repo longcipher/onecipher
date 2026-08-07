@@ -1,0 +1,23 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace Inner<V>::bump -> u64 with 1
+@@ -50,19 +50,17 @@
+     entries: HashMap<String, CacheEntry<V>>,
+     recency: BTreeMap<u64, String>,
+     next_tick: u64,
+ }
+ 
+ impl<V> Inner<V> {
+     /// Assign the next monotonic tick.
+     fn bump(&mut self) -> u64 {
+-        let t = self.next_tick;
+-        self.next_tick = self.next_tick.wrapping_add(1);
+-        t
++        1 /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Remove an entry and its recency index slot together.
+     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {
+         let entry = self.entries.remove(id)?;
+         self.recency.remove(&entry.tick);
+         Some(entry)
+     }

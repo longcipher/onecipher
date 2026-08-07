@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace > with < in KeyCache<V>::get
+@@ -137,17 +137,17 @@
+     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by
+     /// the caller's scope.
+     pub fn get(&self, id: &str) -> Option<V> {
+         let mut inner = self.lock();
+ 
+         // Expired? Drop it and report a miss.
+         match inner.entries.get(id) {
+             None => return None,
+-            Some(entry) if entry.last_accessed.elapsed() > self.ttl => {
++            Some(entry) if entry.last_accessed.elapsed() < /* ~ changed by cargo-mutants ~ */ self.ttl => {
+                 inner.remove(id);
+                 return None;
+             }
+             Some(_) => {}
+         }
+ 
+         // Live hit: refresh recency with a single lookup + index swap.
+         let tick = inner.bump();

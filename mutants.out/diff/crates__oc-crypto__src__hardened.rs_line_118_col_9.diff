@@ -1,0 +1,29 @@
+--- crates/oc-crypto/src/hardened.rs
++++ replace <impl Drop for HardenedBytes>::drop with ()
+@@ -110,25 +110,17 @@
+ impl AsMut<[u8]> for HardenedBytes {
+     fn as_mut(&mut self) -> &mut [u8] {
+         &mut self.inner
+     }
+ }
+ 
+ impl Drop for HardenedBytes {
+     fn drop(&mut self) {
+-        let ptr = self.inner.as_ptr();
+-        let len = self.inner.len();
+-        if len == 0 {
+-            return;
+-        }
+-        // Zeroize first so the bytes are wiped while the page is still locked,
+-        // then release the lock.
+-        self.inner.zeroize();
+-        page_guard::unlock(ptr, len);
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ impl std::fmt::Debug for HardenedBytes {
+     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+         // Never expose the bytes — even length is sufficient metadata.
+         write!(f, "[REDACTED; {} bytes]", self.inner.len())
+     }

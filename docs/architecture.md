@@ -70,7 +70,6 @@ onecipher/
 ├── bin/
 │   └── oc-cli/                 # `onecipher` single binary
 ├── crates/
-│   ├── oc-conformance/         # BDD conformance test crate (cucumber)
 │   ├── oc-core/                # Core types, CAIP, error types
 │   ├── oc-crypto/              # Memory hardening (mlock, zeroize, page guards)
 │   ├── oc-keyagent/            # Key-Agent handler logic (sync)
@@ -152,15 +151,15 @@ bin/oc-cli (single binary)
 | **Unit** | `#[cfg(test)]` | Per-module, colocated |
 | **Property** | `proptest` | Invariant checking (policy engine, CAIP parsing) |
 | **Integration** | `tests/` dir | Cross-crate (signing-core → vault → signer) |
-| **BDD** | `cucumber` | End-to-end scenarios (conformance crate) |
-| **Hard gate** | `cargo tree` + `nm` | R56/R12 enforcement |
+| **Mutation** | `cargo-mutants` | Verify test quality via fault injection |
+| **Hard gate** | `cargo tree` + `rg` + `lsof` | R56/R12 enforcement |
 
 ```bash
 just format    # nightly rustfmt
 just lint      # clippy + R56 + cargo sort
 just test      # unit + integration
-just bdd       # conformance scenarios
-just test-all  # everything
+just mutants   # mutation testing (cargo-mutants)
+just test-all  # alias for `just test`
 just ci        # full CI check
 ```
 

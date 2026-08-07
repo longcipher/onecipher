@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace > with >= in Inner<V>::evict_expired
+@@ -67,17 +67,17 @@
+         Some(entry)
+     }
+ 
+     /// Drop every entry whose idle time exceeds `ttl`.
+     fn evict_expired(&mut self, ttl: Duration) {
+         let expired: Vec<String> = self
+             .entries
+             .iter()
+-            .filter(|(_, e)| e.last_accessed.elapsed() > ttl)
++            .filter(|(_, e)| e.last_accessed.elapsed() >= /* ~ changed by cargo-mutants ~ */ ttl)
+             .map(|(k, _)| k.clone())
+             .collect();
+         for id in expired {
+             self.remove(&id);
+         }
+     }
+ }
+ 

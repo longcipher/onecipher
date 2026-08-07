@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/pqc.rs
++++ replace MlDsaSigningKey::expose -> &[u8] with Vec::leak(vec![0])
+@@ -49,17 +49,17 @@
+ impl MlDsaSigningKey {
+     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PqcError> {
+         let inner = HardenedBytes::from_slice(bytes)
+             .map_err(|e| PqcError::KeyGenFailed(format!("mlock failed: {e}")))?;
+         Ok(Self { inner })
+     }
+ 
+     pub fn expose(&self) -> &[u8] {
+-        self.inner.as_ref()
++        Vec::leak(vec![0]) /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ /// Generate an ML-DSA-65 keypair using the OS random number generator.
+ pub fn ml_dsa_65_keygen() -> Result<MlDsa65Keypair, PqcError> {
+     use ml_dsa::{Keypair, MlDsa65, SigningKey};
+     let mut seed = [0u8; 32];
+     getrandom::fill(&mut seed).map_err(|e| PqcError::SignFailed(e.to_string()))?;

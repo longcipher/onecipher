@@ -1,0 +1,41 @@
+crates/oc-crypto/src/hardened.rs:39:9: replace HardenedBytes::len -> usize with 0
+crates/oc-crypto/src/hardened.rs:39:9: replace HardenedBytes::len -> usize with 1
+crates/oc-crypto/src/hardened.rs:43:9: replace HardenedBytes::is_empty -> bool with true
+crates/oc-crypto/src/hardened.rs:43:9: replace HardenedBytes::is_empty -> bool with false
+crates/oc-crypto/src/hardened.rs:85:9: replace HardenedBytes::expose -> &[u8] with Vec::leak(Vec::new())
+crates/oc-crypto/src/hardened.rs:85:9: replace HardenedBytes::expose -> &[u8] with Vec::leak(vec![0])
+crates/oc-crypto/src/hardened.rs:85:9: replace HardenedBytes::expose -> &[u8] with Vec::leak(vec![1])
+crates/oc-crypto/src/hardened.rs:106:9: replace <impl AsRef<[u8]> for HardenedBytes>::as_ref -> &[u8] with Vec::leak(Vec::new())
+crates/oc-crypto/src/hardened.rs:106:9: replace <impl AsRef<[u8]> for HardenedBytes>::as_ref -> &[u8] with Vec::leak(vec![0])
+crates/oc-crypto/src/hardened.rs:106:9: replace <impl AsRef<[u8]> for HardenedBytes>::as_ref -> &[u8] with Vec::leak(vec![1])
+crates/oc-crypto/src/hardened.rs:112:9: replace <impl AsMut<[u8]> for HardenedBytes>::as_mut -> &mut[u8] with Vec::leak(Vec::new())
+crates/oc-crypto/src/hardened.rs:112:9: replace <impl AsMut<[u8]> for HardenedBytes>::as_mut -> &mut[u8] with Vec::leak(vec![0])
+crates/oc-crypto/src/hardened.rs:112:9: replace <impl AsMut<[u8]> for HardenedBytes>::as_mut -> &mut[u8] with Vec::leak(vec![1])
+crates/oc-crypto/src/hardened.rs:133:9: replace <impl std::fmt::Debug for HardenedBytes>::fmt -> std::fmt::Result with Ok(Default::default())
+crates/oc-crypto/src/key_cache.rs:58:9: replace Inner<V>::bump -> u64 with 0
+crates/oc-crypto/src/key_cache.rs:58:9: replace Inner<V>::bump -> u64 with 1
+crates/oc-crypto/src/key_cache.rs:65:9: replace Inner<V>::remove -> Option<CacheEntry<V>> with None
+crates/oc-crypto/src/key_cache.rs:72:9: replace Inner<V>::evict_expired with ()
+crates/oc-crypto/src/key_cache.rs:75:56: replace > with == in Inner<V>::evict_expired
+crates/oc-crypto/src/key_cache.rs:75:56: replace > with < in Inner<V>::evict_expired
+crates/oc-crypto/src/key_cache.rs:140:9: replace KeyCache<V>::get -> Option<V> with None
+crates/oc-crypto/src/key_cache.rs:145:28: replace match guard entry.last_accessed.elapsed() > self.ttl with true in KeyCache<V>::get
+crates/oc-crypto/src/key_cache.rs:145:28: replace match guard entry.last_accessed.elapsed() > self.ttl with false in KeyCache<V>::get
+crates/oc-crypto/src/key_cache.rs:145:58: replace > with == in KeyCache<V>::get
+crates/oc-crypto/src/key_cache.rs:145:58: replace > with < in KeyCache<V>::get
+crates/oc-crypto/src/key_cache.rs:167:9: replace KeyCache<V>::insert with ()
+crates/oc-crypto/src/key_cache.rs:173:32: replace >= with < in KeyCache<V>::insert
+crates/oc-crypto/src/key_cache.rs:189:9: replace KeyCache<V>::clear with ()
+crates/oc-crypto/src/key_cache.rs:203:9: replace KeyCache<V>::len -> usize with 0
+crates/oc-crypto/src/key_cache.rs:203:9: replace KeyCache<V>::len -> usize with 1
+crates/oc-crypto/src/key_cache.rs:212:9: replace KeyCache<V>::ttl -> Duration with Default::default()
+crates/oc-crypto/src/key_cache.rs:217:9: replace KeyCache<V>::max_entries -> usize with 0
+crates/oc-crypto/src/key_cache.rs:217:9: replace KeyCache<V>::max_entries -> usize with 1
+crates/oc-crypto/src/page_guard.rs:29:16: replace != with == in lock
+crates/oc-crypto/src/pqc.rs:57:9: replace MlDsaSigningKey::expose -> &[u8] with Vec::leak(Vec::new())
+crates/oc-crypto/src/pqc.rs:57:9: replace MlDsaSigningKey::expose -> &[u8] with Vec::leak(vec![0])
+crates/oc-crypto/src/pqc.rs:57:9: replace MlDsaSigningKey::expose -> &[u8] with Vec::leak(vec![1])
+crates/oc-crypto/src/pqc.rs:77:5: replace ml_dsa_65_sign -> Result<Vec<u8>, PqcError> with Ok(vec![])
+crates/oc-crypto/src/pqc.rs:77:5: replace ml_dsa_65_sign -> Result<Vec<u8>, PqcError> with Ok(vec![0])
+crates/oc-crypto/src/pqc.rs:77:5: replace ml_dsa_65_sign -> Result<Vec<u8>, PqcError> with Ok(vec![1])
+crates/oc-crypto/src/pqc.rs:97:5: replace ml_dsa_65_verify -> Result<(), PqcError> with Ok(())

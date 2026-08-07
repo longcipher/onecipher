@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/hardened.rs
++++ replace HardenedBytes::expose -> &[u8] with Vec::leak(vec![0])
+@@ -77,17 +77,17 @@
+         Ok(Self { inner })
+     }
+ 
+     /// Expose the underlying bytes. Use with care.
+     ///
+     /// Inherent method that matches the historical `SecretBytes::expose` API
+     /// name, so callers migrated from `oc_signer::SecretBytes` need no rename.
+     pub fn expose(&self) -> &[u8] {
+-        &self.inner
++        Vec::leak(vec![0]) /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ impl Clone for HardenedBytes {
+     /// Clone the buffer contents into a new page-locked allocation.
+     ///
+     /// `Clone` is infallible by trait contract. If `mlock` fails for the
+     /// clone, we fall back to an *unlocked* copy — the bytes are still

@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace <impl Drop for KeyCache<V>>::drop with ()
+@@ -221,17 +221,17 @@
+ impl<V: Clone + Send + Sync + 'static> Default for KeyCache<V> {
+     fn default() -> Self {
+         Self::new(DEFAULT_TTL, DEFAULT_MAX_ENTRIES)
+     }
+ }
+ 
+ impl<V: Clone + Send + Sync + 'static> Drop for KeyCache<V> {
+     fn drop(&mut self) {
+-        self.clear();
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ #[cfg(test)]
+ mod tests {
+     use std::{sync::Arc, thread};
+ 
+     use super::*;

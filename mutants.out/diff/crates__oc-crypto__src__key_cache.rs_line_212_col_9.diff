@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace KeyCache<V>::ttl -> Duration with Default::default()
+@@ -204,17 +204,17 @@
+     }
+ 
+     pub fn is_empty(&self) -> bool {
+         self.len() == 0
+     }
+ 
+     /// TTL configured for this cache.
+     pub fn ttl(&self) -> Duration {
+-        self.ttl
++        Default::default() /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Max entries configured for this cache.
+     pub fn max_entries(&self) -> usize {
+         self.max_entries
+     }
+ }
+ 

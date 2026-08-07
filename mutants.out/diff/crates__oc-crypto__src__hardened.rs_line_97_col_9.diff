@@ -1,0 +1,24 @@
+--- crates/oc-crypto/src/hardened.rs
++++ replace <impl Clone for HardenedBytes>::clone -> Self with Default::default()
+@@ -89,20 +89,17 @@
+ impl Clone for HardenedBytes {
+     /// Clone the buffer contents into a new page-locked allocation.
+     ///
+     /// `Clone` is infallible by trait contract. If `mlock` fails for the
+     /// clone, we fall back to an *unlocked* copy — the bytes are still
+     /// zeroized on `Drop`, just not pinned in RAM. This matches the
+     /// historical `SecretBytes::clone` behavior (best-effort mlock).
+     fn clone(&self) -> Self {
+-        match Self::from_slice(&self.inner) {
+-            Ok(c) => c,
+-            Err(_) => Self { inner: self.inner.clone() },
+-        }
++        Default::default() /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ impl AsRef<[u8]> for HardenedBytes {
+     fn as_ref(&self) -> &[u8] {
+         &self.inner
+     }
+ }

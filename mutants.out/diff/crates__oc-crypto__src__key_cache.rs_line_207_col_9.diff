@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace KeyCache<V>::is_empty -> bool with true
+@@ -199,17 +199,17 @@
+ 
+     /// Current number of entries (including any that are expired but not yet
+     /// reaped).
+     pub fn len(&self) -> usize {
+         self.lock().entries.len()
+     }
+ 
+     pub fn is_empty(&self) -> bool {
+-        self.len() == 0
++        true /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// TTL configured for this cache.
+     pub fn ttl(&self) -> Duration {
+         self.ttl
+     }
+ 
+     /// Max entries configured for this cache.

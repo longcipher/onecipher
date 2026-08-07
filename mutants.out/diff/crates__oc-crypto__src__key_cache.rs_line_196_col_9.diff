@@ -1,0 +1,22 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace KeyCache<V>::evict_expired with ()
+@@ -188,18 +188,17 @@
+     pub fn clear(&self) {
+         let mut inner = self.lock();
+         inner.entries.clear();
+         inner.recency.clear();
+     }
+ 
+     /// Evict only expired entries. Called opportunistically by `insert`.
+     pub fn evict_expired(&self) {
+-        let mut inner = self.lock();
+-        inner.evict_expired(self.ttl);
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Current number of entries (including any that are expired but not yet
+     /// reaped).
+     pub fn len(&self) -> usize {
+         self.lock().entries.len()
+     }
+ 

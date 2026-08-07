@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/page_guard.rs
++++ replace == with != in lock
+@@ -29,17 +29,17 @@
+         if ret != 0 {
+             return Err(MemGuardError::MlockFailed(std::io::Error::last_os_error()));
+         }
+         Ok(())
+     }
+     #[cfg(windows)]
+     {
+         let ret = unsafe { windows_sys::Win32::System::Memory::VirtualLock(addr as *const _, len) };
+-        if ret == 0 {
++        if ret != /* ~ changed by cargo-mutants ~ */ 0 {
+             return Err(MemGuardError::VirtualLockFailed(std::io::Error::last_os_error()));
+         }
+         Ok(())
+     }
+     #[cfg(not(any(unix, windows)))]
+     {
+         let _ = addr;
+         // No platform primitive available; surface an error rather than silently

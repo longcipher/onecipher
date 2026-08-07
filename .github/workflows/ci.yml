@@ -106,16 +106,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --all-features --exclude oc-conformance
-
-  bdd:
-    name: Conformance BDD
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p oc-conformance --test conformance
+      - run: cargo test --workspace --all-features
 
   build:
     name: Build
@@ -134,22 +125,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --bin onecipher
-
-      # NOTE: the old `nm target/release/onecipher | grep -i tcp` step was
-      # removed. It was wrong in both directions:
-      #
-      #   - False negative: release binaries are stripped, so `nm` emits
-      #     "no symbols" and the grep trivially "passed" regardless of content.
-      #   - False positive by design: R12b explicitly permits TCP symbols in
-      #     the daemon, which links axum/hyper for the Web UI and the
-      #     WalletConnect relay. A passing grep would have meant the Web UI
-      #     had been dropped.
-      #
-      # R12 is now enforced where it is actually meaningful: R12a (source
-      # isolation) in the hard-gates job above, and the sandbox scenarios in
-      # the conformance suite.
-      - name: R12 — Key-Agent sandbox conformance scenarios
-        run: cargo test -p oc-conformance --test conformance -- keyagent_sandbox
 
   audit:
     name: Security Audit

@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace KeyCache<V>::max_entries -> usize with 0
+@@ -209,17 +209,17 @@
+ 
+     /// TTL configured for this cache.
+     pub fn ttl(&self) -> Duration {
+         self.ttl
+     }
+ 
+     /// Max entries configured for this cache.
+     pub fn max_entries(&self) -> usize {
+-        self.max_entries
++        0 /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ impl<V: Clone + Send + Sync + 'static> Default for KeyCache<V> {
+     fn default() -> Self {
+         Self::new(DEFAULT_TTL, DEFAULT_MAX_ENTRIES)
+     }
+ }

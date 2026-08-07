@@ -1,0 +1,30 @@
+--- crates/oc-crypto/src/page_guard.rs
++++ replace unlock with ()
+@@ -77,26 +77,10 @@
+ 
+ /// Unlock a previously locked region of memory. Best-effort: errors are ignored.
+ ///
+ /// - Unix: `munlock(2)`.
+ /// - Windows: `VirtualUnlock`.
+ ///
+ /// Calling with `len == 0` is a no-op.
+ pub fn unlock(addr: *const u8, len: usize) {
+-    if len == 0 {
+-        return;
+-    }
+-    #[cfg(unix)]
+-    {
+-        // Best-effort — ignore the return code.
+-        let _ = unsafe { libc::munlock(addr.cast::<libc::c_void>(), len) };
+-    }
+-    #[cfg(windows)]
+-    {
+-        // Best-effort — ignore the return code.
+-        let _ = unsafe { windows_sys::Win32::System::Memory::VirtualUnlock(addr as *const _, len) };
+-    }
+-    #[cfg(not(any(unix, windows)))]
+-    {
+-        let _ = addr;
+-    }
++    () /* ~ changed by cargo-mutants ~ */
+ }

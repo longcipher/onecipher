@@ -1,0 +1,29 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace Inner<V>::evict_expired with ()
+@@ -64,25 +64,17 @@
+     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {
+         let entry = self.entries.remove(id)?;
+         self.recency.remove(&entry.tick);
+         Some(entry)
+     }
+ 
+     /// Drop every entry whose idle time exceeds `ttl`.
+     fn evict_expired(&mut self, ttl: Duration) {
+-        let expired: Vec<String> = self
+-            .entries
+-            .iter()
+-            .filter(|(_, e)| e.last_accessed.elapsed() > ttl)
+-            .map(|(k, _)| k.clone())
+-            .collect();
+-        for id in expired {
+-            self.remove(&id);
+-        }
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ /// A time-to-idle + strict-LRU cache for derived keys.
+ ///
+ /// All entries are dropped (and thus zeroized if `V` is `HardenedBytes`)
+ /// on eviction or `Drop`. The cache is keyed by an opaque `String` id
+ /// (typically a CAIP-2 chain id like `"eip155:1"`).

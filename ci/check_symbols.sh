@@ -20,10 +20,7 @@
 # are inspected as a best-effort extra signal.
 #
 # Referenced by:
-#   - specs/2026-07-22-02-core-security/features/keyagent_sandbox.feature
-#     ("Key-Agent binary has no TCP symbols") via the conformance step
-#     `When the symbol table is inspected via nm`, which requires exit 0.
-#   - .github/workflows/ci.yml
+#   - .github/workflows/ci.yml (hard-gates job)
 #
 # Usage: ci/check_symbols.sh [path/to/binary]
 

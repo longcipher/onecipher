@@ -1,0 +1,2626 @@
+[
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace HardenedBytes::len -> usize with 0\n@@ -31,17 +31,17 @@\n         if let Err(e) = page_guard::dont_dump(ptr, len) {\n             page_guard::unlock(ptr, len);\n             return Err(e);\n         }\n         Ok(Self { inner })\n     }\n \n     pub fn len(&self) -> usize {\n-        self.inner.len()\n+        0 /* ~ changed by cargo-mutants ~ */\n     }\n \n     pub fn is_empty(&self) -> bool {\n         self.inner.is_empty()\n     }\n \n     /// Copy `data` into a new page-locked, DONT_DUMP-marked buffer.\n     ///\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "HardenedBytes::len",
+      "return_type": "-> usize",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 40
+        },
+        "start": {
+          "column": 5,
+          "line": 38
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:39:9: replace HardenedBytes::len -> usize with 0",
+    "package": "oc-crypto",
+    "replacement": "0",
+    "span": {
+      "end": {
+        "column": 25,
+        "line": 39
+      },
+      "start": {
+        "column": 9,
+        "line": 39
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace HardenedBytes::len -> usize with 1\n@@ -31,17 +31,17 @@\n         if let Err(e) = page_guard::dont_dump(ptr, len) {\n             page_guard::unlock(ptr, len);\n             return Err(e);\n         }\n         Ok(Self { inner })\n     }\n \n     pub fn len(&self) -> usize {\n-        self.inner.len()\n+        1 /* ~ changed by cargo-mutants ~ */\n     }\n \n     pub fn is_empty(&self) -> bool {\n         self.inner.is_empty()\n     }\n \n     /// Copy `data` into a new page-locked, DONT_DUMP-marked buffer.\n     ///\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "HardenedBytes::len",
+      "return_type": "-> usize",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 40
+        },
+        "start": {
+          "column": 5,
+          "line": 38
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:39:9: replace HardenedBytes::len -> usize with 1",
+    "package": "oc-crypto",
+    "replacement": "1",
+    "span": {
+      "end": {
+        "column": 25,
+        "line": 39
+      },
+      "start": {
+        "column": 9,
+        "line": 39
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace HardenedBytes::is_empty -> bool with true\n@@ -35,17 +35,17 @@\n         Ok(Self { inner })\n     }\n \n     pub fn len(&self) -> usize {\n         self.inner.len()\n     }\n \n     pub fn is_empty(&self) -> bool {\n-        self.inner.is_empty()\n+        true /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Copy `data` into a new page-locked, DONT_DUMP-marked buffer.\n     ///\n     /// - `data.is_empty()` returns an empty buffer without touching `mlock`.\n     /// - On `dont_dump` failure after a successful `lock`, the lock is undone and the error is\n     ///   propagated.\n     pub fn from_slice(data: &[u8]) -> Result<Self, MemGuardError> {\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "HardenedBytes::is_empty",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 44
+        },
+        "start": {
+          "column": 5,
+          "line": 42
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:43:9: replace HardenedBytes::is_empty -> bool with true",
+    "package": "oc-crypto",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 30,
+        "line": 43
+      },
+      "start": {
+        "column": 9,
+        "line": 43
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace HardenedBytes::is_empty -> bool with false\n@@ -35,17 +35,17 @@\n         Ok(Self { inner })\n     }\n \n     pub fn len(&self) -> usize {\n         self.inner.len()\n     }\n \n     pub fn is_empty(&self) -> bool {\n-        self.inner.is_empty()\n+        false /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Copy `data` into a new page-locked, DONT_DUMP-marked buffer.\n     ///\n     /// - `data.is_empty()` returns an empty buffer without touching `mlock`.\n     /// - On `dont_dump` failure after a successful `lock`, the lock is undone and the error is\n     ///   propagated.\n     pub fn from_slice(data: &[u8]) -> Result<Self, MemGuardError> {\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "HardenedBytes::is_empty",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 44
+        },
+        "start": {
+          "column": 5,
+          "line": 42
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:43:9: replace HardenedBytes::is_empty -> bool with false",
+    "package": "oc-crypto",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 30,
+        "line": 43
+      },
+      "start": {
+        "column": 9,
+        "line": 43
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace HardenedBytes::from_slice -> Result<Self, MemGuardError> with Ok(Default::default())\n@@ -44,22 +44,17 @@\n     }\n \n     /// Copy `data` into a new page-locked, DONT_DUMP-marked buffer.\n     ///\n     /// - `data.is_empty()` returns an empty buffer without touching `mlock`.\n     /// - On `dont_dump` failure after a successful `lock`, the lock is undone and the error is\n     ///   propagated.\n     pub fn from_slice(data: &[u8]) -> Result<Self, MemGuardError> {\n-        if data.is_empty() {\n-            return Ok(Self { inner: Box::default() });\n-        }\n-        let mut hb = Self::new(data.len())?;\n-        hb.inner.copy_from_slice(data);\n-        Ok(hb)\n+        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Convert an owned `Vec<u8>` into a `HardenedBytes` without re-allocating.\n     ///\n     /// The Vec is shrunk to its exact length via `into_boxed_slice`, then\n     /// page-locked and marked DONT_DUMP. On `dont_dump` failure after a\n     /// successful `lock`, the lock is undone and the error is propagated.\n     pub fn from_vec(data: Vec<u8>) -> Result<Self, MemGuardError> {\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "HardenedBytes::from_slice",
+      "return_type": "-> Result<Self, MemGuardError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 58
+        },
+        "start": {
+          "column": 5,
+          "line": 46
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:52:9: replace HardenedBytes::from_slice -> Result<Self, MemGuardError> with Ok(Default::default())",
+    "package": "oc-crypto",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 15,
+        "line": 57
+      },
+      "start": {
+        "column": 9,
+        "line": 52
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace HardenedBytes::from_vec -> Result<Self, MemGuardError> with Ok(Default::default())\n@@ -58,28 +58,17 @@\n     }\n \n     /// Convert an owned `Vec<u8>` into a `HardenedBytes` without re-allocating.\n     ///\n     /// The Vec is shrunk to its exact length via `into_boxed_slice`, then\n     /// page-locked and marked DONT_DUMP. On `dont_dump` failure after a\n     /// successful `lock`, the lock is undone and the error is propagated.\n     pub fn from_vec(data: Vec<u8>) -> Result<Self, MemGuardError> {\n-        if data.is_empty() {\n-            return Ok(Self { inner: Box::default() });\n-        }\n-        let len = data.len();\n-        let inner = data.into_boxed_slice();\n-        let ptr = inner.as_ptr();\n-        page_guard::lock(ptr, len)?;\n-        if let Err(e) = page_guard::dont_dump(ptr, len) {\n-            page_guard::unlock(ptr, len);\n-            return Err(e);\n-        }\n-        Ok(Self { inner })\n+        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Expose the underlying bytes. Use with care.\n     ///\n     /// Inherent method that matches the historical `SecretBytes::expose` API\n     /// name, so callers migrated from `oc_signer::SecretBytes` need no rename.\n     pub fn expose(&self) -> &[u8] {\n         &self.inner\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "HardenedBytes::from_vec",
+      "return_type": "-> Result<Self, MemGuardError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 78
+        },
+        "start": {
+          "column": 5,
+          "line": 60
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:66:9: replace HardenedBytes::from_vec -> Result<Self, MemGuardError> with Ok(Default::default())",
+    "package": "oc-crypto",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 27,
+        "line": 77
+      },
+      "start": {
+        "column": 9,
+        "line": 66
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace HardenedBytes::expose -> &[u8] with Vec::leak(Vec::new())\n@@ -77,17 +77,17 @@\n         Ok(Self { inner })\n     }\n \n     /// Expose the underlying bytes. Use with care.\n     ///\n     /// Inherent method that matches the historical `SecretBytes::expose` API\n     /// name, so callers migrated from `oc_signer::SecretBytes` need no rename.\n     pub fn expose(&self) -> &[u8] {\n-        &self.inner\n+        Vec::leak(Vec::new()) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl Clone for HardenedBytes {\n     /// Clone the buffer contents into a new page-locked allocation.\n     ///\n     /// `Clone` is infallible by trait contract. If `mlock` fails for the\n     /// clone, we fall back to an *unlocked* copy — the bytes are still\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "HardenedBytes::expose",
+      "return_type": "-> &[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 86
+        },
+        "start": {
+          "column": 5,
+          "line": 80
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:85:9: replace HardenedBytes::expose -> &[u8] with Vec::leak(Vec::new())",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(Vec::new())",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 85
+      },
+      "start": {
+        "column": 9,
+        "line": 85
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace HardenedBytes::expose -> &[u8] with Vec::leak(vec![0])\n@@ -77,17 +77,17 @@\n         Ok(Self { inner })\n     }\n \n     /// Expose the underlying bytes. Use with care.\n     ///\n     /// Inherent method that matches the historical `SecretBytes::expose` API\n     /// name, so callers migrated from `oc_signer::SecretBytes` need no rename.\n     pub fn expose(&self) -> &[u8] {\n-        &self.inner\n+        Vec::leak(vec![0]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl Clone for HardenedBytes {\n     /// Clone the buffer contents into a new page-locked allocation.\n     ///\n     /// `Clone` is infallible by trait contract. If `mlock` fails for the\n     /// clone, we fall back to an *unlocked* copy — the bytes are still\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "HardenedBytes::expose",
+      "return_type": "-> &[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 86
+        },
+        "start": {
+          "column": 5,
+          "line": 80
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:85:9: replace HardenedBytes::expose -> &[u8] with Vec::leak(vec![0])",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(vec![0])",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 85
+      },
+      "start": {
+        "column": 9,
+        "line": 85
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace HardenedBytes::expose -> &[u8] with Vec::leak(vec![1])\n@@ -77,17 +77,17 @@\n         Ok(Self { inner })\n     }\n \n     /// Expose the underlying bytes. Use with care.\n     ///\n     /// Inherent method that matches the historical `SecretBytes::expose` API\n     /// name, so callers migrated from `oc_signer::SecretBytes` need no rename.\n     pub fn expose(&self) -> &[u8] {\n-        &self.inner\n+        Vec::leak(vec![1]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl Clone for HardenedBytes {\n     /// Clone the buffer contents into a new page-locked allocation.\n     ///\n     /// `Clone` is infallible by trait contract. If `mlock` fails for the\n     /// clone, we fall back to an *unlocked* copy — the bytes are still\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "HardenedBytes::expose",
+      "return_type": "-> &[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 86
+        },
+        "start": {
+          "column": 5,
+          "line": 80
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:85:9: replace HardenedBytes::expose -> &[u8] with Vec::leak(vec![1])",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(vec![1])",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 85
+      },
+      "start": {
+        "column": 9,
+        "line": 85
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace <impl Clone for HardenedBytes>::clone -> Self with Default::default()\n@@ -89,20 +89,17 @@\n impl Clone for HardenedBytes {\n     /// Clone the buffer contents into a new page-locked allocation.\n     ///\n     /// `Clone` is infallible by trait contract. If `mlock` fails for the\n     /// clone, we fall back to an *unlocked* copy — the bytes are still\n     /// zeroized on `Drop`, just not pinned in RAM. This matches the\n     /// historical `SecretBytes::clone` behavior (best-effort mlock).\n     fn clone(&self) -> Self {\n-        match Self::from_slice(&self.inner) {\n-            Ok(c) => c,\n-            Err(_) => Self { inner: self.inner.clone() },\n-        }\n+        Default::default() /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl AsRef<[u8]> for HardenedBytes {\n     fn as_ref(&self) -> &[u8] {\n         &self.inner\n     }\n }\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "<impl Clone for HardenedBytes>::clone",
+      "return_type": "-> Self",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 101
+        },
+        "start": {
+          "column": 5,
+          "line": 90
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:97:9: replace <impl Clone for HardenedBytes>::clone -> Self with Default::default()",
+    "package": "oc-crypto",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 100
+      },
+      "start": {
+        "column": 9,
+        "line": 97
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace <impl AsRef<[u8]> for HardenedBytes>::as_ref -> &[u8] with Vec::leak(Vec::new())\n@@ -98,17 +98,17 @@\n             Ok(c) => c,\n             Err(_) => Self { inner: self.inner.clone() },\n         }\n     }\n }\n \n impl AsRef<[u8]> for HardenedBytes {\n     fn as_ref(&self) -> &[u8] {\n-        &self.inner\n+        Vec::leak(Vec::new()) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl AsMut<[u8]> for HardenedBytes {\n     fn as_mut(&mut self) -> &mut [u8] {\n         &mut self.inner\n     }\n }\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "<impl AsRef<[u8]> for HardenedBytes>::as_ref",
+      "return_type": "-> &[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 107
+        },
+        "start": {
+          "column": 5,
+          "line": 105
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:106:9: replace <impl AsRef<[u8]> for HardenedBytes>::as_ref -> &[u8] with Vec::leak(Vec::new())",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(Vec::new())",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 106
+      },
+      "start": {
+        "column": 9,
+        "line": 106
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace <impl AsRef<[u8]> for HardenedBytes>::as_ref -> &[u8] with Vec::leak(vec![0])\n@@ -98,17 +98,17 @@\n             Ok(c) => c,\n             Err(_) => Self { inner: self.inner.clone() },\n         }\n     }\n }\n \n impl AsRef<[u8]> for HardenedBytes {\n     fn as_ref(&self) -> &[u8] {\n-        &self.inner\n+        Vec::leak(vec![0]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl AsMut<[u8]> for HardenedBytes {\n     fn as_mut(&mut self) -> &mut [u8] {\n         &mut self.inner\n     }\n }\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "<impl AsRef<[u8]> for HardenedBytes>::as_ref",
+      "return_type": "-> &[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 107
+        },
+        "start": {
+          "column": 5,
+          "line": 105
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:106:9: replace <impl AsRef<[u8]> for HardenedBytes>::as_ref -> &[u8] with Vec::leak(vec![0])",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(vec![0])",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 106
+      },
+      "start": {
+        "column": 9,
+        "line": 106
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace <impl AsRef<[u8]> for HardenedBytes>::as_ref -> &[u8] with Vec::leak(vec![1])\n@@ -98,17 +98,17 @@\n             Ok(c) => c,\n             Err(_) => Self { inner: self.inner.clone() },\n         }\n     }\n }\n \n impl AsRef<[u8]> for HardenedBytes {\n     fn as_ref(&self) -> &[u8] {\n-        &self.inner\n+        Vec::leak(vec![1]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl AsMut<[u8]> for HardenedBytes {\n     fn as_mut(&mut self) -> &mut [u8] {\n         &mut self.inner\n     }\n }\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "<impl AsRef<[u8]> for HardenedBytes>::as_ref",
+      "return_type": "-> &[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 107
+        },
+        "start": {
+          "column": 5,
+          "line": 105
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:106:9: replace <impl AsRef<[u8]> for HardenedBytes>::as_ref -> &[u8] with Vec::leak(vec![1])",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(vec![1])",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 106
+      },
+      "start": {
+        "column": 9,
+        "line": 106
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace <impl AsMut<[u8]> for HardenedBytes>::as_mut -> &mut[u8] with Vec::leak(Vec::new())\n@@ -104,17 +104,17 @@\n impl AsRef<[u8]> for HardenedBytes {\n     fn as_ref(&self) -> &[u8] {\n         &self.inner\n     }\n }\n \n impl AsMut<[u8]> for HardenedBytes {\n     fn as_mut(&mut self) -> &mut [u8] {\n-        &mut self.inner\n+        Vec::leak(Vec::new()) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl Drop for HardenedBytes {\n     fn drop(&mut self) {\n         let ptr = self.inner.as_ptr();\n         let len = self.inner.len();\n         if len == 0 {\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "<impl AsMut<[u8]> for HardenedBytes>::as_mut",
+      "return_type": "-> &mut[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 113
+        },
+        "start": {
+          "column": 5,
+          "line": 111
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:112:9: replace <impl AsMut<[u8]> for HardenedBytes>::as_mut -> &mut[u8] with Vec::leak(Vec::new())",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(Vec::new())",
+    "span": {
+      "end": {
+        "column": 24,
+        "line": 112
+      },
+      "start": {
+        "column": 9,
+        "line": 112
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace <impl AsMut<[u8]> for HardenedBytes>::as_mut -> &mut[u8] with Vec::leak(vec![0])\n@@ -104,17 +104,17 @@\n impl AsRef<[u8]> for HardenedBytes {\n     fn as_ref(&self) -> &[u8] {\n         &self.inner\n     }\n }\n \n impl AsMut<[u8]> for HardenedBytes {\n     fn as_mut(&mut self) -> &mut [u8] {\n-        &mut self.inner\n+        Vec::leak(vec![0]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl Drop for HardenedBytes {\n     fn drop(&mut self) {\n         let ptr = self.inner.as_ptr();\n         let len = self.inner.len();\n         if len == 0 {\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "<impl AsMut<[u8]> for HardenedBytes>::as_mut",
+      "return_type": "-> &mut[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 113
+        },
+        "start": {
+          "column": 5,
+          "line": 111
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:112:9: replace <impl AsMut<[u8]> for HardenedBytes>::as_mut -> &mut[u8] with Vec::leak(vec![0])",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(vec![0])",
+    "span": {
+      "end": {
+        "column": 24,
+        "line": 112
+      },
+      "start": {
+        "column": 9,
+        "line": 112
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace <impl AsMut<[u8]> for HardenedBytes>::as_mut -> &mut[u8] with Vec::leak(vec![1])\n@@ -104,17 +104,17 @@\n impl AsRef<[u8]> for HardenedBytes {\n     fn as_ref(&self) -> &[u8] {\n         &self.inner\n     }\n }\n \n impl AsMut<[u8]> for HardenedBytes {\n     fn as_mut(&mut self) -> &mut [u8] {\n-        &mut self.inner\n+        Vec::leak(vec![1]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl Drop for HardenedBytes {\n     fn drop(&mut self) {\n         let ptr = self.inner.as_ptr();\n         let len = self.inner.len();\n         if len == 0 {\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "<impl AsMut<[u8]> for HardenedBytes>::as_mut",
+      "return_type": "-> &mut[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 113
+        },
+        "start": {
+          "column": 5,
+          "line": 111
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:112:9: replace <impl AsMut<[u8]> for HardenedBytes>::as_mut -> &mut[u8] with Vec::leak(vec![1])",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(vec![1])",
+    "span": {
+      "end": {
+        "column": 24,
+        "line": 112
+      },
+      "start": {
+        "column": 9,
+        "line": 112
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace <impl Drop for HardenedBytes>::drop with ()\n@@ -110,25 +110,17 @@\n impl AsMut<[u8]> for HardenedBytes {\n     fn as_mut(&mut self) -> &mut [u8] {\n         &mut self.inner\n     }\n }\n \n impl Drop for HardenedBytes {\n     fn drop(&mut self) {\n-        let ptr = self.inner.as_ptr();\n-        let len = self.inner.len();\n-        if len == 0 {\n-            return;\n-        }\n-        // Zeroize first so the bytes are wiped while the page is still locked,\n-        // then release the lock.\n-        self.inner.zeroize();\n-        page_guard::unlock(ptr, len);\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl std::fmt::Debug for HardenedBytes {\n     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n         // Never expose the bytes — even length is sufficient metadata.\n         write!(f, \"[REDACTED; {} bytes]\", self.inner.len())\n     }\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "<impl Drop for HardenedBytes>::drop",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 127
+        },
+        "start": {
+          "column": 5,
+          "line": 117
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:118:9: replace <impl Drop for HardenedBytes>::drop with ()",
+    "package": "oc-crypto",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 38,
+        "line": 126
+      },
+      "start": {
+        "column": 9,
+        "line": 118
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace == with != in <impl Drop for HardenedBytes>::drop\n@@ -112,17 +112,17 @@\n         &mut self.inner\n     }\n }\n \n impl Drop for HardenedBytes {\n     fn drop(&mut self) {\n         let ptr = self.inner.as_ptr();\n         let len = self.inner.len();\n-        if len == 0 {\n+        if len != /* ~ changed by cargo-mutants ~ */ 0 {\n             return;\n         }\n         // Zeroize first so the bytes are wiped while the page is still locked,\n         // then release the lock.\n         self.inner.zeroize();\n         page_guard::unlock(ptr, len);\n     }\n }\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "<impl Drop for HardenedBytes>::drop",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 127
+        },
+        "start": {
+          "column": 5,
+          "line": 117
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/hardened.rs:120:16: replace == with != in <impl Drop for HardenedBytes>::drop",
+    "package": "oc-crypto",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 18,
+        "line": 120
+      },
+      "start": {
+        "column": 16,
+        "line": 120
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/hardened.rs\n+++ replace <impl std::fmt::Debug for HardenedBytes>::fmt -> std::fmt::Result with Ok(Default::default())\n@@ -125,17 +125,17 @@\n         self.inner.zeroize();\n         page_guard::unlock(ptr, len);\n     }\n }\n \n impl std::fmt::Debug for HardenedBytes {\n     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n         // Never expose the bytes — even length is sufficient metadata.\n-        write!(f, \"[REDACTED; {} bytes]\", self.inner.len())\n+        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     #[test]\n",
+    "file": "crates/oc-crypto/src/hardened.rs",
+    "function": {
+      "function_name": "<impl std::fmt::Debug for HardenedBytes>::fmt",
+      "return_type": "-> std::fmt::Result",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 134
+        },
+        "start": {
+          "column": 5,
+          "line": 131
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/hardened.rs:133:9: replace <impl std::fmt::Debug for HardenedBytes>::fmt -> std::fmt::Result with Ok(Default::default())",
+    "package": "oc-crypto",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 60,
+        "line": 133
+      },
+      "start": {
+        "column": 9,
+        "line": 133
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace Inner<V>::bump -> u64 with 0\n@@ -50,19 +50,17 @@\n     entries: HashMap<String, CacheEntry<V>>,\n     recency: BTreeMap<u64, String>,\n     next_tick: u64,\n }\n \n impl<V> Inner<V> {\n     /// Assign the next monotonic tick.\n     fn bump(&mut self) -> u64 {\n-        let t = self.next_tick;\n-        self.next_tick = self.next_tick.wrapping_add(1);\n-        t\n+        0 /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Remove an entry and its recency index slot together.\n     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {\n         let entry = self.entries.remove(id)?;\n         self.recency.remove(&entry.tick);\n         Some(entry)\n     }\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::bump",
+      "return_type": "-> u64",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 61
+        },
+        "start": {
+          "column": 5,
+          "line": 56
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:58:9: replace Inner<V>::bump -> u64 with 0",
+    "package": "oc-crypto",
+    "replacement": "0",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 60
+      },
+      "start": {
+        "column": 9,
+        "line": 58
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace Inner<V>::bump -> u64 with 1\n@@ -50,19 +50,17 @@\n     entries: HashMap<String, CacheEntry<V>>,\n     recency: BTreeMap<u64, String>,\n     next_tick: u64,\n }\n \n impl<V> Inner<V> {\n     /// Assign the next monotonic tick.\n     fn bump(&mut self) -> u64 {\n-        let t = self.next_tick;\n-        self.next_tick = self.next_tick.wrapping_add(1);\n-        t\n+        1 /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Remove an entry and its recency index slot together.\n     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {\n         let entry = self.entries.remove(id)?;\n         self.recency.remove(&entry.tick);\n         Some(entry)\n     }\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::bump",
+      "return_type": "-> u64",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 61
+        },
+        "start": {
+          "column": 5,
+          "line": 56
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:58:9: replace Inner<V>::bump -> u64 with 1",
+    "package": "oc-crypto",
+    "replacement": "1",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 60
+      },
+      "start": {
+        "column": 9,
+        "line": 58
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace Inner<V>::remove -> Option<CacheEntry<V>> with None\n@@ -57,19 +57,17 @@\n     fn bump(&mut self) -> u64 {\n         let t = self.next_tick;\n         self.next_tick = self.next_tick.wrapping_add(1);\n         t\n     }\n \n     /// Remove an entry and its recency index slot together.\n     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {\n-        let entry = self.entries.remove(id)?;\n-        self.recency.remove(&entry.tick);\n-        Some(entry)\n+        None /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Drop every entry whose idle time exceeds `ttl`.\n     fn evict_expired(&mut self, ttl: Duration) {\n         let expired: Vec<String> = self\n             .entries\n             .iter()\n             .filter(|(_, e)| e.last_accessed.elapsed() > ttl)\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::remove",
+      "return_type": "-> Option<CacheEntry<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 68
+        },
+        "start": {
+          "column": 5,
+          "line": 63
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:65:9: replace Inner<V>::remove -> Option<CacheEntry<V>> with None",
+    "package": "oc-crypto",
+    "replacement": "None",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 67
+      },
+      "start": {
+        "column": 9,
+        "line": 65
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace Inner<V>::remove -> Option<CacheEntry<V>> with Some(CacheEntry::new())\n@@ -57,19 +57,17 @@\n     fn bump(&mut self) -> u64 {\n         let t = self.next_tick;\n         self.next_tick = self.next_tick.wrapping_add(1);\n         t\n     }\n \n     /// Remove an entry and its recency index slot together.\n     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {\n-        let entry = self.entries.remove(id)?;\n-        self.recency.remove(&entry.tick);\n-        Some(entry)\n+        Some(CacheEntry::new()) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Drop every entry whose idle time exceeds `ttl`.\n     fn evict_expired(&mut self, ttl: Duration) {\n         let expired: Vec<String> = self\n             .entries\n             .iter()\n             .filter(|(_, e)| e.last_accessed.elapsed() > ttl)\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::remove",
+      "return_type": "-> Option<CacheEntry<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 68
+        },
+        "start": {
+          "column": 5,
+          "line": 63
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:65:9: replace Inner<V>::remove -> Option<CacheEntry<V>> with Some(CacheEntry::new())",
+    "package": "oc-crypto",
+    "replacement": "Some(CacheEntry::new())",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 67
+      },
+      "start": {
+        "column": 9,
+        "line": 65
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace Inner<V>::remove -> Option<CacheEntry<V>> with Some(CacheEntry::from_iter([Default::default()]))\n@@ -57,19 +57,17 @@\n     fn bump(&mut self) -> u64 {\n         let t = self.next_tick;\n         self.next_tick = self.next_tick.wrapping_add(1);\n         t\n     }\n \n     /// Remove an entry and its recency index slot together.\n     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {\n-        let entry = self.entries.remove(id)?;\n-        self.recency.remove(&entry.tick);\n-        Some(entry)\n+        Some(CacheEntry::from_iter([Default::default()])) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Drop every entry whose idle time exceeds `ttl`.\n     fn evict_expired(&mut self, ttl: Duration) {\n         let expired: Vec<String> = self\n             .entries\n             .iter()\n             .filter(|(_, e)| e.last_accessed.elapsed() > ttl)\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::remove",
+      "return_type": "-> Option<CacheEntry<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 68
+        },
+        "start": {
+          "column": 5,
+          "line": 63
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:65:9: replace Inner<V>::remove -> Option<CacheEntry<V>> with Some(CacheEntry::from_iter([Default::default()]))",
+    "package": "oc-crypto",
+    "replacement": "Some(CacheEntry::from_iter([Default::default()]))",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 67
+      },
+      "start": {
+        "column": 9,
+        "line": 65
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace Inner<V>::remove -> Option<CacheEntry<V>> with Some(CacheEntry::new(Default::default()))\n@@ -57,19 +57,17 @@\n     fn bump(&mut self) -> u64 {\n         let t = self.next_tick;\n         self.next_tick = self.next_tick.wrapping_add(1);\n         t\n     }\n \n     /// Remove an entry and its recency index slot together.\n     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {\n-        let entry = self.entries.remove(id)?;\n-        self.recency.remove(&entry.tick);\n-        Some(entry)\n+        Some(CacheEntry::new(Default::default())) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Drop every entry whose idle time exceeds `ttl`.\n     fn evict_expired(&mut self, ttl: Duration) {\n         let expired: Vec<String> = self\n             .entries\n             .iter()\n             .filter(|(_, e)| e.last_accessed.elapsed() > ttl)\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::remove",
+      "return_type": "-> Option<CacheEntry<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 68
+        },
+        "start": {
+          "column": 5,
+          "line": 63
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:65:9: replace Inner<V>::remove -> Option<CacheEntry<V>> with Some(CacheEntry::new(Default::default()))",
+    "package": "oc-crypto",
+    "replacement": "Some(CacheEntry::new(Default::default()))",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 67
+      },
+      "start": {
+        "column": 9,
+        "line": 65
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace Inner<V>::remove -> Option<CacheEntry<V>> with Some(CacheEntry::from(Default::default()))\n@@ -57,19 +57,17 @@\n     fn bump(&mut self) -> u64 {\n         let t = self.next_tick;\n         self.next_tick = self.next_tick.wrapping_add(1);\n         t\n     }\n \n     /// Remove an entry and its recency index slot together.\n     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {\n-        let entry = self.entries.remove(id)?;\n-        self.recency.remove(&entry.tick);\n-        Some(entry)\n+        Some(CacheEntry::from(Default::default())) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Drop every entry whose idle time exceeds `ttl`.\n     fn evict_expired(&mut self, ttl: Duration) {\n         let expired: Vec<String> = self\n             .entries\n             .iter()\n             .filter(|(_, e)| e.last_accessed.elapsed() > ttl)\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::remove",
+      "return_type": "-> Option<CacheEntry<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 68
+        },
+        "start": {
+          "column": 5,
+          "line": 63
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:65:9: replace Inner<V>::remove -> Option<CacheEntry<V>> with Some(CacheEntry::from(Default::default()))",
+    "package": "oc-crypto",
+    "replacement": "Some(CacheEntry::from(Default::default()))",
+    "span": {
+      "end": {
+        "column": 20,
+        "line": 67
+      },
+      "start": {
+        "column": 9,
+        "line": 65
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace Inner<V>::evict_expired with ()\n@@ -64,25 +64,17 @@\n     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {\n         let entry = self.entries.remove(id)?;\n         self.recency.remove(&entry.tick);\n         Some(entry)\n     }\n \n     /// Drop every entry whose idle time exceeds `ttl`.\n     fn evict_expired(&mut self, ttl: Duration) {\n-        let expired: Vec<String> = self\n-            .entries\n-            .iter()\n-            .filter(|(_, e)| e.last_accessed.elapsed() > ttl)\n-            .map(|(k, _)| k.clone())\n-            .collect();\n-        for id in expired {\n-            self.remove(&id);\n-        }\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n /// A time-to-idle + strict-LRU cache for derived keys.\n ///\n /// All entries are dropped (and thus zeroized if `V` is `HardenedBytes`)\n /// on eviction or `Drop`. The cache is keyed by an opaque `String` id\n /// (typically a CAIP-2 chain id like `\"eip155:1\"`).\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::evict_expired",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 81
+        },
+        "start": {
+          "column": 5,
+          "line": 70
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:72:9: replace Inner<V>::evict_expired with ()",
+    "package": "oc-crypto",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 80
+      },
+      "start": {
+        "column": 9,
+        "line": 72
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace > with == in Inner<V>::evict_expired\n@@ -67,17 +67,17 @@\n         Some(entry)\n     }\n \n     /// Drop every entry whose idle time exceeds `ttl`.\n     fn evict_expired(&mut self, ttl: Duration) {\n         let expired: Vec<String> = self\n             .entries\n             .iter()\n-            .filter(|(_, e)| e.last_accessed.elapsed() > ttl)\n+            .filter(|(_, e)| e.last_accessed.elapsed() == /* ~ changed by cargo-mutants ~ */ ttl)\n             .map(|(k, _)| k.clone())\n             .collect();\n         for id in expired {\n             self.remove(&id);\n         }\n     }\n }\n \n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::evict_expired",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 81
+        },
+        "start": {
+          "column": 5,
+          "line": 70
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/key_cache.rs:75:56: replace > with == in Inner<V>::evict_expired",
+    "package": "oc-crypto",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 57,
+        "line": 75
+      },
+      "start": {
+        "column": 56,
+        "line": 75
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace > with < in Inner<V>::evict_expired\n@@ -67,17 +67,17 @@\n         Some(entry)\n     }\n \n     /// Drop every entry whose idle time exceeds `ttl`.\n     fn evict_expired(&mut self, ttl: Duration) {\n         let expired: Vec<String> = self\n             .entries\n             .iter()\n-            .filter(|(_, e)| e.last_accessed.elapsed() > ttl)\n+            .filter(|(_, e)| e.last_accessed.elapsed() < /* ~ changed by cargo-mutants ~ */ ttl)\n             .map(|(k, _)| k.clone())\n             .collect();\n         for id in expired {\n             self.remove(&id);\n         }\n     }\n }\n \n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::evict_expired",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 81
+        },
+        "start": {
+          "column": 5,
+          "line": 70
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/key_cache.rs:75:56: replace > with < in Inner<V>::evict_expired",
+    "package": "oc-crypto",
+    "replacement": "<",
+    "span": {
+      "end": {
+        "column": 57,
+        "line": 75
+      },
+      "start": {
+        "column": 56,
+        "line": 75
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace > with >= in Inner<V>::evict_expired\n@@ -67,17 +67,17 @@\n         Some(entry)\n     }\n \n     /// Drop every entry whose idle time exceeds `ttl`.\n     fn evict_expired(&mut self, ttl: Duration) {\n         let expired: Vec<String> = self\n             .entries\n             .iter()\n-            .filter(|(_, e)| e.last_accessed.elapsed() > ttl)\n+            .filter(|(_, e)| e.last_accessed.elapsed() >= /* ~ changed by cargo-mutants ~ */ ttl)\n             .map(|(k, _)| k.clone())\n             .collect();\n         for id in expired {\n             self.remove(&id);\n         }\n     }\n }\n \n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "Inner<V>::evict_expired",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 81
+        },
+        "start": {
+          "column": 5,
+          "line": 70
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/key_cache.rs:75:56: replace > with >= in Inner<V>::evict_expired",
+    "package": "oc-crypto",
+    "replacement": ">=",
+    "span": {
+      "end": {
+        "column": 57,
+        "line": 75
+      },
+      "start": {
+        "column": 56,
+        "line": 75
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::new()\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::new() /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::new()",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::new()",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from_iter([Inner::new()])\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::from_iter([Inner::new()]) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from_iter([Inner::new()])",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::from_iter([Inner::new()])",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::new(Inner::new())\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::new(Inner::new()) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::new(Inner::new())",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::new(Inner::new())",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from(Inner::new())\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::from(Inner::new()) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from(Inner::new())",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::from(Inner::new())",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from_iter([Inner::from_iter([Default::default()])])\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::from_iter([Inner::from_iter([Default::default()])]) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from_iter([Inner::from_iter([Default::default()])])",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::from_iter([Inner::from_iter([Default::default()])])",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::new(Inner::from_iter([Default::default()]))\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::new(Inner::from_iter([Default::default()])) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::new(Inner::from_iter([Default::default()]))",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::new(Inner::from_iter([Default::default()]))",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from(Inner::from_iter([Default::default()]))\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::from(Inner::from_iter([Default::default()])) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from(Inner::from_iter([Default::default()]))",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::from(Inner::from_iter([Default::default()]))",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from_iter([Inner::new(Default::default())])\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::from_iter([Inner::new(Default::default())]) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from_iter([Inner::new(Default::default())])",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::from_iter([Inner::new(Default::default())])",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::new(Inner::new(Default::default()))\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::new(Inner::new(Default::default())) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::new(Inner::new(Default::default()))",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::new(Inner::new(Default::default()))",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from(Inner::new(Default::default()))\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::from(Inner::new(Default::default())) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from(Inner::new(Default::default()))",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::from(Inner::new(Default::default()))",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from_iter([Inner::from(Default::default())])\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::from_iter([Inner::from(Default::default())]) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from_iter([Inner::from(Default::default())])",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::from_iter([Inner::from(Default::default())])",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::new(Inner::from(Default::default()))\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::new(Inner::from(Default::default())) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::new(Inner::from(Default::default()))",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::new(Inner::from(Default::default()))",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from(Inner::from(Default::default()))\n@@ -122,17 +122,17 @@\n     /// Lock the inner state, recovering from a poisoned mutex.\n     ///\n     /// A panic in another thread must not turn this cache into a permanent\n     /// `panic!` site on a signing hot path (the previous implementation used\n     /// `.expect(...)` here). The guarded data is a plain map of key material\n     /// with no cross-field invariant that a mid-panic unwind could corrupt,\n     /// so recovering the guard is sound.\n     fn lock(&self) -> MutexGuard<'_, Inner<V>> {\n-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)\n+        MutexGuard::from(Inner::from(Default::default())) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::lock",
+      "return_type": "-> MutexGuard<'_, Inner<V>>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 131
+        },
+        "start": {
+          "column": 5,
+          "line": 122
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:130:9: replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from(Inner::from(Default::default()))",
+    "package": "oc-crypto",
+    "replacement": "MutexGuard::from(Inner::from(Default::default()))",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 130
+      },
+      "start": {
+        "column": 9,
+        "line": 130
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::get -> Option<V> with None\n@@ -132,37 +132,17 @@\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n     pub fn get(&self, id: &str) -> Option<V> {\n-        let mut inner = self.lock();\n-\n-        // Expired? Drop it and report a miss.\n-        match inner.entries.get(id) {\n-            None => return None,\n-            Some(entry) if entry.last_accessed.elapsed() > self.ttl => {\n-                inner.remove(id);\n-                return None;\n-            }\n-            Some(_) => {}\n-        }\n-\n-        // Live hit: refresh recency with a single lookup + index swap.\n-        let tick = inner.bump();\n-        let entry = inner.entries.get_mut(id)?;\n-        let old_tick = std::mem::replace(&mut entry.tick, tick);\n-        entry.last_accessed = Instant::now();\n-        let cloned = entry.key.clone();\n-        inner.recency.remove(&old_tick);\n-        inner.recency.insert(tick, id.to_string());\n-        Some(cloned)\n+        None /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Insert a key under `id`, evicting expired entries and the LRU entry\n     /// if at capacity. The cache takes ownership of the value — evicting it\n     /// later triggers `Drop` (zeroize + munlock for `HardenedBytes`).\n     pub fn insert(&self, id: &str, key: V) {\n         let mut inner = self.lock();\n         inner.evict_expired(self.ttl);\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::get",
+      "return_type": "-> Option<V>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 161
+        },
+        "start": {
+          "column": 5,
+          "line": 133
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:140:9: replace KeyCache<V>::get -> Option<V> with None",
+    "package": "oc-crypto",
+    "replacement": "None",
+    "span": {
+      "end": {
+        "column": 21,
+        "line": 160
+      },
+      "start": {
+        "column": 9,
+        "line": 140
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::get -> Option<V> with Some(Default::default())\n@@ -132,37 +132,17 @@\n \n     /// Look up a key by id. Returns `None` if missing or expired.\n     ///\n     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of\n     /// the stored value — for `HardenedBytes`, the clone is independently\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n     pub fn get(&self, id: &str) -> Option<V> {\n-        let mut inner = self.lock();\n-\n-        // Expired? Drop it and report a miss.\n-        match inner.entries.get(id) {\n-            None => return None,\n-            Some(entry) if entry.last_accessed.elapsed() > self.ttl => {\n-                inner.remove(id);\n-                return None;\n-            }\n-            Some(_) => {}\n-        }\n-\n-        // Live hit: refresh recency with a single lookup + index swap.\n-        let tick = inner.bump();\n-        let entry = inner.entries.get_mut(id)?;\n-        let old_tick = std::mem::replace(&mut entry.tick, tick);\n-        entry.last_accessed = Instant::now();\n-        let cloned = entry.key.clone();\n-        inner.recency.remove(&old_tick);\n-        inner.recency.insert(tick, id.to_string());\n-        Some(cloned)\n+        Some(Default::default()) /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Insert a key under `id`, evicting expired entries and the LRU entry\n     /// if at capacity. The cache takes ownership of the value — evicting it\n     /// later triggers `Drop` (zeroize + munlock for `HardenedBytes`).\n     pub fn insert(&self, id: &str, key: V) {\n         let mut inner = self.lock();\n         inner.evict_expired(self.ttl);\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::get",
+      "return_type": "-> Option<V>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 161
+        },
+        "start": {
+          "column": 5,
+          "line": 133
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:140:9: replace KeyCache<V>::get -> Option<V> with Some(Default::default())",
+    "package": "oc-crypto",
+    "replacement": "Some(Default::default())",
+    "span": {
+      "end": {
+        "column": 21,
+        "line": 160
+      },
+      "start": {
+        "column": 9,
+        "line": 140
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace match guard entry.last_accessed.elapsed() > self.ttl with true in KeyCache<V>::get\n@@ -137,17 +137,17 @@\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n     pub fn get(&self, id: &str) -> Option<V> {\n         let mut inner = self.lock();\n \n         // Expired? Drop it and report a miss.\n         match inner.entries.get(id) {\n             None => return None,\n-            Some(entry) if entry.last_accessed.elapsed() > self.ttl => {\n+            Some(entry) if true /* ~ changed by cargo-mutants ~ */ => {\n                 inner.remove(id);\n                 return None;\n             }\n             Some(_) => {}\n         }\n \n         // Live hit: refresh recency with a single lookup + index swap.\n         let tick = inner.bump();\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::get",
+      "return_type": "-> Option<V>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 161
+        },
+        "start": {
+          "column": 5,
+          "line": 133
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "crates/oc-crypto/src/key_cache.rs:145:28: replace match guard entry.last_accessed.elapsed() > self.ttl with true in KeyCache<V>::get",
+    "package": "oc-crypto",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 68,
+        "line": 145
+      },
+      "start": {
+        "column": 28,
+        "line": 145
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace match guard entry.last_accessed.elapsed() > self.ttl with false in KeyCache<V>::get\n@@ -137,17 +137,17 @@\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n     pub fn get(&self, id: &str) -> Option<V> {\n         let mut inner = self.lock();\n \n         // Expired? Drop it and report a miss.\n         match inner.entries.get(id) {\n             None => return None,\n-            Some(entry) if entry.last_accessed.elapsed() > self.ttl => {\n+            Some(entry) if false /* ~ changed by cargo-mutants ~ */ => {\n                 inner.remove(id);\n                 return None;\n             }\n             Some(_) => {}\n         }\n \n         // Live hit: refresh recency with a single lookup + index swap.\n         let tick = inner.bump();\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::get",
+      "return_type": "-> Option<V>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 161
+        },
+        "start": {
+          "column": 5,
+          "line": 133
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "crates/oc-crypto/src/key_cache.rs:145:28: replace match guard entry.last_accessed.elapsed() > self.ttl with false in KeyCache<V>::get",
+    "package": "oc-crypto",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 68,
+        "line": 145
+      },
+      "start": {
+        "column": 28,
+        "line": 145
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace > with == in KeyCache<V>::get\n@@ -137,17 +137,17 @@\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n     pub fn get(&self, id: &str) -> Option<V> {\n         let mut inner = self.lock();\n \n         // Expired? Drop it and report a miss.\n         match inner.entries.get(id) {\n             None => return None,\n-            Some(entry) if entry.last_accessed.elapsed() > self.ttl => {\n+            Some(entry) if entry.last_accessed.elapsed() == /* ~ changed by cargo-mutants ~ */ self.ttl => {\n                 inner.remove(id);\n                 return None;\n             }\n             Some(_) => {}\n         }\n \n         // Live hit: refresh recency with a single lookup + index swap.\n         let tick = inner.bump();\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::get",
+      "return_type": "-> Option<V>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 161
+        },
+        "start": {
+          "column": 5,
+          "line": 133
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/key_cache.rs:145:58: replace > with == in KeyCache<V>::get",
+    "package": "oc-crypto",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 59,
+        "line": 145
+      },
+      "start": {
+        "column": 58,
+        "line": 145
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace > with < in KeyCache<V>::get\n@@ -137,17 +137,17 @@\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n     pub fn get(&self, id: &str) -> Option<V> {\n         let mut inner = self.lock();\n \n         // Expired? Drop it and report a miss.\n         match inner.entries.get(id) {\n             None => return None,\n-            Some(entry) if entry.last_accessed.elapsed() > self.ttl => {\n+            Some(entry) if entry.last_accessed.elapsed() < /* ~ changed by cargo-mutants ~ */ self.ttl => {\n                 inner.remove(id);\n                 return None;\n             }\n             Some(_) => {}\n         }\n \n         // Live hit: refresh recency with a single lookup + index swap.\n         let tick = inner.bump();\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::get",
+      "return_type": "-> Option<V>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 161
+        },
+        "start": {
+          "column": 5,
+          "line": 133
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/key_cache.rs:145:58: replace > with < in KeyCache<V>::get",
+    "package": "oc-crypto",
+    "replacement": "<",
+    "span": {
+      "end": {
+        "column": 59,
+        "line": 145
+      },
+      "start": {
+        "column": 58,
+        "line": 145
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace > with >= in KeyCache<V>::get\n@@ -137,17 +137,17 @@\n     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by\n     /// the caller's scope.\n     pub fn get(&self, id: &str) -> Option<V> {\n         let mut inner = self.lock();\n \n         // Expired? Drop it and report a miss.\n         match inner.entries.get(id) {\n             None => return None,\n-            Some(entry) if entry.last_accessed.elapsed() > self.ttl => {\n+            Some(entry) if entry.last_accessed.elapsed() >= /* ~ changed by cargo-mutants ~ */ self.ttl => {\n                 inner.remove(id);\n                 return None;\n             }\n             Some(_) => {}\n         }\n \n         // Live hit: refresh recency with a single lookup + index swap.\n         let tick = inner.bump();\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::get",
+      "return_type": "-> Option<V>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 161
+        },
+        "start": {
+          "column": 5,
+          "line": 133
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/key_cache.rs:145:58: replace > with >= in KeyCache<V>::get",
+    "package": "oc-crypto",
+    "replacement": ">=",
+    "span": {
+      "end": {
+        "column": 59,
+        "line": 145
+      },
+      "start": {
+        "column": 58,
+        "line": 145
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::insert with ()\n@@ -159,34 +159,17 @@\n         inner.recency.insert(tick, id.to_string());\n         Some(cloned)\n     }\n \n     /// Insert a key under `id`, evicting expired entries and the LRU entry\n     /// if at capacity. The cache takes ownership of the value — evicting it\n     /// later triggers `Drop` (zeroize + munlock for `HardenedBytes`).\n     pub fn insert(&self, id: &str, key: V) {\n-        let mut inner = self.lock();\n-        inner.evict_expired(self.ttl);\n-\n-        // Replacing an existing id must not evict a different entry.\n-        inner.remove(id);\n-\n-        if inner.entries.len() >= self.max_entries {\n-            // O(log n): the smallest tick is the least recently used entry.\n-            if let Some((_, lru_id)) = inner.recency.iter().next().map(|(t, k)| (*t, k.clone())) {\n-                inner.remove(&lru_id);\n-            }\n-        }\n-\n-        let tick = inner.bump();\n-        inner.recency.insert(tick, id.to_string());\n-        inner\n-            .entries\n-            .insert(id.to_string(), CacheEntry { key, last_accessed: Instant::now(), tick });\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Clear all entries. Triggers `Drop` on every value.\n     pub fn clear(&self) {\n         let mut inner = self.lock();\n         inner.entries.clear();\n         inner.recency.clear();\n     }\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::insert",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 185
+        },
+        "start": {
+          "column": 5,
+          "line": 163
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:167:9: replace KeyCache<V>::insert with ()",
+    "package": "oc-crypto",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 94,
+        "line": 184
+      },
+      "start": {
+        "column": 9,
+        "line": 167
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace >= with < in KeyCache<V>::insert\n@@ -165,17 +165,17 @@\n     /// later triggers `Drop` (zeroize + munlock for `HardenedBytes`).\n     pub fn insert(&self, id: &str, key: V) {\n         let mut inner = self.lock();\n         inner.evict_expired(self.ttl);\n \n         // Replacing an existing id must not evict a different entry.\n         inner.remove(id);\n \n-        if inner.entries.len() >= self.max_entries {\n+        if inner.entries.len() < /* ~ changed by cargo-mutants ~ */ self.max_entries {\n             // O(log n): the smallest tick is the least recently used entry.\n             if let Some((_, lru_id)) = inner.recency.iter().next().map(|(t, k)| (*t, k.clone())) {\n                 inner.remove(&lru_id);\n             }\n         }\n \n         let tick = inner.bump();\n         inner.recency.insert(tick, id.to_string());\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::insert",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 185
+        },
+        "start": {
+          "column": 5,
+          "line": 163
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/key_cache.rs:173:32: replace >= with < in KeyCache<V>::insert",
+    "package": "oc-crypto",
+    "replacement": "<",
+    "span": {
+      "end": {
+        "column": 34,
+        "line": 173
+      },
+      "start": {
+        "column": 32,
+        "line": 173
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::clear with ()\n@@ -181,19 +181,17 @@\n         inner.recency.insert(tick, id.to_string());\n         inner\n             .entries\n             .insert(id.to_string(), CacheEntry { key, last_accessed: Instant::now(), tick });\n     }\n \n     /// Clear all entries. Triggers `Drop` on every value.\n     pub fn clear(&self) {\n-        let mut inner = self.lock();\n-        inner.entries.clear();\n-        inner.recency.clear();\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Evict only expired entries. Called opportunistically by `insert`.\n     pub fn evict_expired(&self) {\n         let mut inner = self.lock();\n         inner.evict_expired(self.ttl);\n     }\n \n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::clear",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 192
+        },
+        "start": {
+          "column": 5,
+          "line": 187
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:189:9: replace KeyCache<V>::clear with ()",
+    "package": "oc-crypto",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 31,
+        "line": 191
+      },
+      "start": {
+        "column": 9,
+        "line": 189
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::evict_expired with ()\n@@ -188,18 +188,17 @@\n     pub fn clear(&self) {\n         let mut inner = self.lock();\n         inner.entries.clear();\n         inner.recency.clear();\n     }\n \n     /// Evict only expired entries. Called opportunistically by `insert`.\n     pub fn evict_expired(&self) {\n-        let mut inner = self.lock();\n-        inner.evict_expired(self.ttl);\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Current number of entries (including any that are expired but not yet\n     /// reaped).\n     pub fn len(&self) -> usize {\n         self.lock().entries.len()\n     }\n \n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::evict_expired",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 198
+        },
+        "start": {
+          "column": 5,
+          "line": 194
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:196:9: replace KeyCache<V>::evict_expired with ()",
+    "package": "oc-crypto",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 39,
+        "line": 197
+      },
+      "start": {
+        "column": 9,
+        "line": 196
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::len -> usize with 0\n@@ -195,17 +195,17 @@\n     pub fn evict_expired(&self) {\n         let mut inner = self.lock();\n         inner.evict_expired(self.ttl);\n     }\n \n     /// Current number of entries (including any that are expired but not yet\n     /// reaped).\n     pub fn len(&self) -> usize {\n-        self.lock().entries.len()\n+        0 /* ~ changed by cargo-mutants ~ */\n     }\n \n     pub fn is_empty(&self) -> bool {\n         self.len() == 0\n     }\n \n     /// TTL configured for this cache.\n     pub fn ttl(&self) -> Duration {\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::len",
+      "return_type": "-> usize",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 204
+        },
+        "start": {
+          "column": 5,
+          "line": 200
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:203:9: replace KeyCache<V>::len -> usize with 0",
+    "package": "oc-crypto",
+    "replacement": "0",
+    "span": {
+      "end": {
+        "column": 34,
+        "line": 203
+      },
+      "start": {
+        "column": 9,
+        "line": 203
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::len -> usize with 1\n@@ -195,17 +195,17 @@\n     pub fn evict_expired(&self) {\n         let mut inner = self.lock();\n         inner.evict_expired(self.ttl);\n     }\n \n     /// Current number of entries (including any that are expired but not yet\n     /// reaped).\n     pub fn len(&self) -> usize {\n-        self.lock().entries.len()\n+        1 /* ~ changed by cargo-mutants ~ */\n     }\n \n     pub fn is_empty(&self) -> bool {\n         self.len() == 0\n     }\n \n     /// TTL configured for this cache.\n     pub fn ttl(&self) -> Duration {\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::len",
+      "return_type": "-> usize",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 204
+        },
+        "start": {
+          "column": 5,
+          "line": 200
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:203:9: replace KeyCache<V>::len -> usize with 1",
+    "package": "oc-crypto",
+    "replacement": "1",
+    "span": {
+      "end": {
+        "column": 34,
+        "line": 203
+      },
+      "start": {
+        "column": 9,
+        "line": 203
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::is_empty -> bool with true\n@@ -199,17 +199,17 @@\n \n     /// Current number of entries (including any that are expired but not yet\n     /// reaped).\n     pub fn len(&self) -> usize {\n         self.lock().entries.len()\n     }\n \n     pub fn is_empty(&self) -> bool {\n-        self.len() == 0\n+        true /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// TTL configured for this cache.\n     pub fn ttl(&self) -> Duration {\n         self.ttl\n     }\n \n     /// Max entries configured for this cache.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::is_empty",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 208
+        },
+        "start": {
+          "column": 5,
+          "line": 206
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:207:9: replace KeyCache<V>::is_empty -> bool with true",
+    "package": "oc-crypto",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 24,
+        "line": 207
+      },
+      "start": {
+        "column": 9,
+        "line": 207
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::is_empty -> bool with false\n@@ -199,17 +199,17 @@\n \n     /// Current number of entries (including any that are expired but not yet\n     /// reaped).\n     pub fn len(&self) -> usize {\n         self.lock().entries.len()\n     }\n \n     pub fn is_empty(&self) -> bool {\n-        self.len() == 0\n+        false /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// TTL configured for this cache.\n     pub fn ttl(&self) -> Duration {\n         self.ttl\n     }\n \n     /// Max entries configured for this cache.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::is_empty",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 208
+        },
+        "start": {
+          "column": 5,
+          "line": 206
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:207:9: replace KeyCache<V>::is_empty -> bool with false",
+    "package": "oc-crypto",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 24,
+        "line": 207
+      },
+      "start": {
+        "column": 9,
+        "line": 207
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace == with != in KeyCache<V>::is_empty\n@@ -199,17 +199,17 @@\n \n     /// Current number of entries (including any that are expired but not yet\n     /// reaped).\n     pub fn len(&self) -> usize {\n         self.lock().entries.len()\n     }\n \n     pub fn is_empty(&self) -> bool {\n-        self.len() == 0\n+        self.len() != /* ~ changed by cargo-mutants ~ */ 0\n     }\n \n     /// TTL configured for this cache.\n     pub fn ttl(&self) -> Duration {\n         self.ttl\n     }\n \n     /// Max entries configured for this cache.\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::is_empty",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 208
+        },
+        "start": {
+          "column": 5,
+          "line": 206
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/key_cache.rs:207:20: replace == with != in KeyCache<V>::is_empty",
+    "package": "oc-crypto",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 22,
+        "line": 207
+      },
+      "start": {
+        "column": 20,
+        "line": 207
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::ttl -> Duration with Default::default()\n@@ -204,17 +204,17 @@\n     }\n \n     pub fn is_empty(&self) -> bool {\n         self.len() == 0\n     }\n \n     /// TTL configured for this cache.\n     pub fn ttl(&self) -> Duration {\n-        self.ttl\n+        Default::default() /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// Max entries configured for this cache.\n     pub fn max_entries(&self) -> usize {\n         self.max_entries\n     }\n }\n \n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::ttl",
+      "return_type": "-> Duration",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 213
+        },
+        "start": {
+          "column": 5,
+          "line": 210
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:212:9: replace KeyCache<V>::ttl -> Duration with Default::default()",
+    "package": "oc-crypto",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 17,
+        "line": 212
+      },
+      "start": {
+        "column": 9,
+        "line": 212
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::max_entries -> usize with 0\n@@ -209,17 +209,17 @@\n \n     /// TTL configured for this cache.\n     pub fn ttl(&self) -> Duration {\n         self.ttl\n     }\n \n     /// Max entries configured for this cache.\n     pub fn max_entries(&self) -> usize {\n-        self.max_entries\n+        0 /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl<V: Clone + Send + Sync + 'static> Default for KeyCache<V> {\n     fn default() -> Self {\n         Self::new(DEFAULT_TTL, DEFAULT_MAX_ENTRIES)\n     }\n }\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::max_entries",
+      "return_type": "-> usize",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 218
+        },
+        "start": {
+          "column": 5,
+          "line": 215
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:217:9: replace KeyCache<V>::max_entries -> usize with 0",
+    "package": "oc-crypto",
+    "replacement": "0",
+    "span": {
+      "end": {
+        "column": 25,
+        "line": 217
+      },
+      "start": {
+        "column": 9,
+        "line": 217
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace KeyCache<V>::max_entries -> usize with 1\n@@ -209,17 +209,17 @@\n \n     /// TTL configured for this cache.\n     pub fn ttl(&self) -> Duration {\n         self.ttl\n     }\n \n     /// Max entries configured for this cache.\n     pub fn max_entries(&self) -> usize {\n-        self.max_entries\n+        1 /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n impl<V: Clone + Send + Sync + 'static> Default for KeyCache<V> {\n     fn default() -> Self {\n         Self::new(DEFAULT_TTL, DEFAULT_MAX_ENTRIES)\n     }\n }\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "KeyCache<V>::max_entries",
+      "return_type": "-> usize",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 218
+        },
+        "start": {
+          "column": 5,
+          "line": 215
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:217:9: replace KeyCache<V>::max_entries -> usize with 1",
+    "package": "oc-crypto",
+    "replacement": "1",
+    "span": {
+      "end": {
+        "column": 25,
+        "line": 217
+      },
+      "start": {
+        "column": 9,
+        "line": 217
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/key_cache.rs\n+++ replace <impl Drop for KeyCache<V>>::drop with ()\n@@ -221,17 +221,17 @@\n impl<V: Clone + Send + Sync + 'static> Default for KeyCache<V> {\n     fn default() -> Self {\n         Self::new(DEFAULT_TTL, DEFAULT_MAX_ENTRIES)\n     }\n }\n \n impl<V: Clone + Send + Sync + 'static> Drop for KeyCache<V> {\n     fn drop(&mut self) {\n-        self.clear();\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n #[cfg(test)]\n mod tests {\n     use std::{sync::Arc, thread};\n \n     use super::*;\n",
+    "file": "crates/oc-crypto/src/key_cache.rs",
+    "function": {
+      "function_name": "<impl Drop for KeyCache<V>>::drop",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 230
+        },
+        "start": {
+          "column": 5,
+          "line": 228
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/key_cache.rs:229:9: replace <impl Drop for KeyCache<V>>::drop with ()",
+    "package": "oc-crypto",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 22,
+        "line": 229
+      },
+      "start": {
+        "column": 9,
+        "line": 229
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/page_guard.rs\n+++ replace lock -> Result<(), MemGuardError> with Ok(())\n@@ -15,45 +15,17 @@\n /// Lock a region of memory so it cannot be swapped to disk.\n ///\n /// - Unix: `mlock(2)`. On non-zero return, captures `errno` via `std::io::Error::last_os_error()`\n ///   and returns `MlockFailed`.\n /// - Windows: `VirtualLock`. On zero return, returns `VirtualLockFailed`.\n ///\n /// Calling with `len == 0` is a no-op success.\n pub fn lock(addr: *const u8, len: usize) -> Result<(), MemGuardError> {\n-    if len == 0 {\n-        return Ok(());\n-    }\n-    #[cfg(unix)]\n-    {\n-        let ret = unsafe { libc::mlock(addr.cast::<libc::c_void>(), len) };\n-        if ret != 0 {\n-            return Err(MemGuardError::MlockFailed(std::io::Error::last_os_error()));\n-        }\n-        Ok(())\n-    }\n-    #[cfg(windows)]\n-    {\n-        let ret = unsafe { windows_sys::Win32::System::Memory::VirtualLock(addr as *const _, len) };\n-        if ret == 0 {\n-            return Err(MemGuardError::VirtualLockFailed(std::io::Error::last_os_error()));\n-        }\n-        Ok(())\n-    }\n-    #[cfg(not(any(unix, windows)))]\n-    {\n-        let _ = addr;\n-        // No platform primitive available; surface an error rather than silently\n-        // pretending the page is locked.\n-        Err(MemGuardError::MlockFailed(std::io::Error::new(\n-            std::io::ErrorKind::Unsupported,\n-            \"mlock not available on this platform\",\n-        )))\n-    }\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Mark a region of memory as non-dumpable in core files.\n ///\n /// - Linux: `madvise(MADV_DONTDUMP)`.\n /// - All other platforms: no-op success (no equivalent primitive).\n #[expect(clippy::missing_const_for_fn, reason = \"contains FFI + non-const error path\")]\n pub fn dont_dump(addr: *const u8, len: usize) -> Result<(), MemGuardError> {\n",
+    "file": "crates/oc-crypto/src/page_guard.rs",
+    "function": {
+      "function_name": "lock",
+      "return_type": "-> Result<(), MemGuardError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 52
+        },
+        "start": {
+          "column": 1,
+          "line": 15
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/page_guard.rs:23:5: replace lock -> Result<(), MemGuardError> with Ok(())",
+    "package": "oc-crypto",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 51
+      },
+      "start": {
+        "column": 5,
+        "line": 23
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/page_guard.rs\n+++ replace == with != in lock\n@@ -15,17 +15,17 @@\n /// Lock a region of memory so it cannot be swapped to disk.\n ///\n /// - Unix: `mlock(2)`. On non-zero return, captures `errno` via `std::io::Error::last_os_error()`\n ///   and returns `MlockFailed`.\n /// - Windows: `VirtualLock`. On zero return, returns `VirtualLockFailed`.\n ///\n /// Calling with `len == 0` is a no-op success.\n pub fn lock(addr: *const u8, len: usize) -> Result<(), MemGuardError> {\n-    if len == 0 {\n+    if len != /* ~ changed by cargo-mutants ~ */ 0 {\n         return Ok(());\n     }\n     #[cfg(unix)]\n     {\n         let ret = unsafe { libc::mlock(addr.cast::<libc::c_void>(), len) };\n         if ret != 0 {\n             return Err(MemGuardError::MlockFailed(std::io::Error::last_os_error()));\n         }\n",
+    "file": "crates/oc-crypto/src/page_guard.rs",
+    "function": {
+      "function_name": "lock",
+      "return_type": "-> Result<(), MemGuardError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 52
+        },
+        "start": {
+          "column": 1,
+          "line": 15
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/page_guard.rs:23:12: replace == with != in lock",
+    "package": "oc-crypto",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 14,
+        "line": 23
+      },
+      "start": {
+        "column": 12,
+        "line": 23
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/page_guard.rs\n+++ replace != with == in lock\n@@ -21,17 +21,17 @@\n /// Calling with `len == 0` is a no-op success.\n pub fn lock(addr: *const u8, len: usize) -> Result<(), MemGuardError> {\n     if len == 0 {\n         return Ok(());\n     }\n     #[cfg(unix)]\n     {\n         let ret = unsafe { libc::mlock(addr.cast::<libc::c_void>(), len) };\n-        if ret != 0 {\n+        if ret == /* ~ changed by cargo-mutants ~ */ 0 {\n             return Err(MemGuardError::MlockFailed(std::io::Error::last_os_error()));\n         }\n         Ok(())\n     }\n     #[cfg(windows)]\n     {\n         let ret = unsafe { windows_sys::Win32::System::Memory::VirtualLock(addr as *const _, len) };\n         if ret == 0 {\n",
+    "file": "crates/oc-crypto/src/page_guard.rs",
+    "function": {
+      "function_name": "lock",
+      "return_type": "-> Result<(), MemGuardError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 52
+        },
+        "start": {
+          "column": 1,
+          "line": 15
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/page_guard.rs:29:16: replace != with == in lock",
+    "package": "oc-crypto",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 18,
+        "line": 29
+      },
+      "start": {
+        "column": 16,
+        "line": 29
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/page_guard.rs\n+++ replace == with != in lock\n@@ -29,17 +29,17 @@\n         if ret != 0 {\n             return Err(MemGuardError::MlockFailed(std::io::Error::last_os_error()));\n         }\n         Ok(())\n     }\n     #[cfg(windows)]\n     {\n         let ret = unsafe { windows_sys::Win32::System::Memory::VirtualLock(addr as *const _, len) };\n-        if ret == 0 {\n+        if ret != /* ~ changed by cargo-mutants ~ */ 0 {\n             return Err(MemGuardError::VirtualLockFailed(std::io::Error::last_os_error()));\n         }\n         Ok(())\n     }\n     #[cfg(not(any(unix, windows)))]\n     {\n         let _ = addr;\n         // No platform primitive available; surface an error rather than silently\n",
+    "file": "crates/oc-crypto/src/page_guard.rs",
+    "function": {
+      "function_name": "lock",
+      "return_type": "-> Result<(), MemGuardError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 52
+        },
+        "start": {
+          "column": 1,
+          "line": 15
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/page_guard.rs:37:16: replace == with != in lock",
+    "package": "oc-crypto",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 18,
+        "line": 37
+      },
+      "start": {
+        "column": 16,
+        "line": 37
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/page_guard.rs\n+++ replace dont_dump -> Result<(), MemGuardError> with Ok(())\n@@ -52,32 +52,17 @@\n }\n \n /// Mark a region of memory as non-dumpable in core files.\n ///\n /// - Linux: `madvise(MADV_DONTDUMP)`.\n /// - All other platforms: no-op success (no equivalent primitive).\n #[expect(clippy::missing_const_for_fn, reason = \"contains FFI + non-const error path\")]\n pub fn dont_dump(addr: *const u8, len: usize) -> Result<(), MemGuardError> {\n-    if len == 0 {\n-        return Ok(());\n-    }\n-    #[cfg(target_os = \"linux\")]\n-    {\n-        let ret = unsafe { libc::madvise(addr as *mut libc::c_void, len, libc::MADV_DONTDUMP) };\n-        if ret != 0 {\n-            return Err(MemGuardError::MadviseFailed(std::io::Error::last_os_error()));\n-        }\n-        Ok(())\n-    }\n-    #[cfg(not(target_os = \"linux\"))]\n-    {\n-        let _ = addr;\n-        Ok(())\n-    }\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Unlock a previously locked region of memory. Best-effort: errors are ignored.\n ///\n /// - Unix: `munlock(2)`.\n /// - Windows: `VirtualUnlock`.\n ///\n /// Calling with `len == 0` is a no-op.\n",
+    "file": "crates/oc-crypto/src/page_guard.rs",
+    "function": {
+      "function_name": "dont_dump",
+      "return_type": "-> Result<(), MemGuardError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 76
+        },
+        "start": {
+          "column": 1,
+          "line": 54
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/page_guard.rs:60:5: replace dont_dump -> Result<(), MemGuardError> with Ok(())",
+    "package": "oc-crypto",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 75
+      },
+      "start": {
+        "column": 5,
+        "line": 60
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/page_guard.rs\n+++ replace == with != in dont_dump\n@@ -52,17 +52,17 @@\n }\n \n /// Mark a region of memory as non-dumpable in core files.\n ///\n /// - Linux: `madvise(MADV_DONTDUMP)`.\n /// - All other platforms: no-op success (no equivalent primitive).\n #[expect(clippy::missing_const_for_fn, reason = \"contains FFI + non-const error path\")]\n pub fn dont_dump(addr: *const u8, len: usize) -> Result<(), MemGuardError> {\n-    if len == 0 {\n+    if len != /* ~ changed by cargo-mutants ~ */ 0 {\n         return Ok(());\n     }\n     #[cfg(target_os = \"linux\")]\n     {\n         let ret = unsafe { libc::madvise(addr as *mut libc::c_void, len, libc::MADV_DONTDUMP) };\n         if ret != 0 {\n             return Err(MemGuardError::MadviseFailed(std::io::Error::last_os_error()));\n         }\n",
+    "file": "crates/oc-crypto/src/page_guard.rs",
+    "function": {
+      "function_name": "dont_dump",
+      "return_type": "-> Result<(), MemGuardError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 76
+        },
+        "start": {
+          "column": 1,
+          "line": 54
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/page_guard.rs:60:12: replace == with != in dont_dump",
+    "package": "oc-crypto",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 14,
+        "line": 60
+      },
+      "start": {
+        "column": 12,
+        "line": 60
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/page_guard.rs\n+++ replace != with == in dont_dump\n@@ -58,17 +58,17 @@\n #[expect(clippy::missing_const_for_fn, reason = \"contains FFI + non-const error path\")]\n pub fn dont_dump(addr: *const u8, len: usize) -> Result<(), MemGuardError> {\n     if len == 0 {\n         return Ok(());\n     }\n     #[cfg(target_os = \"linux\")]\n     {\n         let ret = unsafe { libc::madvise(addr as *mut libc::c_void, len, libc::MADV_DONTDUMP) };\n-        if ret != 0 {\n+        if ret == /* ~ changed by cargo-mutants ~ */ 0 {\n             return Err(MemGuardError::MadviseFailed(std::io::Error::last_os_error()));\n         }\n         Ok(())\n     }\n     #[cfg(not(target_os = \"linux\"))]\n     {\n         let _ = addr;\n         Ok(())\n",
+    "file": "crates/oc-crypto/src/page_guard.rs",
+    "function": {
+      "function_name": "dont_dump",
+      "return_type": "-> Result<(), MemGuardError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 76
+        },
+        "start": {
+          "column": 1,
+          "line": 54
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/page_guard.rs:66:16: replace != with == in dont_dump",
+    "package": "oc-crypto",
+    "replacement": "==",
+    "span": {
+      "end": {
+        "column": 18,
+        "line": 66
+      },
+      "start": {
+        "column": 16,
+        "line": 66
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/page_guard.rs\n+++ replace unlock with ()\n@@ -77,26 +77,10 @@\n \n /// Unlock a previously locked region of memory. Best-effort: errors are ignored.\n ///\n /// - Unix: `munlock(2)`.\n /// - Windows: `VirtualUnlock`.\n ///\n /// Calling with `len == 0` is a no-op.\n pub fn unlock(addr: *const u8, len: usize) {\n-    if len == 0 {\n-        return;\n-    }\n-    #[cfg(unix)]\n-    {\n-        // Best-effort — ignore the return code.\n-        let _ = unsafe { libc::munlock(addr.cast::<libc::c_void>(), len) };\n-    }\n-    #[cfg(windows)]\n-    {\n-        // Best-effort — ignore the return code.\n-        let _ = unsafe { windows_sys::Win32::System::Memory::VirtualUnlock(addr as *const _, len) };\n-    }\n-    #[cfg(not(any(unix, windows)))]\n-    {\n-        let _ = addr;\n-    }\n+    () /* ~ changed by cargo-mutants ~ */\n }\n",
+    "file": "crates/oc-crypto/src/page_guard.rs",
+    "function": {
+      "function_name": "unlock",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 102
+        },
+        "start": {
+          "column": 1,
+          "line": 78
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/page_guard.rs:85:5: replace unlock with ()",
+    "package": "oc-crypto",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 6,
+        "line": 101
+      },
+      "start": {
+        "column": 5,
+        "line": 85
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/page_guard.rs\n+++ replace == with != in unlock\n@@ -77,17 +77,17 @@\n \n /// Unlock a previously locked region of memory. Best-effort: errors are ignored.\n ///\n /// - Unix: `munlock(2)`.\n /// - Windows: `VirtualUnlock`.\n ///\n /// Calling with `len == 0` is a no-op.\n pub fn unlock(addr: *const u8, len: usize) {\n-    if len == 0 {\n+    if len != /* ~ changed by cargo-mutants ~ */ 0 {\n         return;\n     }\n     #[cfg(unix)]\n     {\n         // Best-effort — ignore the return code.\n         let _ = unsafe { libc::munlock(addr.cast::<libc::c_void>(), len) };\n     }\n     #[cfg(windows)]\n",
+    "file": "crates/oc-crypto/src/page_guard.rs",
+    "function": {
+      "function_name": "unlock",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 102
+        },
+        "start": {
+          "column": 1,
+          "line": 78
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/oc-crypto/src/page_guard.rs:85:12: replace == with != in unlock",
+    "package": "oc-crypto",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 14,
+        "line": 85
+      },
+      "start": {
+        "column": 12,
+        "line": 85
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/pqc.rs\n+++ replace MlDsaSigningKey::from_bytes -> Result<Self, PqcError> with Ok(Default::default())\n@@ -43,19 +43,17 @@\n \n /// Wrapper around the ML-DSA signing key seed that is mlock'd and zeroized on drop.\n pub struct MlDsaSigningKey {\n     inner: HardenedBytes,\n }\n \n impl MlDsaSigningKey {\n     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PqcError> {\n-        let inner = HardenedBytes::from_slice(bytes)\n-            .map_err(|e| PqcError::KeyGenFailed(format!(\"mlock failed: {e}\")))?;\n-        Ok(Self { inner })\n+        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n     }\n \n     pub fn expose(&self) -> &[u8] {\n         self.inner.as_ref()\n     }\n }\n \n /// Generate an ML-DSA-65 keypair using the OS random number generator.\n",
+    "file": "crates/oc-crypto/src/pqc.rs",
+    "function": {
+      "function_name": "MlDsaSigningKey::from_bytes",
+      "return_type": "-> Result<Self, PqcError>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 54
+        },
+        "start": {
+          "column": 5,
+          "line": 50
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/pqc.rs:51:9: replace MlDsaSigningKey::from_bytes -> Result<Self, PqcError> with Ok(Default::default())",
+    "package": "oc-crypto",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 27,
+        "line": 53
+      },
+      "start": {
+        "column": 9,
+        "line": 51
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/pqc.rs\n+++ replace MlDsaSigningKey::expose -> &[u8] with Vec::leak(Vec::new())\n@@ -49,17 +49,17 @@\n impl MlDsaSigningKey {\n     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PqcError> {\n         let inner = HardenedBytes::from_slice(bytes)\n             .map_err(|e| PqcError::KeyGenFailed(format!(\"mlock failed: {e}\")))?;\n         Ok(Self { inner })\n     }\n \n     pub fn expose(&self) -> &[u8] {\n-        self.inner.as_ref()\n+        Vec::leak(Vec::new()) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n /// Generate an ML-DSA-65 keypair using the OS random number generator.\n pub fn ml_dsa_65_keygen() -> Result<MlDsa65Keypair, PqcError> {\n     use ml_dsa::{Keypair, MlDsa65, SigningKey};\n     let mut seed = [0u8; 32];\n     getrandom::fill(&mut seed).map_err(|e| PqcError::SignFailed(e.to_string()))?;\n",
+    "file": "crates/oc-crypto/src/pqc.rs",
+    "function": {
+      "function_name": "MlDsaSigningKey::expose",
+      "return_type": "-> &[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 58
+        },
+        "start": {
+          "column": 5,
+          "line": 56
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/pqc.rs:57:9: replace MlDsaSigningKey::expose -> &[u8] with Vec::leak(Vec::new())",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(Vec::new())",
+    "span": {
+      "end": {
+        "column": 28,
+        "line": 57
+      },
+      "start": {
+        "column": 9,
+        "line": 57
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/pqc.rs\n+++ replace MlDsaSigningKey::expose -> &[u8] with Vec::leak(vec![0])\n@@ -49,17 +49,17 @@\n impl MlDsaSigningKey {\n     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PqcError> {\n         let inner = HardenedBytes::from_slice(bytes)\n             .map_err(|e| PqcError::KeyGenFailed(format!(\"mlock failed: {e}\")))?;\n         Ok(Self { inner })\n     }\n \n     pub fn expose(&self) -> &[u8] {\n-        self.inner.as_ref()\n+        Vec::leak(vec![0]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n /// Generate an ML-DSA-65 keypair using the OS random number generator.\n pub fn ml_dsa_65_keygen() -> Result<MlDsa65Keypair, PqcError> {\n     use ml_dsa::{Keypair, MlDsa65, SigningKey};\n     let mut seed = [0u8; 32];\n     getrandom::fill(&mut seed).map_err(|e| PqcError::SignFailed(e.to_string()))?;\n",
+    "file": "crates/oc-crypto/src/pqc.rs",
+    "function": {
+      "function_name": "MlDsaSigningKey::expose",
+      "return_type": "-> &[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 58
+        },
+        "start": {
+          "column": 5,
+          "line": 56
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/pqc.rs:57:9: replace MlDsaSigningKey::expose -> &[u8] with Vec::leak(vec![0])",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(vec![0])",
+    "span": {
+      "end": {
+        "column": 28,
+        "line": 57
+      },
+      "start": {
+        "column": 9,
+        "line": 57
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/pqc.rs\n+++ replace MlDsaSigningKey::expose -> &[u8] with Vec::leak(vec![1])\n@@ -49,17 +49,17 @@\n impl MlDsaSigningKey {\n     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PqcError> {\n         let inner = HardenedBytes::from_slice(bytes)\n             .map_err(|e| PqcError::KeyGenFailed(format!(\"mlock failed: {e}\")))?;\n         Ok(Self { inner })\n     }\n \n     pub fn expose(&self) -> &[u8] {\n-        self.inner.as_ref()\n+        Vec::leak(vec![1]) /* ~ changed by cargo-mutants ~ */\n     }\n }\n \n /// Generate an ML-DSA-65 keypair using the OS random number generator.\n pub fn ml_dsa_65_keygen() -> Result<MlDsa65Keypair, PqcError> {\n     use ml_dsa::{Keypair, MlDsa65, SigningKey};\n     let mut seed = [0u8; 32];\n     getrandom::fill(&mut seed).map_err(|e| PqcError::SignFailed(e.to_string()))?;\n",
+    "file": "crates/oc-crypto/src/pqc.rs",
+    "function": {
+      "function_name": "MlDsaSigningKey::expose",
+      "return_type": "-> &[u8]",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 58
+        },
+        "start": {
+          "column": 5,
+          "line": 56
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/pqc.rs:57:9: replace MlDsaSigningKey::expose -> &[u8] with Vec::leak(vec![1])",
+    "package": "oc-crypto",
+    "replacement": "Vec::leak(vec![1])",
+    "span": {
+      "end": {
+        "column": 28,
+        "line": 57
+      },
+      "start": {
+        "column": 9,
+        "line": 57
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/pqc.rs\n+++ replace ml_dsa_65_keygen -> Result<MlDsa65Keypair, PqcError> with Ok(Default::default())\n@@ -55,26 +55,17 @@\n \n     pub fn expose(&self) -> &[u8] {\n         self.inner.as_ref()\n     }\n }\n \n /// Generate an ML-DSA-65 keypair using the OS random number generator.\n pub fn ml_dsa_65_keygen() -> Result<MlDsa65Keypair, PqcError> {\n-    use ml_dsa::{Keypair, MlDsa65, SigningKey};\n-    let mut seed = [0u8; 32];\n-    getrandom::fill(&mut seed).map_err(|e| PqcError::SignFailed(e.to_string()))?;\n-    let seed_arr = ml_dsa::B32::from(seed);\n-    let signing_key = SigningKey::<MlDsa65>::from_seed(&seed_arr);\n-    let verifying_key = signing_key.verifying_key();\n-    Ok(MlDsa65Keypair {\n-        verifying_key: verifying_key.encode().to_vec(),\n-        signing_key: MlDsaSigningKey::from_bytes(&seed)?,\n-    })\n+    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Sign a message with ML-DSA-65 (deterministic mode).\n pub fn ml_dsa_65_sign(signing_key: &MlDsaSigningKey, message: &[u8]) -> Result<Vec<u8>, PqcError> {\n     use ml_dsa::{MlDsa65, SigningKey};\n     let seed_bytes: [u8; 32] = signing_key\n         .expose()\n         .try_into()\n",
+    "file": "crates/oc-crypto/src/pqc.rs",
+    "function": {
+      "function_name": "ml_dsa_65_keygen",
+      "return_type": "-> Result<MlDsa65Keypair, PqcError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 73
+        },
+        "start": {
+          "column": 1,
+          "line": 61
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/pqc.rs:63:5: replace ml_dsa_65_keygen -> Result<MlDsa65Keypair, PqcError> with Ok(Default::default())",
+    "package": "oc-crypto",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 7,
+        "line": 72
+      },
+      "start": {
+        "column": 5,
+        "line": 63
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/pqc.rs\n+++ replace ml_dsa_65_sign -> Result<Vec<u8>, PqcError> with Ok(vec![])\n@@ -69,28 +69,17 @@\n     Ok(MlDsa65Keypair {\n         verifying_key: verifying_key.encode().to_vec(),\n         signing_key: MlDsaSigningKey::from_bytes(&seed)?,\n     })\n }\n \n /// Sign a message with ML-DSA-65 (deterministic mode).\n pub fn ml_dsa_65_sign(signing_key: &MlDsaSigningKey, message: &[u8]) -> Result<Vec<u8>, PqcError> {\n-    use ml_dsa::{MlDsa65, SigningKey};\n-    let seed_bytes: [u8; 32] = signing_key\n-        .expose()\n-        .try_into()\n-        .map_err(|_| PqcError::SignFailed(\"invalid seed length, expected 32 bytes\".into()))?;\n-    let seed_arr = ml_dsa::B32::from(seed_bytes);\n-    let sk = SigningKey::<MlDsa65>::from_seed(&seed_arr);\n-    let expanded = sk.expanded_key();\n-    let sig = expanded\n-        .sign_deterministic(message, &[])\n-        .map_err(|e| PqcError::SignFailed(e.to_string()))?;\n-    Ok(sig.encode().to_vec())\n+    Ok(vec![]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Verify an ML-DSA-65 signature.\n pub fn ml_dsa_65_verify(\n     verifying_key: &[u8],\n     message: &[u8],\n     signature: &[u8],\n ) -> Result<(), PqcError> {\n",
+    "file": "crates/oc-crypto/src/pqc.rs",
+    "function": {
+      "function_name": "ml_dsa_65_sign",
+      "return_type": "-> Result<Vec<u8>, PqcError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 89
+        },
+        "start": {
+          "column": 1,
+          "line": 75
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/pqc.rs:77:5: replace ml_dsa_65_sign -> Result<Vec<u8>, PqcError> with Ok(vec![])",
+    "package": "oc-crypto",
+    "replacement": "Ok(vec![])",
+    "span": {
+      "end": {
+        "column": 30,
+        "line": 88
+      },
+      "start": {
+        "column": 5,
+        "line": 77
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/pqc.rs\n+++ replace ml_dsa_65_sign -> Result<Vec<u8>, PqcError> with Ok(vec![0])\n@@ -69,28 +69,17 @@\n     Ok(MlDsa65Keypair {\n         verifying_key: verifying_key.encode().to_vec(),\n         signing_key: MlDsaSigningKey::from_bytes(&seed)?,\n     })\n }\n \n /// Sign a message with ML-DSA-65 (deterministic mode).\n pub fn ml_dsa_65_sign(signing_key: &MlDsaSigningKey, message: &[u8]) -> Result<Vec<u8>, PqcError> {\n-    use ml_dsa::{MlDsa65, SigningKey};\n-    let seed_bytes: [u8; 32] = signing_key\n-        .expose()\n-        .try_into()\n-        .map_err(|_| PqcError::SignFailed(\"invalid seed length, expected 32 bytes\".into()))?;\n-    let seed_arr = ml_dsa::B32::from(seed_bytes);\n-    let sk = SigningKey::<MlDsa65>::from_seed(&seed_arr);\n-    let expanded = sk.expanded_key();\n-    let sig = expanded\n-        .sign_deterministic(message, &[])\n-        .map_err(|e| PqcError::SignFailed(e.to_string()))?;\n-    Ok(sig.encode().to_vec())\n+    Ok(vec![0]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Verify an ML-DSA-65 signature.\n pub fn ml_dsa_65_verify(\n     verifying_key: &[u8],\n     message: &[u8],\n     signature: &[u8],\n ) -> Result<(), PqcError> {\n",
+    "file": "crates/oc-crypto/src/pqc.rs",
+    "function": {
+      "function_name": "ml_dsa_65_sign",
+      "return_type": "-> Result<Vec<u8>, PqcError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 89
+        },
+        "start": {
+          "column": 1,
+          "line": 75
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/pqc.rs:77:5: replace ml_dsa_65_sign -> Result<Vec<u8>, PqcError> with Ok(vec![0])",
+    "package": "oc-crypto",
+    "replacement": "Ok(vec![0])",
+    "span": {
+      "end": {
+        "column": 30,
+        "line": 88
+      },
+      "start": {
+        "column": 5,
+        "line": 77
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/pqc.rs\n+++ replace ml_dsa_65_sign -> Result<Vec<u8>, PqcError> with Ok(vec![1])\n@@ -69,28 +69,17 @@\n     Ok(MlDsa65Keypair {\n         verifying_key: verifying_key.encode().to_vec(),\n         signing_key: MlDsaSigningKey::from_bytes(&seed)?,\n     })\n }\n \n /// Sign a message with ML-DSA-65 (deterministic mode).\n pub fn ml_dsa_65_sign(signing_key: &MlDsaSigningKey, message: &[u8]) -> Result<Vec<u8>, PqcError> {\n-    use ml_dsa::{MlDsa65, SigningKey};\n-    let seed_bytes: [u8; 32] = signing_key\n-        .expose()\n-        .try_into()\n-        .map_err(|_| PqcError::SignFailed(\"invalid seed length, expected 32 bytes\".into()))?;\n-    let seed_arr = ml_dsa::B32::from(seed_bytes);\n-    let sk = SigningKey::<MlDsa65>::from_seed(&seed_arr);\n-    let expanded = sk.expanded_key();\n-    let sig = expanded\n-        .sign_deterministic(message, &[])\n-        .map_err(|e| PqcError::SignFailed(e.to_string()))?;\n-    Ok(sig.encode().to_vec())\n+    Ok(vec![1]) /* ~ changed by cargo-mutants ~ */\n }\n \n /// Verify an ML-DSA-65 signature.\n pub fn ml_dsa_65_verify(\n     verifying_key: &[u8],\n     message: &[u8],\n     signature: &[u8],\n ) -> Result<(), PqcError> {\n",
+    "file": "crates/oc-crypto/src/pqc.rs",
+    "function": {
+      "function_name": "ml_dsa_65_sign",
+      "return_type": "-> Result<Vec<u8>, PqcError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 89
+        },
+        "start": {
+          "column": 1,
+          "line": 75
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/pqc.rs:77:5: replace ml_dsa_65_sign -> Result<Vec<u8>, PqcError> with Ok(vec![1])",
+    "package": "oc-crypto",
+    "replacement": "Ok(vec![1])",
+    "span": {
+      "end": {
+        "column": 30,
+        "line": 88
+      },
+      "start": {
+        "column": 5,
+        "line": 77
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/pqc.rs\n+++ replace ml_dsa_65_verify -> Result<(), PqcError> with Ok(())\n@@ -89,26 +89,17 @@\n }\n \n /// Verify an ML-DSA-65 signature.\n pub fn ml_dsa_65_verify(\n     verifying_key: &[u8],\n     message: &[u8],\n     signature: &[u8],\n ) -> Result<(), PqcError> {\n-    use ml_dsa::{MlDsa65, Signature, Verifier, VerifyingKey};\n-    let encoded_vk = ml_dsa::EncodedVerifyingKey::<MlDsa65>::try_from(verifying_key)\n-        .map_err(|e| PqcError::VerifyFailed(format!(\"invalid verifying key: {e}\")))?;\n-    let vk = VerifyingKey::<MlDsa65>::decode(&encoded_vk);\n-    let encoded_sig = ml_dsa::EncodedSignature::<MlDsa65>::try_from(signature)\n-        .map_err(|e| PqcError::VerifyFailed(format!(\"invalid signature: {e}\")))?;\n-    let sig = Signature::<MlDsa65>::decode(&encoded_sig)\n-        .ok_or_else(|| PqcError::VerifyFailed(\"signature decode failed\".into()))?;\n-    vk.verify(message, &sig)\n-        .map_err(|_| PqcError::VerifyFailed(\"signature verification failed\".into()))\n+    Ok(()) /* ~ changed by cargo-mutants ~ */\n }\n \n // ─────────────────────────────────────────────────────────────────────────────\n // Hybrid KEM framework (X25519 + ML-KEM-768)\n // ─────────────────────────────────────────────────────────────────────────────\n \n /// Derive a hybrid shared secret from X25519 and a post-quantum KEM.\n ///\n",
+    "file": "crates/oc-crypto/src/pqc.rs",
+    "function": {
+      "function_name": "ml_dsa_65_verify",
+      "return_type": "-> Result<(), PqcError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 107
+        },
+        "start": {
+          "column": 1,
+          "line": 91
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/pqc.rs:97:5: replace ml_dsa_65_verify -> Result<(), PqcError> with Ok(())",
+    "package": "oc-crypto",
+    "replacement": "Ok(())",
+    "span": {
+      "end": {
+        "column": 85,
+        "line": 106
+      },
+      "start": {
+        "column": 5,
+        "line": 97
+      }
+    }
+  },
+  {
+    "diff": "--- crates/oc-crypto/src/pqc.rs\n+++ replace hybrid_kem_combine -> Result<HardenedBytes, PqcError> with Ok(Default::default())\n@@ -117,23 +117,17 @@\n /// does not compromise the key.\n ///\n /// When ML-KEM-768 support is added (pending `age` crate dependency resolution),\n /// pass the ML-KEM shared secret as `pq_shared`.\n pub fn hybrid_kem_combine(\n     x25519_shared: &[u8; 32],\n     pq_shared: &HardenedBytes,\n ) -> Result<HardenedBytes, PqcError> {\n-    use sha2::{Digest, Sha256};\n-    let mut hasher = Sha256::new();\n-    hasher.update(b\"hybrid-kem-x25519-mlkem768-v1\");\n-    hasher.update(x25519_shared);\n-    hasher.update(pq_shared.expose());\n-    let hash = hasher.finalize();\n-    Ok(HardenedBytes::from_slice(&hash)?)\n+    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */\n }\n \n #[cfg(test)]\n mod tests {\n     use super::*;\n \n     #[test]\n     fn test_ml_dsa_65_roundtrip() {\n",
+    "file": "crates/oc-crypto/src/pqc.rs",
+    "function": {
+      "function_name": "hybrid_kem_combine",
+      "return_type": "-> Result<HardenedBytes, PqcError>",
+      "span": {
+        "end": {
+          "column": 2,
+          "line": 132
+        },
+        "start": {
+          "column": 1,
+          "line": 113
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/oc-crypto/src/pqc.rs:125:5: replace hybrid_kem_combine -> Result<HardenedBytes, PqcError> with Ok(Default::default())",
+    "package": "oc-crypto",
+    "replacement": "Ok(Default::default())",
+    "span": {
+      "end": {
+        "column": 42,
+        "line": 131
+      },
+      "start": {
+        "column": 5,
+        "line": 125
+      }
+    }
+  }
+]

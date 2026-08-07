@@ -1,0 +1,36 @@
+--- crates/oc-crypto/src/page_guard.rs
++++ replace dont_dump -> Result<(), MemGuardError> with Ok(())
+@@ -52,32 +52,17 @@
+ }
+ 
+ /// Mark a region of memory as non-dumpable in core files.
+ ///
+ /// - Linux: `madvise(MADV_DONTDUMP)`.
+ /// - All other platforms: no-op success (no equivalent primitive).
+ #[expect(clippy::missing_const_for_fn, reason = "contains FFI + non-const error path")]
+ pub fn dont_dump(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
+-    if len == 0 {
+-        return Ok(());
+-    }
+-    #[cfg(target_os = "linux")]
+-    {
+-        let ret = unsafe { libc::madvise(addr as *mut libc::c_void, len, libc::MADV_DONTDUMP) };
+-        if ret != 0 {
+-            return Err(MemGuardError::MadviseFailed(std::io::Error::last_os_error()));
+-        }
+-        Ok(())
+-    }
+-    #[cfg(not(target_os = "linux"))]
+-    {
+-        let _ = addr;
+-        Ok(())
+-    }
++    Ok(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Unlock a previously locked region of memory. Best-effort: errors are ignored.
+ ///
+ /// - Unix: `munlock(2)`.
+ /// - Windows: `VirtualUnlock`.
+ ///
+ /// Calling with `len == 0` is a no-op.

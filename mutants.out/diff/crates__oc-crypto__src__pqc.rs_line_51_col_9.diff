@@ -1,0 +1,23 @@
+--- crates/oc-crypto/src/pqc.rs
++++ replace MlDsaSigningKey::from_bytes -> Result<Self, PqcError> with Ok(Default::default())
+@@ -43,19 +43,17 @@
+ 
+ /// Wrapper around the ML-DSA signing key seed that is mlock'd and zeroized on drop.
+ pub struct MlDsaSigningKey {
+     inner: HardenedBytes,
+ }
+ 
+ impl MlDsaSigningKey {
+     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PqcError> {
+-        let inner = HardenedBytes::from_slice(bytes)
+-            .map_err(|e| PqcError::KeyGenFailed(format!("mlock failed: {e}")))?;
+-        Ok(Self { inner })
++        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     pub fn expose(&self) -> &[u8] {
+         self.inner.as_ref()
+     }
+ }
+ 
+ /// Generate an ML-DSA-65 keypair using the OS random number generator.

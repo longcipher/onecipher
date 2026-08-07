@@ -1,0 +1,38 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace KeyCache<V>::insert with ()
+@@ -159,34 +159,17 @@
+         inner.recency.insert(tick, id.to_string());
+         Some(cloned)
+     }
+ 
+     /// Insert a key under `id`, evicting expired entries and the LRU entry
+     /// if at capacity. The cache takes ownership of the value — evicting it
+     /// later triggers `Drop` (zeroize + munlock for `HardenedBytes`).
+     pub fn insert(&self, id: &str, key: V) {
+-        let mut inner = self.lock();
+-        inner.evict_expired(self.ttl);
+-
+-        // Replacing an existing id must not evict a different entry.
+-        inner.remove(id);
+-
+-        if inner.entries.len() >= self.max_entries {
+-            // O(log n): the smallest tick is the least recently used entry.
+-            if let Some((_, lru_id)) = inner.recency.iter().next().map(|(t, k)| (*t, k.clone())) {
+-                inner.remove(&lru_id);
+-            }
+-        }
+-
+-        let tick = inner.bump();
+-        inner.recency.insert(tick, id.to_string());
+-        inner
+-            .entries
+-            .insert(id.to_string(), CacheEntry { key, last_accessed: Instant::now(), tick });
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Clear all entries. Triggers `Drop` on every value.
+     pub fn clear(&self) {
+         let mut inner = self.lock();
+         inner.entries.clear();
+         inner.recency.clear();
+     }

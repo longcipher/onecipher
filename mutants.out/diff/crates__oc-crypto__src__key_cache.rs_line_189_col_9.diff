@@ -1,0 +1,23 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace KeyCache<V>::clear with ()
+@@ -181,19 +181,17 @@
+         inner.recency.insert(tick, id.to_string());
+         inner
+             .entries
+             .insert(id.to_string(), CacheEntry { key, last_accessed: Instant::now(), tick });
+     }
+ 
+     /// Clear all entries. Triggers `Drop` on every value.
+     pub fn clear(&self) {
+-        let mut inner = self.lock();
+-        inner.entries.clear();
+-        inner.recency.clear();
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Evict only expired entries. Called opportunistically by `insert`.
+     pub fn evict_expired(&self) {
+         let mut inner = self.lock();
+         inner.evict_expired(self.ttl);
+     }
+ 

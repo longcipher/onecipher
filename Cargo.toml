@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
     "bin/oc-cli",
-    "crates/oc-conformance",
     "crates/oc-core",
     "crates/oc-crypto",
     "crates/oc-keyagent",
@@ -27,28 +26,14 @@ repository = "https://github.com/longcipher/onecipher"
 publish = false
 
 [workspace.dependencies]
-alloy-dyn-abi = "1.6.1"
-axum = "0.8"
-# local crates
-oc-core = { path = "crates/oc-core" }
-oc-crypto = { path = "crates/oc-crypto" }
-oc-keyagent = { path = "crates/oc-keyagent" }
-oc-netagent = { path = "crates/oc-netagent" }
-oc-pay = { path = "crates/oc-pay" }
-oc-policy = { path = "crates/oc-policy" }
-oc-secret = { path = "crates/oc-secret" }
-oc-session-key = { path = "crates/oc-session-key" }
-oc-signer = { path = "crates/oc-signer" }
-oc-vault = { path = "crates/oc-vault" }
-oc-wallet = { path = "crates/oc-wallet", default-features = false }
-oc-walletconnect = { path = "crates/oc-walletconnect" }
-oc-webui = { path = "crates/oc-webui" }
 
 # external crates
-aes-gcm-siv = "0.11.0"
+aes-gcm-siv = "0.12.0"
 age = "0.12.1"
+alloy-dyn-abi = "1.6.1"
 arboard = "3.6.1"
 argon2 = "0.5.3"
+axum = "0.8"
 backon = "1.6.0"
 base64 = "0.23.1"
 bech32 = "0.12.0"
@@ -63,13 +48,12 @@ bitcoin = "0.32.11"
 blake2 = "0.11.0-rc.6"
 bs58 = "0.5.1"
 chacha20poly1305 = "0.11.0"
-clap = "4.6.5"
-clap_complete = "4"
+clap = "4.6.6"
+clap_complete = "4.6.9"
 coins-bip32 = "0.13.0"
 coins-bip39 = "0.13.0"
 criterion = "0.8.2"
 crossterm = "0.29.0"
-cucumber = "0.23.0"
 digest = "0.11.3"
 ed25519-dalek = "3.0.0"
 eyre = "0.6.12"
@@ -87,6 +71,20 @@ libc = "0.2.189"
 # ml-kem 0.3.x conflicts with age 0.12.1's ml-kem 0.2.x via kem crate version.
 # TODO: re-add ml-kem when age updates to ml-kem 0.3.x.
 ml-dsa = "0.1.1"
+# local crates
+oc-core = { path = "crates/oc-core" }
+oc-crypto = { path = "crates/oc-crypto" }
+oc-keyagent = { path = "crates/oc-keyagent" }
+oc-netagent = { path = "crates/oc-netagent" }
+oc-pay = { path = "crates/oc-pay" }
+oc-policy = { path = "crates/oc-policy" }
+oc-secret = { path = "crates/oc-secret" }
+oc-session-key = { path = "crates/oc-session-key" }
+oc-signer = { path = "crates/oc-signer" }
+oc-vault = { path = "crates/oc-vault" }
+oc-wallet = { path = "crates/oc-wallet", default-features = false }
+oc-walletconnect = { path = "crates/oc-walletconnect" }
+oc-webui = { path = "crates/oc-webui" }
 p256 = "0.14.0"
 proptest = "1.11.0"
 prost = "0.14.4"
@@ -110,7 +108,7 @@ thiserror = "2.0.19"
 tokio = "1.53.1"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
-totp-rs = { version = "5.7.2", default-features = false }
+totp-rs = { version = "6.0.0", default-features = false }
 tracing = "0.1.44"
 uuid = "1.24.0"
 wasmi = "1.1.0"

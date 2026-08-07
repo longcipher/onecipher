@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/hardened.rs
++++ replace <impl AsMut<[u8]> for HardenedBytes>::as_mut -> &mut[u8] with Vec::leak(Vec::new())
+@@ -104,17 +104,17 @@
+ impl AsRef<[u8]> for HardenedBytes {
+     fn as_ref(&self) -> &[u8] {
+         &self.inner
+     }
+ }
+ 
+ impl AsMut<[u8]> for HardenedBytes {
+     fn as_mut(&mut self) -> &mut [u8] {
+-        &mut self.inner
++        Vec::leak(Vec::new()) /* ~ changed by cargo-mutants ~ */
+     }
+ }
+ 
+ impl Drop for HardenedBytes {
+     fn drop(&mut self) {
+         let ptr = self.inner.as_ptr();
+         let len = self.inner.len();
+         if len == 0 {

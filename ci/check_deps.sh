@@ -8,9 +8,6 @@
 # hidden task that can open a socket.
 #
 # Referenced by:
-#   - specs/2026-07-22-02-core-security/features/keyagent_sandbox.feature
-#     ("Key-Agent dependency tree clean") via the conformance step
-#     `When the dependency tree is computed`, which requires exit 0.
 #   - .github/workflows/ci.yml (hard-gates job)
 #
 # Usage: ci/check_deps.sh

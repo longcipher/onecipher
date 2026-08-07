@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace KeyCache<V>::len -> usize with 1
+@@ -195,17 +195,17 @@
+     pub fn evict_expired(&self) {
+         let mut inner = self.lock();
+         inner.evict_expired(self.ttl);
+     }
+ 
+     /// Current number of entries (including any that are expired but not yet
+     /// reaped).
+     pub fn len(&self) -> usize {
+-        self.lock().entries.len()
++        1 /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     pub fn is_empty(&self) -> bool {
+         self.len() == 0
+     }
+ 
+     /// TTL configured for this cache.
+     pub fn ttl(&self) -> Duration {

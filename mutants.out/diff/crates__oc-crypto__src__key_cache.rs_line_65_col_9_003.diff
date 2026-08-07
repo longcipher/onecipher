@@ -1,0 +1,23 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace Inner<V>::remove -> Option<CacheEntry<V>> with Some(CacheEntry::new(Default::default()))
+@@ -57,19 +57,17 @@
+     fn bump(&mut self) -> u64 {
+         let t = self.next_tick;
+         self.next_tick = self.next_tick.wrapping_add(1);
+         t
+     }
+ 
+     /// Remove an entry and its recency index slot together.
+     fn remove(&mut self, id: &str) -> Option<CacheEntry<V>> {
+-        let entry = self.entries.remove(id)?;
+-        self.recency.remove(&entry.tick);
+-        Some(entry)
++        Some(CacheEntry::new(Default::default())) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Drop every entry whose idle time exceeds `ttl`.
+     fn evict_expired(&mut self, ttl: Duration) {
+         let expired: Vec<String> = self
+             .entries
+             .iter()
+             .filter(|(_, e)| e.last_accessed.elapsed() > ttl)

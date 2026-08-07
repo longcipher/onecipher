@@ -1,0 +1,30 @@
+--- crates/oc-crypto/src/pqc.rs
++++ replace ml_dsa_65_verify -> Result<(), PqcError> with Ok(())
+@@ -89,26 +89,17 @@
+ }
+ 
+ /// Verify an ML-DSA-65 signature.
+ pub fn ml_dsa_65_verify(
+     verifying_key: &[u8],
+     message: &[u8],
+     signature: &[u8],
+ ) -> Result<(), PqcError> {
+-    use ml_dsa::{MlDsa65, Signature, Verifier, VerifyingKey};
+-    let encoded_vk = ml_dsa::EncodedVerifyingKey::<MlDsa65>::try_from(verifying_key)
+-        .map_err(|e| PqcError::VerifyFailed(format!("invalid verifying key: {e}")))?;
+-    let vk = VerifyingKey::<MlDsa65>::decode(&encoded_vk);
+-    let encoded_sig = ml_dsa::EncodedSignature::<MlDsa65>::try_from(signature)
+-        .map_err(|e| PqcError::VerifyFailed(format!("invalid signature: {e}")))?;
+-    let sig = Signature::<MlDsa65>::decode(&encoded_sig)
+-        .ok_or_else(|| PqcError::VerifyFailed("signature decode failed".into()))?;
+-    vk.verify(message, &sig)
+-        .map_err(|_| PqcError::VerifyFailed("signature verification failed".into()))
++    Ok(()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ // ─────────────────────────────────────────────────────────────────────────────
+ // Hybrid KEM framework (X25519 + ML-KEM-768)
+ // ─────────────────────────────────────────────────────────────────────────────
+ 
+ /// Derive a hybrid shared secret from X25519 and a post-quantum KEM.
+ ///

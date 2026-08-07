@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/hardened.rs
++++ replace HardenedBytes::len -> usize with 1
+@@ -31,17 +31,17 @@
+         if let Err(e) = page_guard::dont_dump(ptr, len) {
+             page_guard::unlock(ptr, len);
+             return Err(e);
+         }
+         Ok(Self { inner })
+     }
+ 
+     pub fn len(&self) -> usize {
+-        self.inner.len()
++        1 /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     pub fn is_empty(&self) -> bool {
+         self.inner.is_empty()
+     }
+ 
+     /// Copy `data` into a new page-locked, DONT_DUMP-marked buffer.
+     ///

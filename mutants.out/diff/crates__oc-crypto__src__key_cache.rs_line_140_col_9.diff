@@ -1,0 +1,41 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace KeyCache<V>::get -> Option<V> with None
+@@ -132,37 +132,17 @@
+ 
+     /// Look up a key by id. Returns `None` if missing or expired.
+     ///
+     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of
+     /// the stored value — for `HardenedBytes`, the clone is independently
+     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by
+     /// the caller's scope.
+     pub fn get(&self, id: &str) -> Option<V> {
+-        let mut inner = self.lock();
+-
+-        // Expired? Drop it and report a miss.
+-        match inner.entries.get(id) {
+-            None => return None,
+-            Some(entry) if entry.last_accessed.elapsed() > self.ttl => {
+-                inner.remove(id);
+-                return None;
+-            }
+-            Some(_) => {}
+-        }
+-
+-        // Live hit: refresh recency with a single lookup + index swap.
+-        let tick = inner.bump();
+-        let entry = inner.entries.get_mut(id)?;
+-        let old_tick = std::mem::replace(&mut entry.tick, tick);
+-        entry.last_accessed = Instant::now();
+-        let cloned = entry.key.clone();
+-        inner.recency.remove(&old_tick);
+-        inner.recency.insert(tick, id.to_string());
+-        Some(cloned)
++        None /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Insert a key under `id`, evicting expired entries and the LRU entry
+     /// if at capacity. The cache takes ownership of the value — evicting it
+     /// later triggers `Drop` (zeroize + munlock for `HardenedBytes`).
+     pub fn insert(&self, id: &str, key: V) {
+         let mut inner = self.lock();
+         inner.evict_expired(self.ttl);

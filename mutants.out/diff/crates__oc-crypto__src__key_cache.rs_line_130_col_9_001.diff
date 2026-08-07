@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/key_cache.rs
++++ replace KeyCache<V>::lock -> MutexGuard<'_, Inner<V>> with MutexGuard::from_iter([Inner::new()])
+@@ -122,17 +122,17 @@
+     /// Lock the inner state, recovering from a poisoned mutex.
+     ///
+     /// A panic in another thread must not turn this cache into a permanent
+     /// `panic!` site on a signing hot path (the previous implementation used
+     /// `.expect(...)` here). The guarded data is a plain map of key material
+     /// with no cross-field invariant that a mid-panic unwind could corrupt,
+     /// so recovering the guard is sound.
+     fn lock(&self) -> MutexGuard<'_, Inner<V>> {
+-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
++        MutexGuard::from_iter([Inner::new()]) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Look up a key by id. Returns `None` if missing or expired.
+     ///
+     /// Refreshes the idle timer on hit (LRU semantics). Returns a clone of
+     /// the stored value — for `HardenedBytes`, the clone is independently
+     /// page-locked + zeroized on `Drop`, so the caller's copy is bounded by
+     /// the caller's scope.

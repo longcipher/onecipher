@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/page_guard.rs
++++ replace == with != in dont_dump
+@@ -52,17 +52,17 @@
+ }
+ 
+ /// Mark a region of memory as non-dumpable in core files.
+ ///
+ /// - Linux: `madvise(MADV_DONTDUMP)`.
+ /// - All other platforms: no-op success (no equivalent primitive).
+ #[expect(clippy::missing_const_for_fn, reason = "contains FFI + non-const error path")]
+ pub fn dont_dump(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
+-    if len == 0 {
++    if len != /* ~ changed by cargo-mutants ~ */ 0 {
+         return Ok(());
+     }
+     #[cfg(target_os = "linux")]
+     {
+         let ret = unsafe { libc::madvise(addr as *mut libc::c_void, len, libc::MADV_DONTDUMP) };
+         if ret != 0 {
+             return Err(MemGuardError::MadviseFailed(std::io::Error::last_os_error()));
+         }

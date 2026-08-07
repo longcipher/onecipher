@@ -1,0 +1,32 @@
+--- crates/oc-crypto/src/pqc.rs
++++ replace ml_dsa_65_sign -> Result<Vec<u8>, PqcError> with Ok(vec![0])
+@@ -69,28 +69,17 @@
+     Ok(MlDsa65Keypair {
+         verifying_key: verifying_key.encode().to_vec(),
+         signing_key: MlDsaSigningKey::from_bytes(&seed)?,
+     })
+ }
+ 
+ /// Sign a message with ML-DSA-65 (deterministic mode).
+ pub fn ml_dsa_65_sign(signing_key: &MlDsaSigningKey, message: &[u8]) -> Result<Vec<u8>, PqcError> {
+-    use ml_dsa::{MlDsa65, SigningKey};
+-    let seed_bytes: [u8; 32] = signing_key
+-        .expose()
+-        .try_into()
+-        .map_err(|_| PqcError::SignFailed("invalid seed length, expected 32 bytes".into()))?;
+-    let seed_arr = ml_dsa::B32::from(seed_bytes);
+-    let sk = SigningKey::<MlDsa65>::from_seed(&seed_arr);
+-    let expanded = sk.expanded_key();
+-    let sig = expanded
+-        .sign_deterministic(message, &[])
+-        .map_err(|e| PqcError::SignFailed(e.to_string()))?;
+-    Ok(sig.encode().to_vec())
++    Ok(vec![0]) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Verify an ML-DSA-65 signature.
+ pub fn ml_dsa_65_verify(
+     verifying_key: &[u8],
+     message: &[u8],
+     signature: &[u8],
+ ) -> Result<(), PqcError> {

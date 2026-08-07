@@ -1,0 +1,21 @@
+--- crates/oc-crypto/src/hardened.rs
++++ replace == with != in <impl Drop for HardenedBytes>::drop
+@@ -112,17 +112,17 @@
+         &mut self.inner
+     }
+ }
+ 
+ impl Drop for HardenedBytes {
+     fn drop(&mut self) {
+         let ptr = self.inner.as_ptr();
+         let len = self.inner.len();
+-        if len == 0 {
++        if len != /* ~ changed by cargo-mutants ~ */ 0 {
+             return;
+         }
+         // Zeroize first so the bytes are wiped while the page is still locked,
+         // then release the lock.
+         self.inner.zeroize();
+         page_guard::unlock(ptr, len);
+     }
+ }

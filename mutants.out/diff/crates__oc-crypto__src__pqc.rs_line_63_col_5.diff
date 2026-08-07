@@ -1,0 +1,30 @@
+--- crates/oc-crypto/src/pqc.rs
++++ replace ml_dsa_65_keygen -> Result<MlDsa65Keypair, PqcError> with Ok(Default::default())
+@@ -55,26 +55,17 @@
+ 
+     pub fn expose(&self) -> &[u8] {
+         self.inner.as_ref()
+     }
+ }
+ 
+ /// Generate an ML-DSA-65 keypair using the OS random number generator.
+ pub fn ml_dsa_65_keygen() -> Result<MlDsa65Keypair, PqcError> {
+-    use ml_dsa::{Keypair, MlDsa65, SigningKey};
+-    let mut seed = [0u8; 32];
+-    getrandom::fill(&mut seed).map_err(|e| PqcError::SignFailed(e.to_string()))?;
+-    let seed_arr = ml_dsa::B32::from(seed);
+-    let signing_key = SigningKey::<MlDsa65>::from_seed(&seed_arr);
+-    let verifying_key = signing_key.verifying_key();
+-    Ok(MlDsa65Keypair {
+-        verifying_key: verifying_key.encode().to_vec(),
+-        signing_key: MlDsaSigningKey::from_bytes(&seed)?,
+-    })
++    Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+ }
+ 
+ /// Sign a message with ML-DSA-65 (deterministic mode).
+ pub fn ml_dsa_65_sign(signing_key: &MlDsaSigningKey, message: &[u8]) -> Result<Vec<u8>, PqcError> {
+     use ml_dsa::{MlDsa65, SigningKey};
+     let seed_bytes: [u8; 32] = signing_key
+         .expose()
+         .try_into()

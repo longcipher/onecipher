@@ -1,0 +1,26 @@
+--- crates/oc-crypto/src/hardened.rs
++++ replace HardenedBytes::from_slice -> Result<Self, MemGuardError> with Ok(Default::default())
+@@ -44,22 +44,17 @@
+     }
+ 
+     /// Copy `data` into a new page-locked, DONT_DUMP-marked buffer.
+     ///
+     /// - `data.is_empty()` returns an empty buffer without touching `mlock`.
+     /// - On `dont_dump` failure after a successful `lock`, the lock is undone and the error is
+     ///   propagated.
+     pub fn from_slice(data: &[u8]) -> Result<Self, MemGuardError> {
+-        if data.is_empty() {
+-            return Ok(Self { inner: Box::default() });
+-        }
+-        let mut hb = Self::new(data.len())?;
+-        hb.inner.copy_from_slice(data);
+-        Ok(hb)
++        Ok(Default::default()) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     /// Convert an owned `Vec<u8>` into a `HardenedBytes` without re-allocating.
+     ///
+     /// The Vec is shrunk to its exact length via `into_boxed_slice`, then
+     /// page-locked and marked DONT_DUMP. On `dont_dump` failure after a
+     /// successful `lock`, the lock is undone and the error is propagated.
+     pub fn from_vec(data: Vec<u8>) -> Result<Self, MemGuardError> {
