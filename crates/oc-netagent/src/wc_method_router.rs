@@ -122,10 +122,7 @@ impl WcMethodRouter {
             None => return Ok(true),
         };
 
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now_secs = Self::now_unix_secs()?;
 
         let pending = PendingApproval {
             id: uuid::Uuid::new_v4(),
@@ -183,6 +180,25 @@ impl WcMethodRouter {
                 Err((JsonRpcErrorCode::UserRejected, "approval timeout".into()))
             }
         }
+    }
+
+    /// Current Unix timestamp in seconds, fail-closed on clock errors.
+    ///
+    /// A corrupted system clock (e.g. set before the Unix epoch) would make
+    /// `duration_since(UNIX_EPOCH).unwrap_or_default()` silently yield `0`,
+    /// which would defeat every time-based policy check (expiry, cooldown,
+    /// approval TTL). Instead we surface the error so the caller rejects the
+    /// request rather than blindly trusting a bogus `now == 0`.
+    fn now_unix_secs() -> Result<u64, (JsonRpcErrorCode, String)> {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .map_err(|e| {
+                (
+                    JsonRpcErrorCode::Internal,
+                    format!("system clock error (refusing to evaluate time-based policy): {e}"),
+                )
+            })
     }
 
     /// P0-2: Extract a [`PasskeyAuthorization`] from the WC JSON params `auth`
@@ -275,10 +291,7 @@ impl WcMethodRouter {
         }
 
         // Expiry check → Deny
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let now = Self::now_unix_secs()?;
         if now > policy.rules.expiry_unix {
             tracing::warn!(method, "policy deny: policy expired");
             return Err((JsonRpcErrorCode::PolicyExpired, "policy has expired".into()));
@@ -306,22 +319,6 @@ impl WcMethodRouter {
             Ok((RiskLevel::Safe, vec![]))
         } else {
             Ok((RiskLevel::Warning, reasons))
-        }
-    }
-
-    #[allow(dead_code)] // ponytail: used by tests and future integration
-    fn deny_reason_to_rpc_code(reason: &oc_policy::DenyReason) -> JsonRpcErrorCode {
-        match reason {
-            oc_policy::DenyReason::RateLimitMinute | oc_policy::DenyReason::RateLimitHour => {
-                JsonRpcErrorCode::PolicyRateLimit
-            }
-            oc_policy::DenyReason::BudgetExceeded => JsonRpcErrorCode::PolicyBudgetExceeded,
-            oc_policy::DenyReason::Whitelist => JsonRpcErrorCode::PolicyWhitelist,
-            oc_policy::DenyReason::Expired => JsonRpcErrorCode::PolicyExpired,
-            oc_policy::DenyReason::PasskeyForged => JsonRpcErrorCode::Unauthorized,
-            oc_policy::DenyReason::PolicyMissing => JsonRpcErrorCode::PolicyMissing,
-            oc_policy::DenyReason::Cooldown => JsonRpcErrorCode::PolicyCooldown,
-            oc_policy::DenyReason::Unknown => JsonRpcErrorCode::Internal,
         }
     }
 

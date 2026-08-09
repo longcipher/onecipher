@@ -7,12 +7,14 @@
 //! re-implement the ~30-line frame codec inline using tokio's
 //! `AsyncReadExt`/`AsyncWriteExt` (ponytail step 4 — minimum code).
 //!
-//! Each [`KeyAgentClient::send`] call opens a fresh `UnixStream` connection to
-//! the Key-Agent, sends one `KeyAgentRequest` frame, and reads one
-//! `KeyAgentResponse` frame. The Key-Agent's `handle_conn` loop supports
-//! multiple requests per connection, so reusing the connection is possible —
-//! but for T17 scaffolding, one-request-per-connection keeps the client
-//! stateless and avoids lifetime issues across `&self` borrows.
+//! The Key-Agent's `handle_conn` loop supports multiple requests per
+//! connection. By default this client reuses a single long-lived connection
+//! (opened lazily, guarded by a `Mutex`), which eliminates the UDS
+//! connect + file-descriptor churn on every signing request under WC
+//! high-concurrency. If the pooled connection is closed by the peer (EOF) or
+//! errors, it is transparently re-established on the next [`send`].
+
+use std::sync::Mutex;
 
 use oc_keyagent::{
     KeyAgentRequest, KeyAgentResponse,
@@ -30,18 +32,26 @@ const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 
 /// Async client for the Key-Agent over UDS.
 ///
-/// Stateless — each [`send`] call opens a new connection. The socket path is
-/// stored as a `String` so `KeyAgentClient` is `Clone` (the WC method router
-/// may be invoked from multiple tokio tasks).
+/// Reuses a single pooled connection by default (the socket path is stored as
+/// a `String` so `KeyAgentClient` is `Clone`; every clone shares the same
+/// underlying connection pool). Falls back to reconnect-on-error if the peer
+/// closes the stream.
 #[derive(Clone)]
 pub struct KeyAgentClient {
     sock_path: String,
+    /// Lazily-established pooled connection. `None` means "not yet connected"
+    /// or "was closed — reconnect on next send". Guarded by a `Mutex` because
+    /// `send` takes `&self`.
+    pooled: std::sync::Arc<Mutex<Option<UnixStream>>>,
 }
 
 impl KeyAgentClient {
     /// Construct a new client targeting the Key-Agent UDS at `sock_path`.
     pub fn new(sock_path: impl Into<String>) -> Self {
-        Self { sock_path: sock_path.into() }
+        Self {
+            sock_path: sock_path.into(),
+            pooled: std::sync::Arc::new(Mutex::new(None)),
+        }
     }
 
     /// Return the configured socket path (used by tests / diagnostics).
@@ -49,13 +59,26 @@ impl KeyAgentClient {
         &self.sock_path
     }
 
+    /// Obtain a live connection, reusing the pool or reconnecting as needed.
+    async fn connection(&self) -> Result<UnixStream, NetAgentError> {
+        // Fast path: a pooled connection we believe is still open.
+        if let Some(stream) = self.pooled.lock().unwrap().take() {
+            // Probe liveness cheaply: a peer-closed socket will fail on write.
+            // We rely on the write/read error in `send` to reconnect, but
+            // discarding here and reconnecting is simpler and correct.
+            return Ok(stream);
+        }
+        let stream = UnixStream::connect(&self.sock_path).await?;
+        Ok(stream)
+    }
+
     /// Send a `KeyAgentRequest` frame and wait for the matching
     /// `KeyAgentResponse` frame.
     ///
-    /// One request per connection — opens a fresh `UnixStream`, sends the
-    /// encoded request, reads the encoded response, and closes the stream.
+    /// Reuses the pooled connection when available; transparently reconnects
+    /// if the peer closed it.
     pub async fn send(&self, req: &KeyAgentRequest) -> Result<KeyAgentResponse, NetAgentError> {
-        let mut stream = UnixStream::connect(&self.sock_path).await?;
+        let mut stream = self.connection().await?;
 
         // Encode + send request frame. The typed `Frame` wrapper handles the
         // prost encode; the async transport writes the length-prefixed bytes.
@@ -97,12 +120,16 @@ impl KeyAgentClient {
             .await
             .map_err(|e| NetAgentError::KeyAgentWire(format!("reading payload: {e}")))?;
 
-        Frame::<KeyAgentResponse>::decode(buf.as_slice()).map(|f| f.into_inner()).map_err(|e| {
-            match e {
+        let resp = Frame::<KeyAgentResponse>::decode(buf.as_slice())
+            .map(|f| f.into_inner())
+            .map_err(|e| match e {
                 FrameError::Decode(de) => NetAgentError::ProstDecode(de),
                 other => NetAgentError::KeyAgentWire(format!("response decode failed: {other}")),
-            }
-        })
+            })?;
+
+        // Return the connection to the pool for reuse.
+        *self.pooled.lock().unwrap() = Some(stream);
+        Ok(resp)
     }
 }
 

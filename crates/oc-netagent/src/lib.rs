@@ -194,21 +194,9 @@ pub async fn run_server_controlled_with_approvals(
             }
         };
 
-        // Persist: load, replace-or-append, save (full-replace semantics).
-        let mut all = match store.load() {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to load sessions for persist");
-                continue;
-            }
-        };
-        if let Some(existing) = all.iter_mut().find(|s| s.topic == session.topic) {
-            *existing = session.clone();
-        } else {
-            all.push(session);
-        }
-        if let Err(e) = store.save(&all) {
-            tracing::warn!(error = %e, "failed to persist sessions");
+        // Atomic single-session upsert (no lost-update under concurrency).
+        if let Err(e) = store.upsert(&session) {
+            tracing::warn!(error = %e, "failed to persist session");
         }
     }
 

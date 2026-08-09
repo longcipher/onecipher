@@ -1,3 +1,23 @@
+//! Transaction broadcast (transport layer).
+//!
+//! # Module boundary
+//!
+//! This module is the **transport adapter** for `oc-wallet`: given an already
+//! resolved, decrypted private key and a chain id, it signs (via `oc-signer`),
+//! encodes, and pushes the signed tx to the chain's RPC endpoint.
+//!
+//! It deliberately lives in `oc-wallet` (not `oc-netagent`) because the actual
+//! broadcast must happen *after* the key has been decrypted in-process by the
+//! wallet operation layer — the signing key is never sent over the network.
+//! `oc-netagent` is the *outbound* WC relay / intent layer and must not see
+//! raw keys.
+//!
+//! **Future refactor (tracked):** the per-chain `broadcast_*` functions are a
+//! transport concern and should be extracted behind a `ChainBroadcaster` trait
+//! (owned by `oc-netagent`) so `oc-wallet` only owns key custody + signing and
+//! delegates transport. Until then, keep all chain-specific HTTP/gRPC here and
+//! do NOT spread `hpx`/`tonic` calls across `ops.rs` / `key_ops.rs`.
+
 use std::path::Path;
 
 #[cfg(feature = "rpc")]
@@ -367,12 +387,7 @@ fn broadcast_nano(rpc_url: &str, signed_bytes: &[u8]) -> Result<String, OcWallet
 
 #[cfg(feature = "rpc")]
 pub(crate) fn http_post_json(url: &str, body: &str) -> Result<String, OcWalletError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| OcWalletError::BroadcastFailed(format!("failed to create runtime: {e}")))?;
-
-    rt.block_on(async {
+    crate::runtime::blocking_runtime().block_on(async {
         let client = hpx::Client::new();
         let resp = client
             .post(url)
@@ -398,12 +413,7 @@ pub(crate) fn http_post_json(url: &str, body: &str) -> Result<String, OcWalletEr
 
 #[cfg(feature = "rpc")]
 fn http_post_text(url: &str, content_type: &str, body: &str) -> Result<String, OcWalletError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| OcWalletError::BroadcastFailed(format!("failed to create runtime: {e}")))?;
-
-    rt.block_on(async {
+    crate::runtime::blocking_runtime().block_on(async {
         let client = hpx::Client::new();
         let resp = client
             .post(url)

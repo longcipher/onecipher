@@ -114,7 +114,14 @@ fn eval_allowed_typed_data_contracts(
 /// Preserved verbatim from Open Wallet Standard for advanced deployments (AD-04: "The optional
 /// executable-subpolicy hook from the upstream project is preserved for advanced deployments but
 /// is not on the v2 hot path.")
-pub fn evaluate_executable(
+///
+/// `pub(crate)` — this hook is reachable only from within `oc-policy` (via
+/// [`evaluate_one`]); it is intentionally NOT part of the crate's public API
+/// surface because (a) it spawns an external process, which conflicts with the
+/// seccomp/landlock defense-in-depth goals of the Key-Agent (R12d), and (b) the
+/// product evaluation path is v3, not v1. Exposing it publicly would invite
+/// callers to build policy flows around subprocess forking.
+pub(crate) fn evaluate_executable(
     exe: &str,
     config: Option<&serde_json::Value>,
     policy_id: &str,

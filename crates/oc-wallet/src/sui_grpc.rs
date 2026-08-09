@@ -57,12 +57,7 @@ pub(crate) fn execute_transaction(
     tx_bcs: &[u8],
     sig_bcs: &[u8],
 ) -> Result<String, OcWalletError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| OcWalletError::BroadcastFailed(format!("failed to create runtime: {e}")))?;
-
-    rt.block_on(async {
+    crate::runtime::blocking_runtime().block_on(async {
         let channel = tonic::transport::Channel::from_shared(endpoint.to_string())
             .map_err(|e| OcWalletError::BroadcastFailed(format!("invalid endpoint: {e}")))?
             .connect()

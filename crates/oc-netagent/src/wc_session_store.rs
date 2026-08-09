@@ -3,6 +3,7 @@
 //! File: `<state_dir>/wc_sessions.json` (mode 0600).
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use oc_walletconnect::WcSession;
 use thiserror::Error;
@@ -17,20 +18,34 @@ pub enum SessionStoreError {
 
 pub struct SessionStore {
     path: PathBuf,
+    /// Lazily-loaded in-memory index; `None` means "not yet loaded".
+    /// Guarded by the mutex so concurrent `upsert`/`save`/`load` callers
+    /// cannot lose updates (see [`SessionStore::upsert`]).
+    cache: Mutex<Option<Vec<WcSession>>>,
 }
 
 impl SessionStore {
     pub fn open(state_dir: &str) -> Result<Self, SessionStoreError> {
         let path = PathBuf::from(state_dir).join("wc_sessions.json");
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            cache: Mutex::new(None),
+        })
     }
 
     pub fn load(&self) -> Result<Vec<WcSession>, SessionStoreError> {
-        if !self.path.exists() {
-            return Ok(Vec::new());
+        let mut cache = self.cache.lock().unwrap();
+        if let Some(v) = &*cache {
+            // Serve from the in-memory index (clone so callers can't mutate it).
+            return Ok(v.clone());
         }
-        let bytes = std::fs::read(&self.path)?;
-        let v: Vec<WcSession> = serde_json::from_slice(&bytes)?;
+        let v = if !self.path.exists() {
+            Vec::new()
+        } else {
+            let bytes = std::fs::read(&self.path)?;
+            serde_json::from_slice(&bytes)?
+        };
+        *cache = Some(v.clone());
         Ok(v)
     }
 
@@ -40,7 +55,51 @@ impl SessionStore {
         // pairing topics and symmetric keys, so they must never be briefly
         // world-readable the way `fs::write` + `set_permissions` left them.
         oc_core::paths::write_atomic_private(&self.path, &bytes)?;
+        // Keep the in-memory index coherent with what was just written.
+        *self.cache.lock().unwrap() = Some(sessions.to_vec());
         Ok(())
+    }
+
+    /// Lock the cache, lazily loading it from disk (or an empty vec) on first use.
+    fn cached(&self) -> std::sync::MutexGuard<'_, Option<Vec<WcSession>>> {
+        let mut cache = self.cache.lock().unwrap();
+        if cache.is_none() {
+            let v = if !self.path.exists() {
+                Vec::new()
+            } else {
+                let bytes = match std::fs::read(&self.path) {
+                    Ok(b) => b,
+                    Err(_) => Vec::new(),
+                };
+                serde_json::from_slice(&bytes).unwrap_or_default()
+            };
+            *cache = Some(v);
+        }
+        cache
+    }
+
+    /// Atomically insert-or-replace a single session without a caller-driven
+    /// read-modify-write of the entire list.
+    ///
+    /// The `Mutex` makes the find-or-push + disk write atomic with respect to
+    /// other `upsert`/`save` callers, eliminating the lost-update race that the
+    /// previous `load`/`modify`/`save` pattern in `run_server_controlled_*` had
+    /// under concurrent pairing injection.
+    pub fn upsert(&self, session: &WcSession) -> Result<(), SessionStoreError> {
+        let mut cache = self.cached();
+        let all = cache.as_mut().expect("cached() always populates the cache");
+        if let Some(existing) = all.iter_mut().find(|s| s.topic == session.topic) {
+            *existing = session.clone();
+        } else {
+            all.push(session.clone());
+        }
+        // Snapshot then **drop the cache lock** before calling `save`, which
+        // re-locks the same (non-reentrant) `Mutex`. Holding it here would
+        // deadlock the calling thread. `save` re-populates the cache from the
+        // snapshot, so the index stays coherent.
+        let snapshot = all.clone();
+        drop(cache);
+        self.save(&snapshot)
     }
 
     #[cfg(test)]
@@ -135,5 +194,18 @@ mod tests {
         let loaded = store.load().unwrap();
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[0].topic, "new1");
+    }
+
+    #[test]
+    fn upsert_inserts_then_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path().to_str().unwrap()).unwrap();
+        store.upsert(&sample_session("t1")).unwrap();
+        store.upsert(&sample_session("t2")).unwrap();
+        store.upsert(&sample_session("t1")).unwrap(); // replace, not duplicate
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.len(), 2);
+        // t1 should appear exactly once (no duplicate on re-insert).
+        assert_eq!(loaded.iter().filter(|s| s.topic == "t1").count(), 1);
     }
 }

@@ -13,12 +13,7 @@ fn near_rpc_call(
     rpc_url: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value, OcWalletError> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| OcWalletError::BroadcastFailed(format!("failed to create runtime: {e}")))?;
-
-    rt.block_on(async {
+    crate::runtime::blocking_runtime().block_on(async {
         let client = hpx::Client::new();
         let resp =
             client.post(rpc_url).json(body).send().await.map_err(|e| {

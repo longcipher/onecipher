@@ -2,6 +2,8 @@
 pub mod broadcast;
 pub mod error;
 pub mod key_ops;
+#[cfg(any(feature = "rpc", feature = "sui-grpc"))]
+mod runtime;
 pub mod key_store;
 pub mod migrate;
 #[cfg(feature = "rpc")]

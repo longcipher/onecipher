@@ -23,7 +23,12 @@ pub mod wasm;
 
 pub use error::OcPolicyError;
 pub use secret::{Effect, PolicyDecision, SecretOperation, SecretPolicyRule, check_secret_access};
-pub use v1::{evaluate_executable, evaluate_one, evaluate_policies, evaluate_rule};
+// v1 entry points. `evaluate_policies` / `evaluate_one` / `evaluate_rule` are
+// public because `oc-wallet::key_ops` drives OWS-compatible v1 policy bundles
+// for legacy/upstream compatibility. `evaluate_executable` is intentionally
+// crate-internal (see its doc note): it forks a subprocess and is not part of
+// the recommended evaluation path.
+pub use v1::{evaluate_one, evaluate_policies, evaluate_rule};
 pub use v2::{
     AlertSink, BudgetAllocation, Decision, DenyReason, HumanAlert, LogAlertSink, PayRequest,
     PolicyRulesV2, PolicyState, PolicyV2, WarnReason, evaluate_11_step,

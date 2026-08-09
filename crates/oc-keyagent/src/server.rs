@@ -11,6 +11,10 @@ use std::{
         net::{UnixListener, UnixStream},
     },
     path::Path,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     thread,
 };
 
@@ -51,15 +55,18 @@ pub fn socket_path_from(xdg: Option<&str>) -> String {
     }
 }
 
-/// Run the Key-Agent server: bind UDS, chmod 0600, spawn a thread per
-/// connection.
+/// Run the Key-Agent server with a cooperative shutdown flag.
 ///
-/// Blocks forever (until the listener is closed or the process is killed).
+/// The loop checks `stop` between accepts; when set, the listener is dropped
+/// and the function returns `Ok(())`. The caller (daemon) sets `stop` on
+/// Ctrl+C; `run` then removes the socket file before returning so the next
+/// launch does not trip over a stale `.sock`.
+///
 /// Per R55 / AD-01, uses `std::thread::spawn` (NOT `tokio::spawn`).
 ///
 /// `socket_path` overrides `default_socket_path()` if set (used by tests and
 /// the `OC_KEYAGENT_SOCK` env var in `main.rs`).
-pub fn run(socket_path: Option<&str>) -> Result<(), KeyAgentError> {
+pub fn run(socket_path: Option<&str>, stop: Option<Arc<AtomicBool>>) -> Result<(), KeyAgentError> {
     let path = socket_path.map_or_else(default_socket_path, String::from);
 
     // Ensure parent dir exists with mode 0700.
@@ -80,6 +87,10 @@ pub fn run(socket_path: Option<&str>) -> Result<(), KeyAgentError> {
     eprintln!("oc-keyagent: listening on {path}");
 
     for stream in listener.incoming() {
+        // Cooperative shutdown: stop accepting new connections.
+        if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+            break;
+        }
         match stream {
             Ok(stream) => {
                 thread::spawn(move || {
@@ -89,11 +100,19 @@ pub fn run(socket_path: Option<&str>) -> Result<(), KeyAgentError> {
                 });
             }
             Err(e) => {
+                // If the listener was closed (e.g. dropped), `incoming()`
+                // returns an error — treat that as shutdown, not a transient
+                // error.
+                if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+                    break;
+                }
                 eprintln!("oc-keyagent: accept error: {e}");
                 // Continue accepting — transient errors must not kill the agent.
             }
         }
     }
+    // Best-effort cleanup of the socket file on clean shutdown.
+    let _ = std::fs::remove_file(&path);
     Ok(())
 }
 

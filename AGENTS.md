@@ -31,6 +31,30 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 └── Cargo.toml              # Workspace root (pure [workspace] declaration)
 ```
 
+### Storage Boundary (authoritative)
+
+Three crates deal with persisted secrets/state. Their responsibilities are
+deliberately disjoint — do NOT merge them and do NOT add cross-calls:
+
+| Crate | Owns | Format | Notes |
+|-------|------|--------|-------|
+| `oc-wallet::key_store` | API tokens (`oc_key_…`) | JSON, 0600 | Agent/CLI auth tokens; distinct from user secrets. |
+| `oc-secret` | User secrets (age-encrypted) + TOTP | age ciphertext | Never holds keys; keys live in `oc-vault`. |
+| `oc-vault` | Wallet keyfiles (encrypted mnemonics/keys) | age/JSON, 0700 dir / 0600 file, `.ocbk` backup | The persistence *format*; `oc-wallet::ops` is the *operation* layer that reads/writes it. |
+| `oc-wallet::policy_store` | Signed policy docs | JSON, 0600 | Policy rules only; counters live in `oc-policy` state. |
+
+Rule of thumb: `oc-vault` = *how* bytes are stored on disk; `oc-wallet` =
+*what* wallet operations do with them; `oc-secret` = *user* secrets (not
+keys). `oc-wallet::key_store` API tokens are NOT user secrets and stay in
+`oc-wallet`.
+
+### Intent Layer location
+
+The Intent types (`Intent`, `IntentKind`, `execute_intent`, `simulate_intent`)
+live in **`crates/oc-netagent/src/intent`** (the sole consumer is `oc-netagent`
+via `HpxRpcClient`). The empty `crates/oc-intent/` directory is a retired
+legacy crate kept for checkout compatibility only — see its `README.md`.
+
 ## Execution Strategy
 
 - Maximize parallelism by dispatching subagents aggressively for independent

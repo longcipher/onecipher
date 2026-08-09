@@ -541,9 +541,11 @@ fn run_daemon() -> Result<(), CliError> {
     // Channel: Key-Agent thread → tokio select! loop (lifecycle monitoring).
     // The thread sends a message only on error; if it exits without sending,
     // the receiver's `recv()` returns `Err` → `.ok()` yields `None`.
+    let ka_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ka_stop_thread = ka_stop.clone();
     let (ka_err_tx, ka_err_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
-        if let Err(e) = oc_keyagent::server::run(Some(&ka_sock_clone)) {
+        if let Err(e) = oc_keyagent::server::run(Some(&ka_sock_clone), Some(ka_stop_thread)) {
             let _ = ka_err_tx.send(format!("{e}"));
         }
     });
@@ -746,6 +748,9 @@ fn run_daemon() -> Result<(), CliError> {
         let result: Result<(), CliError> = tokio::select! {
             _ = tokio::signal::ctrl_c() => {
                 eprintln!("daemon shutting down");
+                // Signal the Key-Agent thread to stop accepting and clean up
+                // its UDS socket (cooperative graceful shutdown, R55).
+                ka_stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 Ok(())
             }
             _ = ctrl_task => {
