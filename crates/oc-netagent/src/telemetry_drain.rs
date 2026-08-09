@@ -293,32 +293,41 @@ mod tests {
         KeyAgentResponse::ok(inner.encode_to_vec())
     }
 
-    /// A mock Key-Agent that answers `responses` in order, one per connection,
+    /// A mock Key-Agent that answers `responses` in order across connections,
     /// then repeats the final response forever.
+    ///
+    /// Mirrors the real Key-Agent's per-connection loop: a single connection
+    /// serves multiple request/response frames until the client closes it, so
+    /// the pooled `KeyAgentClient` reuse path is exercised just like in
+    /// production.
     async fn spawn_mock(sock_path: String, responses: Vec<KeyAgentResponse>) {
         tokio::spawn(async move {
             let listener = UnixListener::bind(&sock_path).expect("bind mock keyagent");
             let mut i = 0usize;
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else { return };
-                let mut len_buf = [0u8; 4];
-                if stream.read_exact(&mut len_buf).await.is_err() {
-                    continue;
-                }
-                let len = u32::from_be_bytes(len_buf) as usize;
-                let mut req_buf = vec![0u8; len];
-                if stream.read_exact(&mut req_buf).await.is_err() {
-                    continue;
-                }
+                // Serve every frame on this connection until the peer closes
+                // it (EOF on read), then accept the next connection.
+                loop {
+                    let mut len_buf = [0u8; 4];
+                    if stream.read_exact(&mut len_buf).await.is_err() {
+                        break; // client closed / connection gone
+                    }
+                    let len = u32::from_be_bytes(len_buf) as usize;
+                    let mut req_buf = vec![0u8; len];
+                    if stream.read_exact(&mut req_buf).await.is_err() {
+                        break;
+                    }
 
-                let resp = responses.get(i).or_else(|| responses.last()).cloned();
-                i += 1;
-                let Some(resp) = resp else { return };
+                    let resp = responses.get(i).or_else(|| responses.last()).cloned();
+                    i += 1;
+                    let Some(resp) = resp else { return };
 
-                let bytes = resp.encode_to_vec();
-                let _ = stream.write_all(&(bytes.len() as u32).to_be_bytes()).await;
-                let _ = stream.write_all(&bytes).await;
-                let _ = stream.flush().await;
+                    let bytes = resp.encode_to_vec();
+                    let _ = stream.write_all(&(bytes.len() as u32).to_be_bytes()).await;
+                    let _ = stream.write_all(&bytes).await;
+                    let _ = stream.flush().await;
+                }
             }
         });
         // Let the listener bind before the first connect.

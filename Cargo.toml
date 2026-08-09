@@ -16,13 +16,7 @@ members = [
     "crates/oc-walletconnect",
     "crates/oc-webui",
 ]
-# `crates/oc-intent` is an intentionally-empty legacy directory. The Intent
-# layer was merged into `crates/oc-netagent/src/intent` during a workspace
-# de-wheeling pass; the standalone `oc-intent` crate was retired but its
-# directory is kept (with this `exclude`) so historical checkouts and tooling
-# do not treat it as a broken workspace member. Do NOT add a `Cargo.toml`
-# here — the Intent types live in `oc-netagent`.
-exclude = ["examples", "fuzz", "crates/oc-intent"]
+exclude = ["examples", "fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -112,13 +106,9 @@ tap-caip = "0.7.0"
 tempfile = "3.27.0"
 thiserror = "2.0.20"
 tokio = "1.53.1"
-tonic = "0.14.6"
-tonic-prost = "0.14.6"
 totp-rs = { version = "6.0.0", default-features = false }
 tracing = "0.1.44"
 uuid = "1.24.0"
-wasmi = "1.1.0"
-wat = "1.255.0"
 windows-sys = "0.61.2"
 x25519-dalek = "3.0.0"
 xrpl-rust = { version = "1.2.0", default-features = false }

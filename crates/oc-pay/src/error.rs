@@ -36,9 +36,15 @@ pub enum PayError {
     #[error("invalid recipient: {0}")]
     InvalidRecipient(String),
     /// `close_channel` was called with an unknown [`crate::ChannelId`].
+    ///
+    /// Experimental: only reachable via the `experimental` MPP/Tempo feature.
+    #[cfg(feature = "experimental")]
     #[error("channel not found: {0}")]
     ChannelNotFound(String),
     /// `close_channel` was called on a channel that is already closed.
+    ///
+    /// Experimental: only reachable via the `experimental` MPP/Tempo feature.
+    #[cfg(feature = "experimental")]
     #[error("channel already closed: {0}")]
     ChannelClosed(String),
     /// The Key-Agent refused to sign or the signature failed verification.
@@ -93,7 +99,9 @@ mod tests {
         assert_eq!(PayError::TempoError("tmp".into()).to_string(), "tempo error: tmp");
         assert_eq!(PayError::InvalidAmount.to_string(), "invalid amount");
         assert_eq!(PayError::InvalidRecipient("0xz".into()).to_string(), "invalid recipient: 0xz");
+        #[cfg(feature = "experimental")]
         assert_eq!(PayError::ChannelNotFound("ch-1".into()).to_string(), "channel not found: ch-1");
+        #[cfg(feature = "experimental")]
         assert_eq!(
             PayError::ChannelClosed("ch-1".into()).to_string(),
             "channel already closed: ch-1"
@@ -120,7 +128,9 @@ mod tests {
             PayError::TempoError("x".into()),
             PayError::InvalidAmount,
             PayError::InvalidRecipient("x".into()),
+            #[cfg(feature = "experimental")]
             PayError::ChannelNotFound("x".into()),
+            #[cfg(feature = "experimental")]
             PayError::ChannelClosed("x".into()),
             PayError::SigningFailed("x".into()),
             PayError::ChainMismatch { expected: "a".into(), actual: "b".into() },
@@ -139,7 +149,9 @@ mod tests {
         let _ = PayError::TempoError(String::new());
         let _ = PayError::InvalidAmount;
         let _ = PayError::InvalidRecipient(String::new());
+        #[cfg(feature = "experimental")]
         let _ = PayError::ChannelNotFound(String::new());
+        #[cfg(feature = "experimental")]
         let _ = PayError::ChannelClosed(String::new());
         let _ = PayError::SigningFailed(String::new());
     }

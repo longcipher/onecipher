@@ -5,7 +5,13 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Policy Engine v2 for OneCipher"
+description = "Policy Engine for OneCipher"
+
+[features]
+# Cedar-like v3 rules (experimental). The v2 11-step flow is the authoritative
+# engine; v3 extends it with a simplified Cedar-style rule tree. Off by default
+# until its rule surface stabilizes.
+experimental-v3 = []
 
 [dependencies]
 # RFC3339 parsing for policy expiry. `jiff` is already in this crate's tree via
@@ -18,8 +24,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-wasmi = { workspace = true }
-wat = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["html_reports"] }

@@ -21,8 +21,10 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    native_strategy::{
+        NoHostFacts, RegistryOutcome, StrategyEvalRequest, StrategyHost, StrategyRegistry,
+    },
     v2::{Decision, DenyReason, PayRequest, PolicyState},
-    wasm::{NoHostFacts, RegistryOutcome, StrategyRegistry, WasmEvalRequest, WasmHostCalls},
 };
 
 // ---------------------------------------------------------------------------
@@ -254,7 +256,7 @@ pub fn parse_policy_v3(json: &str) -> Result<PolicyV3, serde_json::Error> {
 }
 
 // ---------------------------------------------------------------------------
-// Wasm strategy plugin integration
+// Native strategy plugin integration
 // ---------------------------------------------------------------------------
 
 /// The result of a v3 evaluation that also consulted the Wasm strategy
@@ -294,12 +296,12 @@ impl StrategyDecision {
     }
 }
 
-/// Build the Wasm-facing request from a [`PayRequest`].
+/// Build the strategy-facing request from a [`PayRequest`].
 ///
 /// `method` is supplied by the caller because `PayRequest` is payment-shaped
 /// and does not carry the originating JSON-RPC method.
-pub fn wasm_request_from_pay(req: &PayRequest, method: &str) -> WasmEvalRequest {
-    WasmEvalRequest {
+pub fn strategy_request_from_pay(req: &PayRequest, method: &str) -> StrategyEvalRequest {
+    StrategyEvalRequest {
         method: method.to_string(),
         chain_id: req.chain_id.clone(),
         amount_usd: req.amount_usd,
@@ -310,13 +312,13 @@ pub fn wasm_request_from_pay(req: &PayRequest, method: &str) -> WasmEvalRequest 
     }
 }
 
-/// Evaluate a request against a v3 policy **and** the Wasm strategy registry.
+/// Evaluate a request against a v3 policy **and** the strategy registry.
 ///
 /// Ordering is deliberate and is the whole point of the design:
 ///
 /// 1. The built-in v2 11-step pipeline and the v3 Cedar rules run first, via [`evaluate_v3`].
-/// 2. **If they already deny, the plugins are not run at all.** An untrusted guest never observes a
-///    request the core has already rejected, and a plugin can never *upgrade* a deny into an allow.
+/// 2. **If they already deny, the plugins are not run at all.** A strategy never observes a request
+///    the core has already rejected, and a plugin can never *upgrade* a deny into an allow.
 /// 3. Only on allow/warn are plugins consulted, deny-wins.
 ///
 /// This makes the plugin layer strictly *additive* authority-wise: it can
@@ -331,7 +333,7 @@ pub fn evaluate_v3_with_strategies(
     state: &mut PolicyState,
     registry: &StrategyRegistry,
     method: &str,
-    host: &dyn WasmHostCalls,
+    host: &dyn StrategyHost,
 ) -> StrategyDecision {
     // Captured BEFORE evaluation: step 10 clears the deny streak on allow, and
     // we must restore it if a plugin later overturns that allow.
@@ -341,17 +343,17 @@ pub fn evaluate_v3_with_strategies(
     let decision = evaluate_v3(policy, request, state);
 
     // Fail-closed short-circuit: never hand a already-denied request to a
-    // guest, and never let a guest overturn a core deny.
+    // strategy, and never let a plugin overturn a core deny.
     if matches!(decision, Decision::Deny(_)) || registry.is_empty() {
         return StrategyDecision::passthrough(decision);
     }
 
-    let wasm_req = wasm_request_from_pay(request, method);
-    let RegistryOutcome { denied_by, warnings, errors } = registry.evaluate(&wasm_req, host);
+    let req = strategy_request_from_pay(request, method);
+    let RegistryOutcome { denied_by, warnings, errors } = registry.evaluate(&req, host);
 
     for (plugin, message) in &warnings {
         tracing::warn!(
-            target: "oc-policy::wasm",
+            target: "oc-policy::native_strategy",
             plugin = %plugin,
             message = %message,
             "strategy plugin raised a warning"
@@ -359,7 +361,7 @@ pub fn evaluate_v3_with_strategies(
     }
     for (plugin, error) in &errors {
         tracing::warn!(
-            target: "oc-policy::wasm",
+            target: "oc-policy::native_strategy",
             plugin = %plugin,
             error = %error,
             "strategy plugin failed to evaluate; treated as non-blocking"
@@ -368,7 +370,7 @@ pub fn evaluate_v3_with_strategies(
 
     let decision = if let Some((plugin, reason, message)) = &denied_by {
         tracing::warn!(
-            target: "oc-policy::wasm",
+            target: "oc-policy::native_strategy",
             plugin = %plugin,
             reason = %reason,
             message = %message,
@@ -407,7 +409,10 @@ pub fn evaluate_v3_with_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::v2::{BudgetAllocation, PolicyRulesV2, PolicyV2};
+    use crate::{
+        native_strategy::{StrategyOutcome, StrategyPlugin},
+        v2::{BudgetAllocation, PolicyRulesV2, PolicyV2},
+    };
 
     // --- helpers ---
 
@@ -883,136 +888,32 @@ mod tests {
         assert_eq!(decision, Decision::Deny(DenyReason::Unknown));
     }
 
-    // --- Wasm strategy registry integration --------------------------------
+    // --- Strategy registry integration -------------------------------------
 
-    // The canned JSON blobs the guest returns. They are declared here (rather
-    // than only inside the WAT) so the `(i32.const <len>)` operands can be
-    // generated from `.len()` instead of hand-counted — an off-by-one there
-    // truncates the JSON and silently turns a deny into a parse error.
-    const CANNED_ALLOW: &str = r#"{"outcome":"allow"}"#;
-    const CANNED_DENY: &str = r#"{"outcome":"deny","reason":"marker","message":"blocked"}"#;
-    const CANNED_WARN: &str = r#"{"outcome":"warn","message":"suspicious"}"#;
-
-    /// Escape a JSON string for embedding in a WAT `(data ...)` segment.
-    fn wat_escape(s: &str) -> String {
-        s.replace('\\', r"\\").replace('"', r#"\""#)
-    }
-
-    /// Build the marker guest's WAT with the data segments and their lengths
-    /// both derived from [`CANNED_ALLOW`] / [`CANNED_DENY`] / [`CANNED_WARN`],
-    /// so the two can never disagree.
-    ///
-    /// The guest denies iff the request JSON contains the byte sequence
-    /// `DENYME`, and warns iff it contains `WARNME`. Implements ABI v1.
-    fn marker_wat() -> String {
-        // Segment offsets. 64 B of slack after each blob keeps them from
-        // overlapping if a message is edited.
-        const ALLOW_AT: usize = 1024;
-        const DENY_AT: usize = 1152;
-        const WARN_AT: usize = 1280;
-        assert!(ALLOW_AT + CANNED_ALLOW.len() < DENY_AT, "allow blob overruns the deny segment");
-        assert!(DENY_AT + CANNED_DENY.len() < WARN_AT, "deny blob overruns the warn segment");
-
-        MARKER_WAT_TEMPLATE
-            .replace("@ALLOW_AT@", &ALLOW_AT.to_string())
-            .replace("@DENY_AT@", &DENY_AT.to_string())
-            .replace("@WARN_AT@", &WARN_AT.to_string())
-            .replace("@ALLOW_LEN@", &CANNED_ALLOW.len().to_string())
-            .replace("@DENY_LEN@", &CANNED_DENY.len().to_string())
-            .replace("@WARN_LEN@", &CANNED_WARN.len().to_string())
-            .replace("@ALLOW@", &wat_escape(CANNED_ALLOW))
-            .replace("@DENY@", &wat_escape(CANNED_DENY))
-            .replace("@WARN@", &wat_escape(CANNED_WARN))
-    }
-
-    const MARKER_WAT_TEMPLATE: &str = r#"
-(module
-  (memory (export "memory") 1)
-  (data (i32.const @ALLOW_AT@) "@ALLOW@")
-  (data (i32.const @DENY_AT@) "@DENY@")
-  (data (i32.const @WARN_AT@) "@WARN@")
-  (global $cursor (mut i32) (i32.const 64))
-
-  (func (export "oc_alloc") (param $n i32) (result i32)
-    (local $ptr i32)
-    (local.set $ptr (global.get $cursor))
-    (global.set $cursor (i32.add (global.get $cursor) (local.get $n)))
-    (local.get $ptr))
-
-  ;; Search [ptr, ptr+len) for a 6-byte needle whose bytes are $a..$f.
-  (func $find6 (param $ptr i32) (param $len i32)
-                (param $a i32) (param $b i32) (param $c i32)
-                (param $d i32) (param $e i32) (param $f i32) (result i32)
-    (local $i i32) (local $p i32)
-    (if (i32.lt_s (local.get $len) (i32.const 6)) (then (return (i32.const 0))))
-    (block $done
-      (loop $scan
-        (br_if $done (i32.gt_s (local.get $i) (i32.sub (local.get $len) (i32.const 6))))
-        (local.set $p (i32.add (local.get $ptr) (local.get $i)))
-        (if (i32.and
-              (i32.eq (i32.load8_u (local.get $p)) (local.get $a))
-              (i32.and
-                (i32.eq (i32.load8_u offset=1 (local.get $p)) (local.get $b))
-                (i32.and
-                  (i32.eq (i32.load8_u offset=2 (local.get $p)) (local.get $c))
-                  (i32.and
-                    (i32.eq (i32.load8_u offset=3 (local.get $p)) (local.get $d))
-                    (i32.and
-                      (i32.eq (i32.load8_u offset=4 (local.get $p)) (local.get $e))
-                      (i32.eq (i32.load8_u offset=5 (local.get $p)) (local.get $f)))))))
-          (then (return (i32.const 1))))
-        (local.set $i (i32.add (local.get $i) (i32.const 1)))
-        (br $scan)))
-    (i32.const 0))
-
-  (func $pack (param $ptr i32) (param $len i32) (result i64)
-    (i64.or (i64.shl (i64.extend_i32_u (local.get $ptr)) (i64.const 32))
-            (i64.extend_i32_u (local.get $len))))
-
-  (func (export "oc_evaluate") (param $ptr i32) (param $len i32) (result i64)
-    ;; DENYME = 68 69 78 89 77 69
-    (if (result i64)
-        (call $find6 (local.get $ptr) (local.get $len)
-              (i32.const 68) (i32.const 69) (i32.const 78)
-              (i32.const 89) (i32.const 77) (i32.const 69))
-      (then (call $pack (i32.const @DENY_AT@) (i32.const @DENY_LEN@)))
-      (else
-        ;; WARNME = 87 65 82 78 77 69
-        (if (result i64)
-            (call $find6 (local.get $ptr) (local.get $len)
-                  (i32.const 87) (i32.const 65) (i32.const 82)
-                  (i32.const 78) (i32.const 77) (i32.const 69))
-          (then (call $pack (i32.const @WARN_AT@) (i32.const @WARN_LEN@)))
-          (else (call $pack (i32.const @ALLOW_AT@) (i32.const @ALLOW_LEN@))))))))
-"#;
-
+    /// A registry with a single "marker" plugin: denies on `DENYME`, warns on
+    /// `WARNME`, otherwise allows. The marker string is matched against both
+    /// the recipient and the serialized `host_facts` so host-fact injection is
+    /// observable (mirrors the old Wasm guest, which scanned the whole request
+    /// JSON).
     fn marker_registry() -> StrategyRegistry {
         let mut registry = StrategyRegistry::new();
-        registry.insert(
-            crate::wasm::StrategyPlugin::from_wat("marker", &marker_wat())
-                .expect("the marker guest must compile"),
-        );
+        registry.insert(StrategyPlugin::new(
+            "marker",
+            Box::new(|req, _| {
+                let deny_hit = req.recipient.contains("DENYME") ||
+                    req.host_facts.to_string().contains("DENYME");
+                let warn_hit = req.recipient.contains("WARNME") ||
+                    req.host_facts.to_string().contains("WARNME");
+                if deny_hit {
+                    StrategyOutcome::Deny { reason: "marker".into(), message: "blocked".into() }
+                } else if warn_hit {
+                    StrategyOutcome::Warn { message: "suspicious".into() }
+                } else {
+                    StrategyOutcome::Allow
+                }
+            }),
+        ));
         registry
-    }
-
-    /// The canned blobs must be valid `StrategyOutcome` JSON, and the template
-    /// must have no unsubstituted placeholders left.
-    #[test]
-    fn marker_guest_canned_blobs_are_valid_outcomes() {
-        use crate::wasm::StrategyOutcome;
-        assert_eq!(
-            serde_json::from_str::<StrategyOutcome>(CANNED_ALLOW).unwrap(),
-            StrategyOutcome::Allow
-        );
-        assert_eq!(
-            serde_json::from_str::<StrategyOutcome>(CANNED_DENY).unwrap(),
-            StrategyOutcome::Deny { reason: "marker".into(), message: "blocked".into() }
-        );
-        assert_eq!(
-            serde_json::from_str::<StrategyOutcome>(CANNED_WARN).unwrap(),
-            StrategyOutcome::Warn { message: "suspicious".into() }
-        );
-        assert!(!marker_wat().contains('@'), "an ABI placeholder was left unsubstituted");
     }
 
     #[test]
@@ -1029,8 +930,8 @@ mod tests {
         assert_eq!(out.decision, Decision::Allow);
         assert!(!out.is_denied());
         assert!(out.denied_by.is_none());
-        assert!(out.warnings.is_empty());
-        assert!(out.errors.is_empty());
+        assert_eq!(out.warnings.len(), 0);
+        assert_eq!(out.errors.len(), 0);
     }
 
     #[test]
@@ -1045,7 +946,7 @@ mod tests {
             "eth_sendTransaction",
         );
         assert_eq!(out.decision, Decision::Allow);
-        assert!(out.warnings.is_empty());
+        assert_eq!(out.warnings.len(), 0);
     }
 
     #[test]
@@ -1112,52 +1013,16 @@ mod tests {
             "eth_sendTransaction",
         );
         assert_eq!(out.decision, Decision::Deny(DenyReason::BudgetExceeded));
-        assert!(out.denied_by.is_none(), "the guest must not observe an already-denied request");
+        assert!(out.denied_by.is_none(), "the plugin must not observe an already-denied request");
     }
 
     #[test]
-    fn a_broken_plugin_does_not_brick_the_wallet() {
-        // A guest that imports a host function cannot instantiate against the
-        // empty linker. That is an error, not a deny.
-        let mut registry = StrategyRegistry::new();
-        registry.insert(
-            crate::wasm::StrategyPlugin::from_wat(
-                "evil",
-                r#"(module
-  (import "env" "exfiltrate" (func $x (param i32 i32)))
-  (memory (export "memory") 1)
-  (func (export "oc_alloc") (param i32) (result i32) (i32.const 64))
-  (func (export "oc_evaluate") (param i32 i32) (result i64) (i64.const 0)))"#,
-            )
-            .unwrap(),
-        );
-        let policy = v3_policy(vec![]);
-        let mut state = fresh_state();
-        let out = evaluate_v3_with_registry(
-            &policy,
-            &test_request(),
-            &mut state,
-            &registry,
-            "eth_sendTransaction",
-        );
-        assert_eq!(out.decision, Decision::Allow);
-        assert_eq!(out.errors.len(), 1);
-        assert_eq!(out.errors[0].0, "evil");
-    }
-
-    #[test]
-    fn host_facts_reach_the_guest() {
-        struct Balance;
-        impl WasmHostCalls for Balance {
-            fn get_wallet_balance(&self, _asset: &str) -> Option<f64> {
-                Some(7.0)
-            }
-        }
-        // The guest denies on the substring `DENYME`; put it in the host facts
-        // rather than the request body to prove facts are serialized in.
+    fn host_facts_reach_the_strategy() {
+        // A strategy that injects `DENYME` into the request via host facts
+        // must be observed by the marker plugin (facts are serialized in).
         struct Sneaky;
-        impl WasmHostCalls for Sneaky {
-            fn host_facts(&self, _req: &WasmEvalRequest) -> serde_json::Value {
+        impl StrategyHost for Sneaky {
+            fn host_facts(&self, _req: &StrategyEvalRequest) -> serde_json::Value {
                 serde_json::json!({ "note": "DENYME" })
             }
         }
@@ -1166,17 +1031,6 @@ mod tests {
         let mut state = fresh_state();
         let registry = marker_registry();
 
-        let allowed = evaluate_v3_with_strategies(
-            &policy,
-            &test_request(),
-            &mut state,
-            &registry,
-            "eth_sendTransaction",
-            &Balance,
-        );
-        assert_eq!(allowed.decision, Decision::Allow);
-
-        let mut state = fresh_state();
         let denied = evaluate_v3_with_strategies(
             &policy,
             &test_request(),
@@ -1294,9 +1148,9 @@ mod tests {
     }
 
     #[test]
-    fn wasm_request_maps_pay_request_fields() {
+    fn strategy_request_maps_pay_request_fields() {
         let req = test_request();
-        let w = wasm_request_from_pay(&req, "wallet_sendCalls");
+        let w = strategy_request_from_pay(&req, "wallet_sendCalls");
         assert_eq!(w.method, "wallet_sendCalls");
         assert_eq!(w.chain_id, "eip155:8453");
         assert!((w.amount_usd - 5.0).abs() < f64::EPSILON);
@@ -1306,9 +1160,9 @@ mod tests {
     }
 
     #[test]
-    fn wasm_request_maps_absent_recipient_to_empty_string() {
+    fn strategy_request_maps_absent_recipient_to_empty_string() {
         let mut req = test_request();
         req.recipient = None;
-        assert_eq!(wasm_request_from_pay(&req, "m").recipient, "");
+        assert_eq!(strategy_request_from_pay(&req, "m").recipient, "");
     }
 }

@@ -4,6 +4,11 @@
 //! These mirror the contract surface required by the T18 spec — they exercise
 //! the `PaymentSettler` trait end-to-end with mockable trait-object clients
 //! and assert the receipts / errors match the spec.
+//!
+//! The MPP / Tempo paths are behind the `experimental` feature, so the whole
+//! test file is gated on it.
+
+#![cfg(feature = "experimental")]
 
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Mutex};
 
@@ -257,7 +262,7 @@ async fn test_payment_scheme_exact() {
     );
     assert_eq!(sol_settler.supported_schemes(), &[PaymentScheme::Exact]);
     let tempo_settler = TempoSettler::new("eip155:8453", Box::new(MockTempo::new()));
-    assert!(tempo_settler.supported_schemes().is_empty());
+    assert_eq!(tempo_settler.supported_schemes().len(), 0);
 }
 
 #[tokio::test]

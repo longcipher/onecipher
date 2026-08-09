@@ -4,7 +4,7 @@
 //! interface. Phase 1 implementations:
 //! - [`crate::evm::EvmSettler`]
 //! - [`crate::solana::SolanaSettler`]
-//! - [`crate::tempo::TempoSettler`]
+//! - `TempoSettler` (experimental, behind the `experimental` feature)
 //!
 //! The trait surface mirrors the T18 contract exactly — see the spec excerpt
 //! in the crate-level docs.
@@ -33,7 +33,7 @@ use crate::{
 ///
 /// Phase 1 settlers are mockable: they accept trait-based clients
 /// ([`crate::evm::BundlerClient`] / [`crate::evm::PaymasterClient`] /
-/// [`crate::solana::SolanaRpcClient`] / [`crate::tempo::TempoChannelClient`])
+/// [`crate::solana::SolanaRpcClient`] / `TempoChannelClient` (experimental))
 /// so tests can inject mock impls without spinning up real Bundler / Paymaster
 /// / Solana / Tempo services. Real HTTP clients live in `oc-netagent` (T19).
 pub trait PaymentSettler: Send + Sync {
@@ -66,7 +66,7 @@ pub trait PaymentSettler: Send + Sync {
     /// Open an MPP channel with `recipient` capped at `max_amount`.
     ///
     /// Returns the new [`ChannelId`] on success. The channel can then stream
-    /// payments via [`crate::mpp::PayMpp`] and be closed via
+    /// payments via `PayMpp` (experimental) and be closed via
     /// [`PaymentSettler::close_channel`].
     fn open_channel(
         &self,

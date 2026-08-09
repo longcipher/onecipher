@@ -16,7 +16,7 @@
 //! transport concern and should be extracted behind a `ChainBroadcaster` trait
 //! (owned by `oc-netagent`) so `oc-wallet` only owns key custody + signing and
 //! delegates transport. Until then, keep all chain-specific HTTP/gRPC here and
-//! do NOT spread `hpx`/`tonic` calls across `ops.rs` / `key_ops.rs`.
+//! do NOT spread `hpx` calls across `ops.rs` / `key_ops.rs`.
 
 use std::path::Path;
 

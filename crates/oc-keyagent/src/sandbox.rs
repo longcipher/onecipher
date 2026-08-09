@@ -194,17 +194,39 @@ mod linux {
     const SYS_CLOCK_GETTIME: u32 = 228;
     const SYS_EXIT: u32 = 60;
     const SYS_EXIT_GROUP: u32 = 231;
-    // `socket` (41), `connect` (42), `bind` (49), `listen` (50), `accept` (43)
-    // are NOT in the unconditional allowlist — they are checked against the
-    // sockaddr family argument (`AF_UNIX` allowed, `AF_INET`/`AF_INET6` denied)
-    // by a separate BPF rule. For T12 we use a conservative allowlist that
-    // permits `socket` and `connect` unconditionally (UDS path) and relies on
-    // `nm` symbol inspection + `strace -e trace=network` (R57) to catch any
-    // TCP usage at runtime. A sockaddr-aware BPF filter is the T12+ stretch
-    // goal (documented as a deviation).
+    // `socket` (41) and `socketpair` (53) are routed to a *domain gate* rather
+    // than the unconditional allowlist: `seccomp_data.args[0]` holds the
+    // `domain` argument, which BPF can compare directly (it cannot dereference
+    // the `sockaddr*` passed to `connect`/`bind`). The gate admits only
+    // `AF_UNIX` (1) and kills the process on `AF_INET` (2) / `AF_INET6` (10).
+    // `connect` (42) / `bind` (49) remain allow-listed because the only fds
+    // that exist are AF_UNIX — a `socket()` of any other domain is killed
+    // before an fd can be created to pass to them.
     const SYS_SOCKET: u32 = 41;
+    const SYS_SOCKETPAIR: u32 = 53;
     const SYS_CONNECT: u32 = 42;
     const SYS_BIND: u32 = 49;
+
+    /// `seccomp_data.args[0]` low-32-bit offset (see [`OFF_NR`]). For
+    /// `socket`/`socketpair` this is the address family (domain).
+    const OFF_ARG0: u8 = 16;
+
+    /// Socket address families (`linux/socket.h`). Only `AF_UNIX` passes the
+    /// domain gate; `AF_INET`/`AF_INET6` exist for documentation and the
+    /// compile-time contract below.
+    const AF_UNIX: u32 = 1;
+    const AF_INET: u32 = 2;
+    const AF_INET6: u32 = 10;
+
+    // Compile-time safety contract (R12): the domain gate is keyed to AF_UNIX
+    // exclusively. Assert the ABI constants are distinct so a renumbering of
+    // `linux/socket.h` can never silently widen the gate to allow INET.
+    const _: () = {
+        assert!(AF_UNIX == 1);
+        assert!(AF_INET == 2);
+        assert!(AF_INET6 == 10);
+        assert!(AF_UNIX != AF_INET && AF_UNIX != AF_INET6);
+    };
 
     /// Linux capabilities (per `linux/capability.h`).
     const CAP_IPC_LOCK: u32 = 14;
@@ -255,10 +277,16 @@ mod linux {
     ///
     /// Steps:
     /// 1. `prctl(PR_SET_NO_NEW_PRIVS, 1)` — required before seccomp.
-    /// 2. Build the BPF allowlist program.
+    /// 2. Build the BPF program ([`build_bpf_program`]).
     /// 3. `prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog)` — install filter.
     ///
-    /// Any syscall not in the allowlist → `SECCOMP_RET_KILL_PROCESS` (SIGSYS).
+    /// Network policy (R12): any `socket()`/`socketpair()` whose `domain` is
+    /// not `AF_UNIX` → `SECCOMP_RET_KILL_PROCESS` (SIGSYS). Everything else
+    /// defaults to `ALLOW` for runtime survival (a strict allowlist would kill
+    /// the process on ordinary syscalls like `mprotect`/`brk`/`rt_sigaction`
+    /// before it could even log). The R12 hard gate is additionally enforced
+    /// at the binary-symbol level (`rg` source scan) and runtime syscall trace
+    /// (`strace -e trace=network`, R57).
     pub(super) fn apply_seccomp() -> Result<(), KeyAgentError> {
         // Step 1: PR_SET_NO_NEW_PRIVS.
         // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)` takes integer
@@ -274,66 +302,10 @@ mod linux {
             )));
         }
 
-        // Step 2: Build the BPF allowlist.
-        // Logic:
-        //   - Load syscall number (BPF_LD | BPF_W | BPF_ABS, OFF_NR)
-        //   - For each allowed syscall: if equal, jump to ALLOW (jt=0, jf=continue)
-        //   - Default: RET KILL_PROCESS
-        //
-        // We use the simpler "allowlist" form: each JEQ has jt=1 (skip to
-        // RET ALLOW) and jf=0 (fall through to next check).
-        let filter = [
-            // Load seccomp_data.nr
-            sock_filter { code: BPF_LD | BPF_W | BPF_ABS, jt: 0, jf: 0, k: OFF_NR as u32 },
-            // Allow read
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_READ },
-            // Allow write
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_WRITE },
-            // Allow close
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_CLOSE },
-            // Allow mmap
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_MMAP },
-            // Allow munmap
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_MUNMAP },
-            // Allow recvfrom (UDS receive path)
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_RECVFROM },
-            // Allow sendto (UDS send path)
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_SENDTO },
-            // Allow futex
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_FUTEX },
-            // Allow clock_gettime
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_CLOCK_GETTIME },
-            // Allow exit
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_EXIT },
-            // Allow exit_group
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_EXIT_GROUP },
-            // Allow socket (UDS path — see SYS_SOCKET comment above for the
-            // T12 conservative-allow deviation)
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_SOCKET },
-            // Allow connect (UDS path)
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_CONNECT },
-            // Allow bind (UDS path)
-            sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_BIND },
-            // Default: allow
-            //
-            // **T12 Deviation:** We use `SECCOMP_RET_ALLOW` as the default
-            // rather than `SECCOMP_RET_KILL_PROCESS`. The reason is that a
-            // strict allowlist would kill the process on the first syscall
-            // outside the list (e.g. `mprotect`, `brk`, `rt_sigaction`,
-            // `epoll_wait`, `ioctl` on stdout/stderr) and the test process
-            // would die before it could even log. The R12 hard gate is
-            // enforced at the binary-symbol level (`nm` symbol inspection) +
-            // runtime syscall trace (`strace -e trace=network`) — these are
-            // the R57 triple-check tools. A stricter BPF filter that
-            // inspects the sockaddr family on socket/connect/bind is the
-            // T12+ stretch goal (documented in design.md).
-            sock_filter { code: BPF_RET | BPF_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW },
-            // ALLOW target (reachable via jt=1 jumps from each JEQ above).
-            sock_filter { code: BPF_RET | BPF_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW },
-            // KILL target (currently unreachable — see deviation note above).
-            sock_filter { code: BPF_RET | BPF_K, jt: 0, jf: 0, k: SECCOMP_RET_KILL_PROCESS },
-        ];
-
+        // Step 2: Build the BPF program ([`build_bpf_program`]). The returned
+        // `Vec` must stay alive for the `prctl` call below — `sock_fprog.filter`
+        // borrows it, and dropping the `Vec` would leave a dangling pointer.
+        let filter = build_bpf_program();
         let prog = sock_fprog { len: filter.len() as u16, filter: filter.as_ptr() };
 
         // Step 3: Install the filter via prctl(PR_SET_SECCOMP, ...).
@@ -356,6 +328,90 @@ mod linux {
             )));
         }
         Ok(())
+    }
+
+    /// Build the seccomp BPF program.
+    ///
+    /// Returns the raw instruction vector; the caller constructs the
+    /// `sock_fprog` and MUST keep the `Vec` alive for the duration of the
+    /// `prctl(PR_SET_SECCOMP, ...)` call (the kernel copies the program
+    /// synchronously, but the pointer must not dangle while it does).
+    ///
+    /// Layout (indices, BPF jump semantics: on `JEQ` the program counter
+    /// becomes `pc + jt + 1` on match and `pc + jf + 1` on no-match; on `JMP`
+    /// it becomes `pc + k + 1`):
+    ///
+    /// ```text
+    ///   0: LD W ABS OFF_NR                  ; A = syscall number
+    ///   1: JEQ SYS_SOCKET    jt=2 jf=0      ; match → 4 (domain gate), else 2
+    ///   2: JEQ SYS_SOCKETPAIR jt=1 jf=0     ; match → 4 (domain gate), else 3
+    ///   3: JMP k=4                          ; non-socket → 8 (allowlist reload)
+    ///   4: LD W ABS OFF_ARG0                ; gate: A = domain (args[0])
+    ///   5: JEQ AF_UNIX      jt=1 jf=0       ; AF_UNIX → 7 (ALLOW), else 6
+    ///   6: RET KILL_PROCESS                 ; non-UDS socket domain
+    ///   7: RET ALLOW                        ; UDS socket / socketpair OK
+    ///   8: LD W ABS OFF_NR                  ; allowlist: reload nr
+    ///   9..: JEQ <nr> jt=0 jf=0 / RET ALLOW pairs, one per allowlisted syscall
+    ///   ...: RET ALLOW                      ; default (runtime survival)
+    /// ```
+    ///
+    /// Why the default is `ALLOW` rather than `KILL_PROCESS`: a strict
+    /// allowlist would kill the process on ordinary syscalls (`mprotect`,
+    /// `brk`, `rt_sigaction`, `epoll_wait`, `ioctl` on stdio) before it could
+    /// even log. The R12 network guarantee is carried by the *domain gate*
+    /// (no INET/INET6 socket can ever be created) plus the runtime syscall
+    /// trace (`strace -e trace=network`, R57) and the source-level scan
+    /// (`rg TcpListener|TcpStream`, R12a).
+    fn build_bpf_program() -> Vec<sock_filter> {
+        let mut p: Vec<sock_filter> = Vec::new();
+
+        // 0: load syscall number.
+        p.push(sock_filter { code: BPF_LD | BPF_W | BPF_ABS, jt: 0, jf: 0, k: OFF_NR as u32 });
+        // 1: route socket() to the domain gate (skip instructions 2-3).
+        p.push(sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 2, jf: 0, k: SYS_SOCKET });
+        // 2: route socketpair() to the domain gate (skip instruction 3).
+        p.push(sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: SYS_SOCKETPAIR });
+        // 3: non-socket syscall → jump to 8 (allowlist reload).
+        p.push(sock_filter { code: BPF_JMP | BPF_JA, jt: 0, jf: 0, k: 4 });
+        // 4: domain gate: A = args[0].
+        p.push(sock_filter { code: BPF_LD | BPF_W | BPF_ABS, jt: 0, jf: 0, k: OFF_ARG0 as u32 });
+        // 5: AF_UNIX → 7 (ALLOW), else 6 (KILL).
+        p.push(sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: AF_UNIX });
+        // 6: kill on non-UDS socket domain.
+        p.push(sock_filter { code: BPF_RET | BPF_K, jt: 0, jf: 0, k: SECCOMP_RET_KILL_PROCESS });
+        // 7: UDS socket/socketpair allowed.
+        p.push(sock_filter { code: BPF_RET | BPF_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW });
+        // 8: allowlist — reload nr.
+        p.push(sock_filter { code: BPF_LD | BPF_W | BPF_ABS, jt: 0, jf: 0, k: OFF_NR as u32 });
+
+        // Unconditional allowlist: each `JEQ <nr> jt=0 jf=1` on match falls to
+        // the immediately following `RET ALLOW`; on no-match it skips that
+        // `RET ALLOW` (jf=1) and proceeds to the next pair. The final
+        // no-match falls through to the default `RET ALLOW` below.
+        let allowlist: [u32; 13] = [
+            SYS_READ,
+            SYS_WRITE,
+            SYS_CLOSE,
+            SYS_MMAP,
+            SYS_MUNMAP,
+            SYS_RECVFROM,
+            SYS_SENDTO,
+            SYS_FUTEX,
+            SYS_CLOCK_GETTIME,
+            SYS_EXIT,
+            SYS_EXIT_GROUP,
+            SYS_CONNECT,
+            SYS_BIND,
+        ];
+        for nr in allowlist {
+            p.push(sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 0, jf: 1, k: nr });
+            p.push(sock_filter { code: BPF_RET | BPF_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW });
+        }
+
+        // Default: ALLOW (runtime survival — see doc comment above).
+        p.push(sock_filter { code: BPF_RET | BPF_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW });
+
+        p
     }
 
     /// Drop all Linux capabilities except `CAP_IPC_LOCK` (needed for `mlock`

@@ -52,8 +52,8 @@ keys). `oc-wallet::key_store` API tokens are NOT user secrets and stay in
 
 The Intent types (`Intent`, `IntentKind`, `execute_intent`, `simulate_intent`)
 live in **`crates/oc-netagent/src/intent`** (the sole consumer is `oc-netagent`
-via `HpxRpcClient`). The empty `crates/oc-intent/` directory is a retired
-legacy crate kept for checkout compatibility only — see its `README.md`.
+via `HpxRpcClient`). The retired `oc-intent` crate was removed from the
+workspace entirely; there is no directory to keep.
 
 ## Execution Strategy
 

@@ -7,7 +7,7 @@
 //!   (mocked in tests).
 //! - [`solana::SolanaSettler`] — submits Solana txs directly to an RPC endpoint (no Paymaster;
 //!   Agent holds SOL).
-//! - [`tempo::TempoSettler`] — opens / streams / closes Tempo MPP channels.
+//! - `TempoSettler` (experimental) — opens / streams / closes Tempo MPP channels.
 //!
 //! # Phase 1 MVP scope
 //!
@@ -26,16 +26,19 @@
 
 pub mod error;
 pub mod evm;
+#[cfg(feature = "experimental")]
 pub mod mpp;
 pub mod paymaster;
 pub mod settler;
 pub mod solana;
+#[cfg(feature = "experimental")]
 pub mod tempo;
 pub mod types;
 pub mod x402;
 
 pub use error::PayError;
 pub use evm::{BundlerClient, EvmSettler, PaymasterClient};
+#[cfg(feature = "experimental")]
 pub use mpp::{MppChunk, MppStreamHandle, PayMpp};
 // Re-export the bits of `oc-session-key` that callers of `PaymentSettler`
 // commonly need — they appear in the trait signature (`payer: &SessionKey`).
@@ -49,6 +52,7 @@ pub use paymaster::{
 pub use rust_decimal::Decimal;
 pub use settler::PaymentSettler;
 pub use solana::{SolanaRpcClient, SolanaSettler};
+#[cfg(feature = "experimental")]
 pub use tempo::{TempoChannelClient, TempoSettler};
 pub use types::{Caip19Asset, ChannelId, ChannelState, PaymentReceipt, PaymentScheme, SessionKey};
 pub use x402::{

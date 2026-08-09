@@ -234,9 +234,10 @@ impl fmt::Display for ChannelId {
 
 /// MPP channel lifecycle state.
 ///
-/// Phase 1 tracks only the three states the [`TempoSettler`](crate::TempoSettler)
-/// cares about; real Tempo exposes more granular states (pending-open,
-/// settling, dispute-window) which T19 will wire up.
+/// Phase 1 tracks only the three states the `TempoSettler` (experimental,
+/// behind the `experimental` feature) cares about; real Tempo exposes more
+/// granular states (pending-open, settling, dispute-window) which T19 will
+/// wire up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChannelState {

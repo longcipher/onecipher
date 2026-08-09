@@ -11,7 +11,7 @@ description = "High-level wallet API for the OneCipher project"
 default = ["rpc", "sui-grpc"]
 fast-kdf = ["oc-signer/fast-kdf"]
 rpc = ["dep:hpx", "dep:tokio"]
-sui-grpc = ["dep:tonic", "dep:tonic-prost", "dep:tokio"]
+sui-grpc = ["dep:tokio"]
 # Passthrough for oc-signer's off-by-default XRPL support. Enabled
 # unconditionally for tests via the dev-dependency below, so the XRPL paths
 # stay covered even though they are absent from a default build.
@@ -33,9 +33,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"], optional = true }
-tonic = { workspace = true, features = ["transport"], optional = true }
-tonic-prost = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"], optional = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 

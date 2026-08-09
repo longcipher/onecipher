@@ -1,9 +1,20 @@
+use prost::Message;
+
 use crate::error::OcWalletError;
 
 // Hand-written prost message types matching the Sui gRPC proto definitions
 // from https://github.com/MystenLabs/sui-apis/tree/main/proto/sui/rpc/v2
 //
 // Only the minimal types needed for transaction execution are defined here.
+//
+// The gRPC transport is hand-rolled over `hpx` (HTTP/2) rather than `tonic`:
+// this crate needs exactly one unary RPC, and pulling the whole tonic runtime
+// (and its dependency tree) for it was over-engineering. The framing is the
+// standard gRPC over HTTP/2 wire format:
+//   - POST to `/sui.rpc.v2.TransactionExecutionService/ExecuteTransaction`
+//   - request body: 1-byte flag (0 = uncompressed) + 4-byte big-endian length
+//     + protobuf message
+//   - response body: same framing; the digest lives in `message.transaction.digest`
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub(crate) struct Bcs {
@@ -58,19 +69,6 @@ pub(crate) fn execute_transaction(
     sig_bcs: &[u8],
 ) -> Result<String, OcWalletError> {
     crate::runtime::blocking_runtime().block_on(async {
-        let channel = tonic::transport::Channel::from_shared(endpoint.to_string())
-            .map_err(|e| OcWalletError::BroadcastFailed(format!("invalid endpoint: {e}")))?
-            .connect()
-            .await
-            .map_err(|e| OcWalletError::BroadcastFailed(format!("gRPC connect failed: {e}")))?;
-
-        let mut client = tonic::client::Grpc::new(channel);
-
-        client
-            .ready()
-            .await
-            .map_err(|e| OcWalletError::BroadcastFailed(format!("gRPC not ready: {e}")))?;
-
         let request = ExecuteTransactionRequest {
             transaction: Some(Transaction {
                 bcs: Some(Bcs { name: None, value: Some(tx_bcs.to_vec()) }),
@@ -80,18 +78,73 @@ pub(crate) fn execute_transaction(
             }],
         };
 
-        let path = tonic::codegen::http::uri::PathAndQuery::from_static(
-            "/sui.rpc.v2.TransactionExecutionService/ExecuteTransaction",
-        );
-        let codec = tonic_prost::ProstCodec::default();
+        // gRPC frame: 1-byte flag (0 = uncompressed) + 4-byte big-endian length + body.
+        let msg = request.encode_to_vec();
+        let mut frame = Vec::with_capacity(5 + msg.len());
+        frame.push(0u8);
+        frame.extend_from_slice(&(msg.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&msg);
 
-        let response: tonic::Response<ExecuteTransactionResponse> = client
-            .unary(tonic::Request::new(request), path, codec)
+        let client = hpx::Client::new();
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client
+                .post(endpoint)
+                .header("Content-Type", "application/grpc")
+                .header("TE", "trailers")
+                .header("Grpc-Encoding", "identity")
+                .body(frame)
+                .send(),
+        )
+        .await
+        .map_err(|e| OcWalletError::BroadcastFailed(format!("gRPC request timed out: {e}")))?
+        .map_err(|e| OcWalletError::BroadcastFailed(format!("gRPC request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            return Err(OcWalletError::BroadcastFailed(format!(
+                "gRPC request failed (HTTP {status})"
+            )));
+        }
+
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(30), resp.bytes())
             .await
-            .map_err(|e| OcWalletError::BroadcastFailed(format!("gRPC error: {e}")))?;
+            .map_err(|e| OcWalletError::BroadcastFailed(format!("gRPC response timed out: {e}")))?
+            .map_err(|e| {
+                OcWalletError::BroadcastFailed(format!("gRPC response read failed: {e}"))
+            })?;
+
+        // trailers-only (gRPC status) responses begin with flag 0x80 + zero length.
+        if bytes.len() < 5 {
+            return Err(OcWalletError::BroadcastFailed(format!(
+                "truncated gRPC response ({} bytes)",
+                bytes.len()
+            )));
+        }
+
+        let flag = bytes[0];
+        let len = u32::from_be_bytes(bytes[1..5].try_into().map_err(|e| {
+            OcWalletError::BroadcastFailed(format!("invalid gRPC frame length: {e}"))
+        })?);
+        let end = 5 + len as usize;
+        if end > bytes.len() {
+            return Err(OcWalletError::BroadcastFailed(format!(
+                "truncated gRPC message: frame declares {len} bytes but only {} available",
+                bytes.len().saturating_sub(5)
+            )));
+        }
+        if flag != 0 {
+            return Err(OcWalletError::BroadcastFailed(format!(
+                "unsupported gRPC compression flag: {flag}"
+            )));
+        }
+
+        let msg_bytes = &bytes[5..end];
+        let response = ExecuteTransactionResponse::decode(msg_bytes).map_err(|e| {
+            OcWalletError::BroadcastFailed(format!("failed to decode gRPC response: {e}"))
+        })?;
 
         response
-            .into_inner()
             .transaction
             .and_then(|t| t.digest)
             .ok_or_else(|| OcWalletError::BroadcastFailed("no digest in gRPC response".into()))

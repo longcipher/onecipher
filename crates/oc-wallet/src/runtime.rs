@@ -1,18 +1,7 @@
 //! Process-wide blocking tokio runtime for `oc-wallet`.
 //!
 //! Several `oc-wallet` functions bridge from sync contexts (CLI commands,
-//! library调用) into async HTTP/gRPC clients (`hpx`, `tonic`). Building a fresh
-//! `tokio::runtime` on every call is a performance and resource anti-pattern
-//! (each `block_on` spins up and tears down a reactor + IO driver thread).
-//!
-//! Instead we lazily initialize a single process-wide current-thread runtime
-//! via `OnceLock` and reuse it for every one-shot `block_on`. This keeps the
-//! runtime count at exactly one for the lifetime of the process.
-
-//! Process-wide blocking tokio runtime for `oc-wallet`.
-//!
-//! Several `oc-wallet` functions bridge from sync contexts (CLI commands,
-//! library调用) into async HTTP/gRPC clients (`hpx`, `tonic`). Building a fresh
+//! library调用) into async HTTP/gRPC clients (`hpx`). Building a fresh
 //! `tokio::runtime` on every call is a performance and resource anti-pattern
 //! (each `block_on` spins up and tears down a reactor + IO driver thread).
 //!

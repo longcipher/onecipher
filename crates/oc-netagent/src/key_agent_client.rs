@@ -48,10 +48,7 @@ pub struct KeyAgentClient {
 impl KeyAgentClient {
     /// Construct a new client targeting the Key-Agent UDS at `sock_path`.
     pub fn new(sock_path: impl Into<String>) -> Self {
-        Self {
-            sock_path: sock_path.into(),
-            pooled: std::sync::Arc::new(Mutex::new(None)),
-        }
+        Self { sock_path: sock_path.into(), pooled: std::sync::Arc::new(Mutex::new(None)) }
     }
 
     /// Return the configured socket path (used by tests / diagnostics).

@@ -13,6 +13,11 @@ path = "src/lib.rs"
 
 [features]
 http = ["dep:hpx", "dep:base64", "dep:getrandom", "dep:oc-core"]
+# Phase-1 stubs for MPP (multi-party payment) channels and Tempo channel
+# settlement. Unimplemented upstream (T19); kept behind this gate so the
+# default build stays lean. Do NOT enable until the real Tempo wire protocol
+# lands.
+experimental = []
 
 [dependencies]
 base64 = { workspace = true, optional = true }

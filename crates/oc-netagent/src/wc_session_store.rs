@@ -2,8 +2,7 @@
 //!
 //! File: `<state_dir>/wc_sessions.json` (mode 0600).
 
-use std::path::PathBuf;
-use std::sync::Mutex;
+use std::{path::PathBuf, sync::Mutex};
 
 use oc_walletconnect::WcSession;
 use thiserror::Error;
@@ -27,10 +26,7 @@ pub struct SessionStore {
 impl SessionStore {
     pub fn open(state_dir: &str) -> Result<Self, SessionStoreError> {
         let path = PathBuf::from(state_dir).join("wc_sessions.json");
-        Ok(Self {
-            path,
-            cache: Mutex::new(None),
-        })
+        Ok(Self { path, cache: Mutex::new(None) })
     }
 
     pub fn load(&self) -> Result<Vec<WcSession>, SessionStoreError> {
@@ -39,11 +35,11 @@ impl SessionStore {
             // Serve from the in-memory index (clone so callers can't mutate it).
             return Ok(v.clone());
         }
-        let v = if !self.path.exists() {
-            Vec::new()
-        } else {
+        let v = if self.path.exists() {
             let bytes = std::fs::read(&self.path)?;
             serde_json::from_slice(&bytes)?
+        } else {
+            Vec::new()
         };
         *cache = Some(v.clone());
         Ok(v)
@@ -64,14 +60,11 @@ impl SessionStore {
     fn cached(&self) -> std::sync::MutexGuard<'_, Option<Vec<WcSession>>> {
         let mut cache = self.cache.lock().unwrap();
         if cache.is_none() {
-            let v = if !self.path.exists() {
-                Vec::new()
-            } else {
-                let bytes = match std::fs::read(&self.path) {
-                    Ok(b) => b,
-                    Err(_) => Vec::new(),
-                };
+            let v = if self.path.exists() {
+                let bytes = std::fs::read(&self.path).unwrap_or_default();
                 serde_json::from_slice(&bytes).unwrap_or_default()
+            } else {
+                Vec::new()
             };
             *cache = Some(v);
         }

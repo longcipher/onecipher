@@ -15,13 +15,18 @@
 #![deny(unsafe_code)]
 
 pub mod error;
+pub mod native_strategy;
 pub mod secret;
 pub mod v1;
 pub mod v2;
+#[cfg(feature = "experimental-v3")]
 pub mod v3;
-pub mod wasm;
 
 pub use error::OcPolicyError;
+pub use native_strategy::{
+    NoHostFacts, RegistryOutcome, StrategyEvalRequest, StrategyHost, StrategyOutcome,
+    StrategyPlugin, StrategyRegistry, strategy_request_from_pay,
+};
 pub use secret::{Effect, PolicyDecision, SecretOperation, SecretPolicyRule, check_secret_access};
 // v1 entry points. `evaluate_policies` / `evaluate_one` / `evaluate_rule` are
 // public because `oc-wallet::key_ops` drives OWS-compatible v1 policy bundles
@@ -33,13 +38,10 @@ pub use v2::{
     AlertSink, BudgetAllocation, Decision, DenyReason, HumanAlert, LogAlertSink, PayRequest,
     PolicyRulesV2, PolicyState, PolicyV2, WarnReason, evaluate_11_step,
 };
+#[cfg(feature = "experimental-v3")]
 pub use v3::{
     ComparisonOp, PolicyRule, PolicyV3, RuleCondition, RuleEffect, StrategyDecision, evaluate_v3,
-    evaluate_v3_with_registry, evaluate_v3_with_strategies, parse_policy_v3, wasm_request_from_pay,
-};
-pub use wasm::{
-    NoHostFacts, RegistryOutcome, StrategyLimits, StrategyOutcome, StrategyPlugin,
-    StrategyRegistry, WasmError, WasmEvalRequest, WasmHostCalls,
+    evaluate_v3_with_registry, evaluate_v3_with_strategies, parse_policy_v3,
 };
 
 // ---------------------------------------------------------------------------

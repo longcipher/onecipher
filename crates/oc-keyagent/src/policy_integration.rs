@@ -23,8 +23,8 @@ use std::{
 };
 
 use oc_policy::{
-    AlertSink, Decision, NoHostFacts, PayRequest, PolicyState, StrategyRegistry, WasmHostCalls,
-    evaluate_11_step, wasm_request_from_pay,
+    AlertSink, Decision, NoHostFacts, PayRequest, PolicyState, StrategyHost, StrategyRegistry,
+    evaluate_11_step, strategy_request_from_pay,
 };
 
 use crate::{
@@ -54,8 +54,8 @@ pub struct PolicyIntegration {
     state: PolicyState,
     state_path: PathBuf,
     audit: Arc<Mutex<AuditLog>>,
-    /// Runtime-loadable Wasm strategy plugins, consulted *after* the built-in
-    /// pipeline allows. Empty by default — strategies are opt-in.
+    /// In-process strategy plugins, consulted *after* the built-in pipeline
+    /// allows. Empty by default — strategies are opt-in.
     strategies: StrategyRegistry,
 }
 
@@ -98,24 +98,15 @@ impl PolicyIntegration {
         })
     }
 
-    /// Load Wasm strategy plugins from `<state_dir>/strategies/`.
+    /// Load strategy plugins from `<state_dir>/strategies/`.
     ///
-    /// This is the hot-reload entry point: call it at startup and again on a
-    /// reload signal to pick up newly dropped `.wasm` / `.wat` files without
-    /// restarting the daemon. A missing directory is not an error — strategies
-    /// are optional.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KeyAgentError::Internal`] only if the directory exists but
-    /// cannot be read. Individual plugins that fail to compile are skipped
-    /// with a warning so one bad file cannot prevent startup.
-    pub fn load_strategies(&mut self, dir: &Path) -> Result<usize, KeyAgentError> {
-        let registry = StrategyRegistry::load_dir(dir)
-            .map_err(|e| KeyAgentError::Internal(format!("strategy registry load failed: {e}")))?;
-        let count = registry.len();
-        self.strategies = registry;
-        Ok(count)
+    /// Strategies are in-process Rust plugins; there is no on-disk format to
+    /// load. This method exists so the daemon's reload path has a stable call
+    /// site, but it is a no-op that clears the registry to its empty state.
+    /// Plugins must be injected via [`Self::set_strategies`].
+    pub fn load_strategies(&mut self, _dir: &Path) -> Result<usize, KeyAgentError> {
+        self.strategies = StrategyRegistry::new();
+        Ok(0)
     }
 
     /// Replace the strategy registry outright (used by tests and by the
@@ -144,7 +135,7 @@ impl PolicyIntegration {
         self.evaluate_with_method(req, session_key_id, "pay")
     }
 
-    /// [`Self::evaluate`], additionally telling the Wasm strategy plugins which
+    /// [`Self::evaluate`], additionally telling the strategy plugins which
     /// JSON-RPC method originated the request.
     ///
     /// `PayRequest` is payment-shaped and does not carry the method name, but a
@@ -162,14 +153,14 @@ impl PolicyIntegration {
     /// [`Self::evaluate_with_method`] with caller-supplied host facts.
     ///
     /// The plugins are consulted **only when the built-in pipeline allows**, so
-    /// a plugin can tighten policy but never overturn a core deny, and an
-    /// untrusted guest never observes an already-rejected request.
+    /// a plugin can tighten policy but never overturn a core deny, and a
+    /// strategy never observes an already-rejected request.
     pub fn evaluate_with_host(
         &mut self,
         req: &PayRequest,
         session_key_id: &str,
         method: &str,
-        host: &dyn WasmHostCalls,
+        host: &dyn StrategyHost,
     ) -> Decision {
         // 1. Capture prior counter + reasons to detect alert firing. `record_deny` inside
         //    `evaluate_11_step` clears `last_deny_reasons` when it fires the alert, so we must
@@ -261,20 +252,20 @@ impl PolicyIntegration {
         decision
     }
 
-    /// Consult the Wasm strategy registry and fold its verdict into `decision`.
+    /// Consult the strategy registry and fold its verdict into `decision`.
     ///
     /// Returns `(final_decision, denied_by, warnings, errors)` where the last
     /// three are JSON values ready for the audit payload.
     ///
     /// Ordering guarantee: if `decision` is already a `Deny`, or no plugins are
-    /// loaded, the guests are **not** run at all. This is what makes the plugin
-    /// layer strictly additive — it can only tighten policy.
+    /// loaded, the strategies are **not** run at all. This is what makes the
+    /// plugin layer strictly additive — it can only tighten policy.
     fn consult_strategies(
         &mut self,
         req: &PayRequest,
         method: &str,
         decision: Decision,
-        host: &dyn WasmHostCalls,
+        host: &dyn StrategyHost,
         prior_counter: u32,
         prior_reasons: Vec<oc_policy::DenyReason>,
     ) -> (Decision, serde_json::Value, serde_json::Value, serde_json::Value) {
@@ -283,8 +274,8 @@ impl PolicyIntegration {
             return (decision, null.clone(), null.clone(), null);
         }
 
-        let wasm_req = wasm_request_from_pay(req, method);
-        let outcome = self.strategies.evaluate(&wasm_req, host);
+        let strategy_req = strategy_request_from_pay(req, method);
+        let outcome = self.strategies.evaluate(&strategy_req, host);
 
         let warnings = if outcome.warnings.is_empty() {
             null.clone()
