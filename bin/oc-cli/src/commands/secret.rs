@@ -69,13 +69,34 @@ pub(crate) fn list(item_type: Option<ItemType>, json: bool) -> Result<(), CliErr
 /// metadata) is printed as a JSON object. When `--qr` is set, the secret
 /// value is displayed as a QR code in the terminal.
 #[allow(dead_code)]
-pub(crate) fn get(name: &str, field: Option<&str>, json: bool, qr: bool) -> Result<(), CliError> {
+pub(crate) fn get(
+    name: &str,
+    field: Option<&str>,
+    json: bool,
+    qr: bool,
+    copy: bool,
+    timeout: u64,
+) -> Result<(), CliError> {
     let store = super::open_secret_store()?;
     let entry = store.get(name).map_err(map_store_error)?;
     let identity = super::load_age_identity()?;
     let payload = entry
         .decrypt(&identity)
         .map_err(|e| CliError::InvalidArgs(format!("decryption failed: {e}")))?;
+
+    // Non-interactive clipboard copy (TUI parity): copies the secret value.
+    if copy {
+        let value = match field {
+            Some("secret") | None => &payload.secret,
+            Some("notes") => payload.notes.as_deref().unwrap_or(""),
+            Some(other) => {
+                return Err(CliError::InvalidArgs(format!(
+                    "unknown field '{other}' (expected: secret, notes, metadata)"
+                )));
+            }
+        };
+        return super::clipboard::copy_and_clear(value, timeout);
+    }
 
     if qr {
         let secret_value = match field {

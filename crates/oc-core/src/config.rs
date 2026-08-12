@@ -12,6 +12,28 @@ pub struct BackupConfig {
     pub max_backups: Option<u32>,
 }
 
+/// WalletConnect v2 relay configuration section.
+///
+/// Controls which relay the daemon's wallet server, the CLI dApp client, and
+/// generated pairing URIs target. `relay_url` may be a local/self-hosted relay
+/// (`wss://127.0.0.1:7443`) or the official cloud relay
+/// (`wss://relay.walletconnect.com`, which additionally requires `project_id`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WcConfig {
+    /// Relay WSS URL. Defaults to `wss://relay.walletconnect.com`.
+    #[serde(default)]
+    pub relay_url: String,
+    /// WalletConnect Cloud project ID (required by the cloud relay).
+    #[serde(default)]
+    pub project_id: String,
+}
+
+impl WcConfig {
+    pub fn default_relay_url() -> String {
+        "wss://relay.walletconnect.com".to_string()
+    }
+}
+
 /// Web UI configuration section.
 ///
 /// Controls the local browser-based approval surface served by the daemon.
@@ -70,6 +92,9 @@ impl WebuiConfig {
 /// Application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Vault directory. Defaults to `~/.onecipher` when absent from a user
+    /// config file (so partial configs that only set e.g. `wc.*` still parse).
+    #[serde(default = "Config::default_vault_path")]
     pub vault_path: PathBuf,
     #[serde(default)]
     pub rpc: HashMap<String, String>,
@@ -80,9 +105,19 @@ pub struct Config {
     /// Web UI configuration. Defaults to disabled if absent.
     #[serde(default)]
     pub webui: WebuiConfig,
+    /// WalletConnect v2 relay configuration. Defaults to the cloud relay.
+    #[serde(default)]
+    pub wc: WcConfig,
 }
 
 impl Config {
+    /// Default vault path (`~/.onecipher`), or a relative `.onecipher` when
+    /// HOME is unavailable. Used by `#[serde(default)]` so partial user config
+    /// files still parse.
+    fn default_vault_path() -> PathBuf {
+        crate::paths::state_dir().unwrap_or_else(|_| PathBuf::from(crate::paths::STATE_DIR_NAME))
+    }
+
     /// Returns the built-in default RPC endpoints for well-known chains.
     pub fn default_rpc() -> HashMap<String, String> {
         let mut rpc = HashMap::new();
@@ -132,14 +167,14 @@ impl Default for Config {
     /// Callers that need a hard failure instead of a fallback should use
     /// [`crate::paths::state_dir`] directly.
     fn default() -> Self {
-        let vault_path = crate::paths::state_dir()
-            .unwrap_or_else(|_| PathBuf::from(crate::paths::STATE_DIR_NAME));
+        let vault_path = Self::default_vault_path();
         Self {
             vault_path,
             rpc: Self::default_rpc(),
             plugins: HashMap::new(),
             backup: None,
             webui: WebuiConfig::default(),
+            wc: WcConfig { relay_url: WcConfig::default_relay_url(), project_id: String::new() },
         }
     }
 }
@@ -189,6 +224,13 @@ impl Config {
             config.plugins = user_config.plugins;
             config.backup = user_config.backup;
             config.webui = user_config.webui;
+            // Honor any non-empty user-specified WC relay settings.
+            if !user_config.wc.relay_url.is_empty() {
+                config.wc.relay_url = user_config.wc.relay_url;
+            }
+            if !user_config.wc.project_id.is_empty() {
+                config.wc.project_id = user_config.wc.project_id;
+            }
             // Honor any non-empty user-specified vault path. The previous
             // code also ignored the literal `/tmp/.onecipher`, because that
             // used to be the `Default` value when HOME was unset and would
@@ -225,6 +267,7 @@ mod tests {
             plugins: HashMap::new(),
             backup: None,
             webui: WebuiConfig::default(),
+            wc: WcConfig::default(),
         };
         let json = serde_json::to_string(&config).unwrap();
         let config2: Config = serde_json::from_str(&json).unwrap();
@@ -288,6 +331,7 @@ mod tests {
                 max_backups: Some(5),
             }),
             webui: WebuiConfig::default(),
+            wc: WcConfig::default(),
         };
         let json = serde_json::to_value(&config).unwrap();
         assert!(json.get("backup").is_some());

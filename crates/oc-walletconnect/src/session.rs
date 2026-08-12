@@ -3,6 +3,11 @@
 //! Lifecycle: Propose → Settle (Active) → Expired | Closed
 //! Each session has: topic, symKey, expiry, approved CAIP-2 namespaces,
 //! approved JSON-RPC methods, and optional dApp origin metadata.
+//!
+//! The `sym_key` is the **session** symmetric key. For a pairing (Propose
+//! state) it is the pairing key from the URI; once a session is settled it is
+//! the X25519+HKDF-derived session key (per the official client's
+//! `deriveSymKey`).
 
 use std::{
     collections::HashMap,
@@ -29,6 +34,17 @@ impl WcSymKeyHex {
 
     pub fn decode_bytes(&self) -> Option<Vec<u8>> {
         hex::decode(&self.0).ok()
+    }
+
+    /// Parse into a [`crate::crypto::WcSymKey`] if the hex decodes to 32 bytes.
+    pub fn to_sym_key(&self) -> Option<crate::crypto::WcSymKey> {
+        let bytes = self.decode_bytes()?;
+        if bytes.len() != 32 {
+            return None;
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Some(crate::crypto::WcSymKey::from_bytes(arr))
     }
 }
 
@@ -113,6 +129,12 @@ impl WcSession {
             return Err(WcError::SessionExpired(self.topic.clone()));
         }
         Ok(())
+    }
+}
+
+impl From<crate::crypto::WcSymKey> for WcSymKeyHex {
+    fn from(k: crate::crypto::WcSymKey) -> Self {
+        Self::new(k.to_hex())
     }
 }
 

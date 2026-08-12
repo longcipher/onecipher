@@ -7,6 +7,8 @@
 //! If the daemon is not running or webui is not enabled, auto-spawns the daemon
 //! after enabling webui in the config (gpg-agent / 1Password auto-spawn pattern).
 
+use std::io::{IsTerminal, Write};
+
 use crate::{CliError, commands::onecipher_home};
 
 /// Timeout for waiting on the daemon to write the port file after spawning.
@@ -75,6 +77,158 @@ fn ensure_webui_enabled(home: &std::path::Path) -> Result<(), CliError> {
     eprintln!("Enabled webui in {}", config_path.display());
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Non-interactive Web UI bridge (approvals + auth)
+//
+// These subcommands talk to the daemon's loopback HTTP API over
+// `http://127.0.0.1:<port>` where `<port>` is read from `~/.onecipher/webui.port`
+// (persisted by the daemon at startup). The approval and auth-status endpoints
+// are unauthenticated localhost routes, so no session token is required.
+// ---------------------------------------------------------------------------
+
+/// Read the daemon's Web UI port from `~/.onecipher/webui.port`.
+fn webui_port(home: &std::path::Path) -> Result<u16, CliError> {
+    let port_file = home.join("webui.port");
+    let port = std::fs::read_to_string(&port_file).map_err(|_| {
+        CliError::InvalidArgs(format!(
+            "Web UI port file not found at {} — is the daemon running with [webui] enabled?",
+            port_file.display()
+        ))
+    })?;
+    port.trim()
+        .parse::<u16>()
+        .map_err(|e| CliError::InvalidArgs(format!("invalid webui port '{port}': {e}")))
+}
+
+/// Perform a synchronous HTTP GET against the daemon's Web UI.
+fn http_get(home: &std::path::Path, path: &str) -> Result<serde_json::Value, CliError> {
+    let port = webui_port(home)?;
+    let url = format!("http://127.0.0.1:{port}{path}");
+    let client = hpx::Client::new();
+    let resp = crate::shared_runtime()
+        .block_on(client.get(url).send())
+        .map_err(|e| CliError::InvalidArgs(format!("HTTP GET failed: {e}")))?;
+    let status = resp.status().as_u16();
+    let body = crate::shared_runtime().block_on(resp.text()).unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(CliError::InvalidArgs(format!("Web UI returned HTTP {status}: {body}")));
+    }
+    serde_json::from_str(&body).map_err(|e| {
+        CliError::InvalidArgs(format!("Web UI returned invalid JSON (HTTP {status}): {e}"))
+    })
+}
+
+/// Perform a synchronous HTTP POST against the daemon's Web UI.
+fn http_post(
+    home: &std::path::Path,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, CliError> {
+    let port = webui_port(home)?;
+    let url = format!("http://127.0.0.1:{port}{path}");
+    let client = hpx::Client::new();
+    let resp = crate::shared_runtime()
+        .block_on(client.post(url).json(&body).send())
+        .map_err(|e| CliError::InvalidArgs(format!("HTTP POST failed: {e}")))?;
+    let status = resp.status().as_u16();
+    let resp_body = crate::shared_runtime().block_on(resp.text()).unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(CliError::InvalidArgs(format!("Web UI returned HTTP {status}: {resp_body}")));
+    }
+    serde_json::from_str(&resp_body).map_err(|e| {
+        CliError::InvalidArgs(format!("Web UI returned invalid JSON (HTTP {status}): {e}"))
+    })
+}
+
+/// `onecipher webui approval list` — list pending signing approvals.
+pub(crate) fn approval_list() -> Result<(), CliError> {
+    let home = super::onecipher_home();
+    let json = http_get(&home, "/api/approvals")?;
+    let approvals = json.get("approvals").cloned().unwrap_or(serde_json::json!([]));
+    let approvals: &[serde_json::Value] = approvals.as_array().map_or(&[], |a| a.as_slice());
+    if approvals.is_empty() {
+        println!("No pending approvals.");
+        return Ok(());
+    }
+    for a in approvals {
+        let id = a.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let method = a.get("method").and_then(|v| v.as_str()).unwrap_or("?");
+        let dapp = a.get("dapp_name").and_then(|v| v.as_str()).unwrap_or("?");
+        let chain = a.get("chain_id").and_then(|v| v.as_str()).unwrap_or("?");
+        println!("{id}  {method}  {dapp}  {chain}");
+    }
+    Ok(())
+}
+
+/// `onecipher webui approval show <id>` — show a single pending approval.
+pub(crate) fn approval_show(id: &str) -> Result<(), CliError> {
+    let home = super::onecipher_home();
+    let json = http_get(&home, &format!("/api/approvals/{id}"))?;
+    if json.get("error").is_some() {
+        return Err(CliError::InvalidArgs(format!("approval {id} not found (or already resolved)")));
+    }
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    Ok(())
+}
+
+/// `onecipher webui approval approve|reject <id>` — resolve a pending approval.
+pub(crate) fn approval_decision(
+    id: &str,
+    decision: &str,
+    reason: Option<&str>,
+    yes: bool,
+) -> Result<(), CliError> {
+    if !yes && std::io::stdin().is_terminal() {
+        eprint!("Really {decision} approval {id}? [y/N] ");
+        std::io::stderr().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line).unwrap_or(0);
+        if !line.trim().eq_ignore_ascii_case("y") {
+            return Err(CliError::InvalidArgs("aborted by user".into()));
+        }
+    }
+    let home = super::onecipher_home();
+    let body = serde_json::json!({
+        "decision": decision,
+        "reason": reason.unwrap_or(""),
+    });
+    let json = http_post(&home, &format!("/api/approvals/{id}/decision"), body)?;
+    println!("Approval {id} resolved: {decision} ({json})");
+    Ok(())
+}
+
+/// `onecipher webui auth status` — show lock state.
+pub(crate) fn auth_status() -> Result<(), CliError> {
+    let home = super::onecipher_home();
+    let json = http_get(&home, "/api/auth/status")?;
+    let locked = json.get("locked").and_then(|v| v.as_bool()).unwrap_or(false);
+    println!("locked: {locked}");
+    Ok(())
+}
+
+/// `onecipher webui auth lock` — expire all sessions.
+pub(crate) fn auth_lock() -> Result<(), CliError> {
+    let home = super::onecipher_home();
+    let json = http_post(&home, "/api/auth/lock", serde_json::json!({}))?;
+    println!("sessions locked: {}", json);
+    Ok(())
+}
+
+/// `onecipher webui auth bootstrap` — show whether first-time registration is needed.
+pub(crate) fn auth_bootstrap() -> Result<(), CliError> {
+    let home = super::onecipher_home();
+    let json = http_post(&home, "/api/auth/bootstrap", serde_json::json!({}))?;
+    let needs = json.get("needs_registration").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ready = json.get("bootstrap_ready").and_then(|v| v.as_bool()).unwrap_or(false);
+    println!("needs_registration: {needs}");
+    println!("bootstrap_ready: {ready}");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Spawn the onecipher daemon in the background.
+// ---------------------------------------------------------------------------
 
 /// Spawn the onecipher daemon in the background.
 fn spawn_daemon() -> Result<(), CliError> {

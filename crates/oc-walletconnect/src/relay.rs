@@ -27,6 +27,25 @@ impl Default for RelayConfig {
     }
 }
 
+/// Normalize a relay URL by ensuring a `projectId` query param is present when
+/// a project ID is supplied and the URL does not already carry one.
+///
+/// The official WalletConnect Cloud relay (`relay.walletconnect.com`) requires
+/// `?projectId=<id>`; local/self-hosted relays may accept it or not, so the
+/// param is only appended when a project ID is explicitly configured.
+pub fn apply_project_id(url: &str, project_id: Option<&str>) -> String {
+    match project_id {
+        Some(pid) if !pid.is_empty() => {
+            if url.contains('?') {
+                format!("{url}&projectId={pid}")
+            } else {
+                format!("{url}?projectId={pid}")
+            }
+        }
+        _ => url.to_string(),
+    }
+}
+
 pub struct RelayClient {
     ws: WebSocket<MaybeTlsStream<tokio::net::TcpStream>>,
     cfg: RelayConfig,
@@ -47,6 +66,36 @@ impl RelayClient {
     pub async fn send_binary(&mut self, b: impl Into<Vec<u8>>) -> WcResult<()> {
         self.ws.send(Frame::binary(b.into())).await?;
         Ok(())
+    }
+
+    /// Publish a message to a topic using the IRN `irn_publish` JSON-RPC
+    /// method. `message` is the base64-encoded envelope; `attestation` is an
+    /// optional Verify-service JWT (per the official relay RPC spec).
+    pub async fn publish_irn(
+        &mut self,
+        id: &str,
+        topic: &str,
+        message_b64: &str,
+        ttl: u32,
+        tag: u32,
+        attestation: Option<&str>,
+    ) -> WcResult<()> {
+        let mut params = serde_json::json!({
+            "topic": topic,
+            "message": message_b64,
+            "ttl": ttl,
+            "tag": tag,
+        });
+        if let Some(a) = attestation {
+            params["attestation"] = serde_json::json!(a);
+        }
+        let msg = serde_json::json!({
+            "id": id,
+            "jsonrpc": "2.0",
+            "method": "irn_publish",
+            "params": params,
+        });
+        self.send_text(serde_json::to_string(&msg)?).await
     }
 
     pub async fn recv(&mut self) -> WcResult<String> {

@@ -8,6 +8,15 @@ use super::{
 
 const MOONPAY_API: &str = "https://agents.moonpay.com";
 
+/// Env var override for the MoonPay API base URL. Used by tests to point at a
+/// local mock server; in production it stays unset and the built-in
+/// [`MOONPAY_API`] is used.
+const MOONPAY_API_ENV: &str = "OC_MOONPAY_API";
+
+fn moonpay_api() -> String {
+    std::env::var(MOONPAY_API_ENV).unwrap_or_else(|_| MOONPAY_API.to_string())
+}
+
 /// MoonPay-specific chain mapping. This is separate from the protocol-level
 /// CAIP-2 utilities because MoonPay has its own chain name scheme.
 /// MoonPay expects the BNB Chain funding slug to be `bnb`, while OneCipher uses `bsc` as the
@@ -65,8 +74,11 @@ pub async fn fund(
         token: token.to_string(),
     };
 
-    let resp =
-        client.post(format!("{MOONPAY_API}/api/tools/deposit_create")).json(&req).send().await?;
+    let resp = client
+        .post(format!("{}/api/tools/deposit_create", moonpay_api()))
+        .json(&req)
+        .send()
+        .await?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -101,7 +113,7 @@ pub async fn get_balances(
     };
 
     let resp = client
-        .post(format!("{MOONPAY_API}/api/tools/token_balance_list"))
+        .post(format!("{}/api/tools/token_balance_list", moonpay_api()))
         .json(&req)
         .send()
         .await?;

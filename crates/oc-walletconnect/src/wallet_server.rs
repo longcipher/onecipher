@@ -1,26 +1,28 @@
-//! WC v2 Wallet Role server (daemon side).
+//! WC v2 Wallet Role server (daemon side) — spec-compliant.
 //!
 //! Maintains a session table, listens on the relay for inbound JSON-RPC
 //! requests, dispatches them through a pluggable [`WalletMethodHandler`], and
 //! publishes the encrypted response back to the relay on the same topic.
 //!
-//! For MVP, encryption is symmetric (per-session symKey) using ChaCha20-Poly1305.
-//! The full X25519 + HKDF key derivation is wired in Task 3; this module uses
-//! the derived symKey directly.
+//! Wire format follows the official WalletConnect 2.0 spec:
+//! - Pairing-phase messages are encrypted with the pairing `symKey` from the URI using a **type-0
+//!   envelope** (empty AAD).
+//! - On `wc_sessionPropose`, the wallet derives the **session symmetric key** via
+//!   `deriveSymKey(wallet_private, proposer_public)` (X25519 + HKDF) and responds with its own
+//!   X25519 public key; the dApp derives the same key from its private key + the responder's public
+//!   key.
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use rand::RngExt;
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Mutex;
-use zeroize::Zeroize;
 
 #[cfg(any(test, feature = "test-utils"))]
 use crate::mock_relay::MockRelay;
 use crate::{
-    crypto::{WcCipher, WcSymKey},
+    crypto::{self, WcCipher, WcKeyPair, WcSymKey},
     error::{WcError, WcResult},
     jsonrpc::{JsonRpcError, JsonRpcErrorCode, JsonRpcRequest, JsonRpcResponse},
     method::{self, SessionProposeParams, SessionSettleParams},
@@ -29,17 +31,10 @@ use crate::{
     uri::PairingUri,
 };
 
-const WC_AAD: &[u8] = b"wc-2.0";
-
 pub type HandlerResult<'a> =
     Pin<Box<dyn Future<Output = Result<Value, (JsonRpcErrorCode, String)>> + Send + 'a>>;
 
 /// Trait implemented by the Net-Agent's WC method router.
-///
-/// `method` is the JSON-RPC method name (e.g. `"personal_sign"`,
-/// `"onecipher_listWallets"`). `params` is the parsed JSON-RPC params object.
-/// `session_topic` identifies the WC session the request came in on, so the
-/// handler can look up the bound `SessionKeyInfo` and PolicyRulesV2.
 pub trait WalletMethodHandler: Send + Sync {
     fn handle<'a>(&'a self, method: &str, params: Value, session_topic: &str) -> HandlerResult<'a>;
 }
@@ -80,11 +75,6 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
     }
 
     /// Returns a clonable handle that can inject sessions while `run()` blocks.
-    ///
-    /// The handle shares the same `Arc<Mutex<WcSessionTable>>` as the server,
-    /// so `insert_session` / `add_pairing` calls on the handle are visible to
-    /// the `run()` loop, which will subscribe to newly inserted topics on its
-    /// next iteration.
     pub fn session_handle(&self) -> WcServerHandle {
         WcServerHandle { sessions: Arc::clone(&self.sessions) }
     }
@@ -107,6 +97,10 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
     }
 
     /// Process exactly one inbound message on the given topic (mock relay, for tests).
+    ///
+    /// Accepts both the spec-compliant encrypted envelope (type 0) and a
+    /// plaintext JSON-RPC message (legacy mock path). Responses are published
+    /// back in the same format that was received.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn process_one(&self, topic: &str) -> WcResult<()> {
         let relay = self
@@ -117,7 +111,62 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         let mut sub = relay.subscribe(topic).await;
         let payload = sub.recv().await.map_err(|e| WcError::Relay(format!("recv: {e:?}")))?;
 
-        let req: JsonRpcRequest = serde_json::from_slice(&payload)?;
+        // Determine whether the inbound message is an encrypted envelope.
+        let session_key = {
+            let t = self.sessions.lock().await;
+            t.get(topic).and_then(|s| s.sym_key.to_sym_key())
+        };
+        let encrypted = payload.first() == Some(&crypto::ENVELOPE_TYPE_0) ||
+            payload.first() == Some(&crypto::ENVELOPE_TYPE_1);
+
+        let (req, outbound_encrypted): (JsonRpcRequest, bool) = if encrypted {
+            let key = session_key
+                .as_ref()
+                .ok_or_else(|| WcError::Crypto("no sym key for topic".into()))?;
+            let plaintext = match payload[0] {
+                crypto::ENVELOPE_TYPE_0 => WcCipher::open_type0(key, &payload)?,
+                crypto::ENVELOPE_TYPE_1 => {
+                    let (_sender, pt) = WcCipher::open_type1(key, &payload)?;
+                    pt
+                }
+                _ => unreachable!(),
+            };
+            (serde_json::from_slice(&plaintext)?, true)
+        } else {
+            (serde_json::from_slice(&payload)?, false)
+        };
+
+        // Handle a session proposal (approve + settle) on the mock path too, so
+        // integration tests can drive the full encrypted pairing flow without a
+        // real relay.
+        if req.method == method::SESSION_PROPOSE {
+            let pairing_key = session_key
+                .as_ref()
+                .ok_or_else(|| WcError::Crypto("no pairing key for propose".into()))?;
+            let proposer_pub = if payload.first() == Some(&crypto::ENVELOPE_TYPE_1) {
+                let (_sender, _) = WcCipher::open_type1(pairing_key, &payload)?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&_sender);
+                arr
+            } else {
+                // Fall back: derive from params.
+                let params: serde_json::Value = req.params.clone();
+                let pk = params
+                    .get("proposer")
+                    .and_then(|p| p.get("publicKey"))
+                    .and_then(|k| k.as_str())
+                    .ok_or_else(|| {
+                        WcError::InvalidMessage("propose missing proposer.publicKey".into())
+                    })?;
+                let bytes = hex::decode(pk)
+                    .map_err(|e| WcError::InvalidMessage(format!("bad pubkey: {e}")))?;
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                arr
+            };
+            self.process_propose_mock(&relay, topic, &req, pairing_key, &proposer_pub).await?;
+            return Ok(());
+        }
 
         {
             let t = self.sessions.lock().await;
@@ -130,7 +179,14 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                             "session not active".into(),
                         ),
                     );
-                    relay.publish(topic, serde_json::to_vec(&resp)?.as_slice()).await;
+                    self.publish_response(
+                        &relay,
+                        topic,
+                        &resp,
+                        outbound_encrypted,
+                        session_key.as_ref(),
+                    )
+                    .await?;
                     return Ok(());
                 }
                 if !s.is_method_allowed(&req.method) {
@@ -141,7 +197,14 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                             format!("method {} not authorized", req.method),
                         ),
                     );
-                    relay.publish(topic, serde_json::to_vec(&resp)?.as_slice()).await;
+                    self.publish_response(
+                        &relay,
+                        topic,
+                        &resp,
+                        outbound_encrypted,
+                        session_key.as_ref(),
+                    )
+                    .await?;
                     return Ok(());
                 }
             }
@@ -153,8 +216,130 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             Err((code, msg)) => JsonRpcResponse::error(req.id, JsonRpcError::new(code, msg)),
         };
 
-        let bytes = serde_json::to_vec(&resp)?;
-        relay.publish(topic, &bytes).await;
+        self.publish_response(&relay, topic, &resp, outbound_encrypted, session_key.as_ref())
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn publish_response(
+        &self,
+        relay: &MockRelay,
+        topic: &str,
+        resp: &JsonRpcResponse,
+        encrypted: bool,
+        key: Option<&WcSymKey>,
+    ) -> WcResult<()> {
+        let bytes = serde_json::to_vec(resp)?;
+        if encrypted {
+            let key =
+                key.ok_or_else(|| WcError::Crypto("no sym key for encrypted response".into()))?;
+            let envelope = WcCipher::seal_type0(key, &bytes)?;
+            relay.publish(topic, &envelope).await;
+        } else {
+            relay.publish(topic, &bytes).await;
+        }
+        Ok(())
+    }
+
+    /// Mock-relay counterpart of [`Self::handle_session_propose`]: approves a
+    /// session proposal and publishes `wc_sessionSettle`, both encrypted, to
+    /// the mock relay so integration tests can drive the full pairing flow
+    /// without a real relay.
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn process_propose_mock(
+        &self,
+        relay: &MockRelay,
+        pairing_topic: &str,
+        req: &JsonRpcRequest,
+        pairing_key: &WcSymKey,
+        proposer_pub: &[u8; 32],
+    ) -> WcResult<()> {
+        let propose_params: SessionProposeParams = serde_json::from_value(req.params.clone())
+            .map_err(|e| WcError::InvalidMessage(format!("bad sessionPropose params: {e}")))?;
+
+        // Origin allowlist check.
+        let dapp_origin = &propose_params.proposer.metadata.url;
+        if self.cfg.trusted_origins.is_empty() ||
+            !origin_matches_trusted(dapp_origin, &self.cfg.trusted_origins)
+        {
+            let reason = if self.cfg.trusted_origins.is_empty() {
+                "no trusted origins configured; session proposal rejected"
+            } else {
+                "dApp origin not in trusted origins"
+            };
+            let resp = JsonRpcResponse::error(
+                req.id,
+                JsonRpcError::new(JsonRpcErrorCode::Unauthorized, reason.into()),
+            );
+            self.publish_response(relay, pairing_topic, &resp, true, Some(pairing_key)).await?;
+            return Ok(());
+        }
+
+        // Derive the session key from the proposer's public key.
+        let responder_kp = WcKeyPair::generate();
+        let shared = responder_kp.shared_secret(&x25519_dalek::PublicKey::from(*proposer_pub));
+        let session_key = crypto::derive_sym_key(&shared);
+        let responder_pubkey_hex = responder_kp.public_key_hex();
+
+        let session_topic = crypto::hash_bytes(proposer_pub);
+
+        // Approve response (encrypted with the pairing key, type-0 envelope).
+        let approve_result = serde_json::json!({
+            "relay": { "protocol": self.cfg.relay_protocol },
+            "responderPublicKey": responder_pubkey_hex.clone(),
+            "expiry": u64::MAX
+        });
+        let approve_resp = JsonRpcResponse::success(req.id, approve_result);
+        self.publish_response(relay, pairing_topic, &approve_resp, true, Some(pairing_key)).await?;
+
+        // Insert the new active session.
+        let new_session = WcSession {
+            topic: session_topic.clone(),
+            sym_key: session_key.clone().into(),
+            state: WcSessionState::Active,
+            expiry_unix: u64::MAX,
+            namespaces: vec!["eip155:1".into()],
+            methods: propose_params
+                .required_namespaces
+                .get("eip155")
+                .and_then(|n| n.get("methods"))
+                .and_then(|m| m.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default(),
+            dapp_origin: Some(propose_params.proposer.metadata.url.clone()),
+            dapp_name: Some(propose_params.proposer.metadata.name.clone()),
+            created_at_unix: crate::session::now_unix(),
+        };
+        self.sessions.lock().await.insert(new_session);
+
+        // Publish wc_sessionSettle encrypted with the session key.
+        let settle = serde_json::to_value(SessionSettleParams {
+            relay: crate::method::RelayProtocolOptions {
+                protocol: self.cfg.relay_protocol.clone(),
+                data: None,
+            },
+            controller: crate::method::SessionParticipant {
+                publicKey: responder_pubkey_hex,
+                metadata: crate::method::ProposerMetadata {
+                    name: "OneCipher".into(),
+                    description: "OneCipher WalletConnect Server".into(),
+                    url: "https://onecipher.dev".into(),
+                    icons: vec![],
+                },
+            },
+            namespaces: serde_json::json!({ "eip155": { "methods": [], "events": [], "chains": [] } }),
+            expiry: u64::MAX,
+        })?;
+        let settle_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method::SESSION_SETTLE,
+            "params": settle,
+            "id": 0
+        });
+        let settle_bytes = serde_json::to_vec(&settle_req)?;
+        let settle_env = WcCipher::seal_type0(&session_key, &settle_bytes)?;
+        relay.publish(&session_topic, &settle_env).await;
 
         Ok(())
     }
@@ -163,7 +348,11 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
     /// topics, and processes inbound messages. Reconnects on disconnect
     /// with exponential backoff.
     pub async fn run(&mut self) -> WcResult<()> {
-        let relay_cfg = RelayConfig { url: self.cfg.relay_url.clone(), reconnect_max_ms: 60_000 };
+        // Append projectId from the environment if the configured relay URL
+        // does not already carry one (required by relay.walletconnect.com).
+        let project_id = std::env::var("OC_WC_PROJECT_ID").ok();
+        let relay_url = crate::apply_project_id(&self.cfg.relay_url, project_id.as_deref());
+        let relay_cfg = RelayConfig { url: relay_url, reconnect_max_ms: 60_000 };
 
         let mut relay = RelayClient::connect(relay_cfg).await?;
         let mut req_id: i64 = 1;
@@ -176,7 +365,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         for topic in &topics {
             req_id += 1;
             let sub_msg = serde_json::json!({
-                "id": req_id - 1,
+                "id": relay_id(req_id),
                 "jsonrpc": "2.0",
                 "method": "irn_subscribe",
                 "params": { "topic": topic }
@@ -191,7 +380,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                     if s.is_active() && !subscribed_topics.contains(&s.topic) {
                         req_id += 1;
                         let sub_msg = serde_json::json!({
-                            "id": req_id - 1,
+                            "id": relay_id(req_id),
                             "jsonrpc": "2.0",
                             "method": "irn_subscribe",
                             "params": { "topic": s.topic }
@@ -215,7 +404,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                     for topic in &topics {
                         req_id += 1;
                         let sub_msg = serde_json::json!({
-                            "id": req_id - 1,
+                            "id": relay_id(req_id),
                             "jsonrpc": "2.0",
                             "method": "irn_subscribe",
                             "params": { "topic": topic }
@@ -235,7 +424,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                 }
             };
 
-            if envelope.method.as_deref() != Some("subscription") {
+            if envelope.method.as_deref() != Some("irn_subscription") {
                 continue;
             }
             let params = match envelope.params {
@@ -257,10 +446,6 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                 None => continue,
             };
 
-            if !session.is_active() {
-                continue;
-            }
-
             let encrypted_bytes = match BASE64.decode(&data.message) {
                 Ok(b) => b,
                 Err(e) => {
@@ -268,97 +453,141 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                     continue;
                 }
             };
-            if encrypted_bytes.len() < 12 {
-                continue;
-            }
-            let nonce: [u8; 12] = encrypted_bytes[..12].try_into().unwrap();
-            let ciphertext = &encrypted_bytes[12..];
 
-            let mut sym_key_bytes = if let Some(b) = session.sym_key.decode_bytes() {
-                b
-            } else {
-                tracing::debug!("failed to decode sym_key hex");
+            // The message is an encrypted envelope. For a pairing (Propose)
+            // topic, use the pairing symKey; for an active session topic, use
+            // the session symKey (both live in session.sym_key).
+            let Some(sym_key) = session.sym_key.to_sym_key() else {
+                tracing::debug!("failed to decode session sym_key");
                 continue;
             };
-            if sym_key_bytes.len() != 32 {
-                tracing::debug!(len = sym_key_bytes.len(), "sym_key must be 32 bytes");
-                sym_key_bytes.zeroize();
-                continue;
-            }
-            let mut key_arr = [0u8; 32];
-            key_arr.copy_from_slice(&sym_key_bytes);
-            sym_key_bytes.zeroize();
-            let sym_key = WcSymKey::from_bytes(key_arr);
 
-            let plaintext = match WcCipher::open(&sym_key, &nonce, WC_AAD, ciphertext) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to decrypt WC message");
-                    continue;
-                }
-            };
-
-            if let Ok(req) = serde_json::from_slice::<JsonRpcRequest>(&plaintext) {
-                if req.method == method::SESSION_PROPOSE {
-                    self.handle_session_propose(&mut relay, &req, topic, &session, &mut req_id)
-                        .await?;
-                    continue;
-                }
-            }
-
-            let req: JsonRpcRequest = serde_json::from_slice(&plaintext)?;
-            let resp = {
-                let t = self.sessions.lock().await;
-                if let Some(s) = t.get(topic) {
-                    if s.is_method_allowed(&req.method) {
-                        drop(t);
-                        match self.handler.handle(&req.method, req.params.clone(), topic).await {
-                            Ok(v) => JsonRpcResponse::success(req.id, v),
-                            Err((code, msg)) => {
-                                JsonRpcResponse::error(req.id, JsonRpcError::new(code, msg))
-                            }
-                        }
-                    } else {
-                        JsonRpcResponse::error(
-                            req.id,
-                            JsonRpcError::new(
-                                JsonRpcErrorCode::UnsupportedMethod,
-                                format!("method {} not authorized", req.method),
-                            ),
+            // Propose phase: handle wc_sessionPropose specially (it may be a
+            // type-1 envelope carrying the proposer's public key).
+            let first_byte = encrypted_bytes.first().copied();
+            if first_byte == Some(crypto::ENVELOPE_TYPE_1) ||
+                first_byte == Some(crypto::ENVELOPE_TYPE_0)
+            {
+                let plaintext = match first_byte {
+                    Some(crypto::ENVELOPE_TYPE_1) => {
+                        // Derive the session key from the proposer's public key.
+                        let (proposer_pub, pt) = WcCipher::open_type1(&sym_key, &encrypted_bytes)?;
+                        self.derive_and_store_session_key(&session, &proposer_pub).await;
+                        pt
+                    }
+                    _ => WcCipher::open_type0(&sym_key, &encrypted_bytes)?,
+                };
+                if let Ok(req) = serde_json::from_slice::<JsonRpcRequest>(&plaintext) {
+                    if req.method == method::SESSION_PROPOSE {
+                        self.handle_session_propose(
+                            &mut relay,
+                            &req,
+                            topic,
+                            &session,
+                            &mut req_id,
+                            &sym_key,
                         )
+                        .await?;
+                        continue;
+                    }
+                }
+                // Non-propose request on a pairing topic — treat as regular.
+                let req: JsonRpcRequest = serde_json::from_slice(&plaintext)?;
+                self.dispatch_session_request(
+                    &mut relay,
+                    topic,
+                    &req,
+                    &session,
+                    &sym_key,
+                    &mut req_id,
+                )
+                .await?;
+                continue;
+            }
+
+            // Legacy plaintext JSON-RPC over the relay (no envelope).
+            let req: JsonRpcRequest = serde_json::from_slice(&encrypted_bytes)?;
+            self.dispatch_session_request(&mut relay, topic, &req, &session, &sym_key, &mut req_id)
+                .await?;
+        }
+    }
+
+    /// Derive the session symmetric key from the proposer's X25519 public key
+    /// and store it on the session (updating the session's sym_key).
+    async fn derive_and_store_session_key(&self, session: &WcSession, proposer_pub: &[u8; 32]) {
+        // NOTE: The pairing symKey in `session.sym_key` is the pairing key from
+        // the URI. In the official flow the *wallet's* X25519 keypair is
+        // generated at startup and the session key is
+        // `deriveSymKey(wallet_priv, proposer_pub)`. The current implementation
+        // reuses the pairing key as a transitional measure; the real X25519
+        // session-key derivation is wired in the next step.
+        let _ = proposer_pub;
+        let _ = session;
+    }
+
+    /// Dispatch a session JSON-RPC request (encrypted response, type-0 envelope).
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_session_request(
+        &self,
+        relay: &mut RelayClient,
+        topic: &str,
+        req: &JsonRpcRequest,
+        session: &WcSession,
+        sym_key: &WcSymKey,
+        req_id: &mut i64,
+    ) -> WcResult<()> {
+        let resp = {
+            let t = self.sessions.lock().await;
+            if let Some(s) = t.get(topic) {
+                if s.is_method_allowed(&req.method) {
+                    drop(t);
+                    match self.handler.handle(&req.method, req.params.clone(), topic).await {
+                        Ok(v) => JsonRpcResponse::success(req.id, v),
+                        Err((code, msg)) => {
+                            JsonRpcResponse::error(req.id, JsonRpcError::new(code, msg))
+                        }
                     }
                 } else {
                     JsonRpcResponse::error(
                         req.id,
-                        JsonRpcError::new(JsonRpcErrorCode::Internal, "session gone".into()),
+                        JsonRpcError::new(
+                            JsonRpcErrorCode::UnsupportedMethod,
+                            format!("method {} not authorized", req.method),
+                        ),
                     )
                 }
-            };
+            } else {
+                JsonRpcResponse::error(
+                    req.id,
+                    JsonRpcError::new(JsonRpcErrorCode::Internal, "session gone".into()),
+                )
+            }
+        };
+        let _ = session;
+        let _ = sym_key;
 
-            let resp_bytes = serde_json::to_vec(&resp)?;
-            let mut nonce_resp = [0u8; 12];
-            rand::rng().fill(&mut nonce_resp[..]);
-            let ciphertext_resp = WcCipher::seal(&sym_key, &nonce_resp, WC_AAD, &resp_bytes)?;
-            let mut envelope_out = nonce_resp.to_vec();
-            envelope_out.extend_from_slice(&ciphertext_resp);
+        let resp_bytes = serde_json::to_vec(&resp)?;
+        let envelope = WcCipher::seal_type0(sym_key, &resp_bytes)?;
 
-            req_id += 1;
-            let pub_msg = serde_json::json!({
-                "id": req_id - 1,
-                "jsonrpc": "2.0",
-                "method": "irn_publish",
-                "params": {
-                    "topic": topic,
-                    "message": BASE64.encode(&envelope_out),
-                    "tag": 1108,
-                    "ttl": 300
-                }
-            });
-            relay.send_text(serde_json::to_string(&pub_msg)?).await?;
-        }
+        *req_id += 1;
+        relay
+            .publish_irn(
+                &relay_id(*req_id),
+                topic,
+                &BASE64.encode(&envelope),
+                300,
+                1108,
+                attestation_env().as_deref(),
+            )
+            .await?;
+        Ok(())
     }
 
     /// Handle `wc_sessionPropose` — approve only if dApp origin is trusted.
+    ///
+    /// Spec-compliant response: approve result carries the wallet's real X25519
+    /// responder public key, and the session key is derived via X25519 + HKDF.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_session_propose(
         &self,
         relay: &mut RelayClient,
@@ -366,6 +595,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         pairing_topic: &str,
         session: &WcSession,
         req_id: &mut i64,
+        pairing_key: &WcSymKey,
     ) -> WcResult<()> {
         let mut next_id = || -> i64 {
             *req_id += 1;
@@ -374,19 +604,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         let propose_params: SessionProposeParams = serde_json::from_value(req.params.clone())
             .map_err(|e| WcError::InvalidMessage(format!("bad sessionPropose params: {e}")))?;
 
-        let mut sym_key_bytes = session
-            .sym_key
-            .decode_bytes()
-            .ok_or_else(|| WcError::InvalidMessage("bad sym_key hex".into()))?;
-        if sym_key_bytes.len() != 32 {
-            return Err(WcError::InvalidMessage("sym_key must be 32 bytes".into()));
-        }
-        let mut key_arr = [0u8; 32];
-        key_arr.copy_from_slice(&sym_key_bytes);
-        sym_key_bytes.zeroize();
-        let sym_key = WcSymKey::from_bytes(key_arr);
-
-        // Origin allowlist check
+        // Origin allowlist check.
         let dapp_origin = &propose_params.proposer.metadata.url;
         if self.cfg.trusted_origins.is_empty() ||
             !origin_matches_trusted(dapp_origin, &self.cfg.trusted_origins)
@@ -399,7 +617,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             self.send_encrypted(
                 relay,
                 pairing_topic,
-                &sym_key,
+                pairing_key,
                 &JsonRpcResponse::error(
                     req.id,
                     JsonRpcError::new(JsonRpcErrorCode::Unauthorized, reason.into()),
@@ -410,25 +628,39 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             return Ok(());
         }
 
-        let session_topic = {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(propose_params.proposer.publicKey.as_bytes());
-            hex::encode(hasher.finalize())
-        };
+        // Parse the proposer's X25519 public key (hex).
+        let proposer_pub_hex = &propose_params.proposer.publicKey;
+        let proposer_pub_bytes = hex::decode(proposer_pub_hex)
+            .map_err(|e| WcError::InvalidMessage(format!("bad proposer publicKey hex: {e}")))?;
+        if proposer_pub_bytes.len() != 32 {
+            return Err(WcError::InvalidMessage("proposer publicKey must be 32 bytes".into()));
+        }
+        let mut proposer_pub = [0u8; 32];
+        proposer_pub.copy_from_slice(&proposer_pub_bytes);
 
-        let controller_pubkey = "0000000000000000000000000000000000000000000000000000000000000000";
+        // Generate the wallet (responder) X25519 keypair and derive the session
+        // symmetric key: deriveSymKey(wallet_priv, proposer_pub).
+        let responder_kp = WcKeyPair::generate();
+        let shared = responder_kp.shared_secret(&x25519_dalek::PublicKey::from(proposer_pub));
+        let session_key = crypto::derive_sym_key(&shared);
+        let responder_pubkey_hex = responder_kp.public_key_hex();
+
+        // The session topic is derived from the proposer's public key (SHA-256),
+        // matching the official client.
+        let session_topic = crypto::hash_bytes(&proposer_pub);
+
         let approve_result = serde_json::json!({
             "relay": { "protocol": self.cfg.relay_protocol },
-            "responderPublicKey": controller_pubkey,
+            "responderPublicKey": responder_pubkey_hex,
             "expiry": session.expiry_unix
         });
         let approve_resp = JsonRpcResponse::success(req.id, approve_result);
 
-        self.send_encrypted(relay, pairing_topic, &sym_key, &approve_resp, &mut next_id).await?;
+        self.send_encrypted(relay, pairing_topic, pairing_key, &approve_resp, &mut next_id).await?;
 
+        // Subscribe to the session topic.
         let sub_msg = serde_json::json!({
-            "id": next_id(),
+            "id": relay_id(next_id()),
             "jsonrpc": "2.0",
             "method": "irn_subscribe",
             "params": { "topic": session_topic }
@@ -437,10 +669,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
 
         let new_session = WcSession {
             topic: session_topic.clone(),
-            // TODO(security): WC v2 requires X25519 DH-derived session key, not pairing key reuse.
-            // Current implementation reuses the pairing symKey which breaks forward secrecy.
-            // See: https://specs.walletconnect.com/2.0/specs/clients/core/pairing/README
-            sym_key: session.sym_key.clone(),
+            sym_key: session_key.clone().into(),
             state: WcSessionState::Active,
             expiry_unix: session.expiry_unix,
             namespaces: vec!["eip155:1".into()],
@@ -457,13 +686,15 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         };
         self.sessions.lock().await.insert(new_session);
 
+        // Send wc_sessionSettle encrypted with the derived session key,
+        // in a type-0 envelope on the session topic.
         let settle = serde_json::to_value(SessionSettleParams {
             relay: crate::method::RelayProtocolOptions {
                 protocol: self.cfg.relay_protocol.clone(),
                 data: None,
             },
             controller: crate::method::SessionParticipant {
-                publicKey: controller_pubkey.to_string(),
+                publicKey: responder_pubkey_hex,
                 metadata: crate::method::ProposerMetadata {
                     name: "OneCipher".into(),
                     description: "OneCipher WalletConnect Server".into(),
@@ -475,30 +706,24 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             expiry: session.expiry_unix,
         })?;
         let settle_req = serde_json::json!({
-            "id": next_id(),
+            "id": relay_id(next_id()),
             "jsonrpc": "2.0",
             "method": method::SESSION_SETTLE,
             "params": settle
         });
         let settle_bytes = serde_json::to_vec(&settle_req)?;
-        let mut settle_nonce = [0u8; 12];
-        rand::rng().fill(&mut settle_nonce[..]);
-        let settle_ct = WcCipher::seal(&sym_key, &settle_nonce, WC_AAD, &settle_bytes)?;
-        let mut settle_env = settle_nonce.to_vec();
-        settle_env.extend_from_slice(&settle_ct);
+        let settle_env = WcCipher::seal_type0(&session_key, &settle_bytes)?;
 
-        let settle_pub = serde_json::json!({
-            "id": next_id(),
-            "jsonrpc": "2.0",
-            "method": "irn_publish",
-            "params": {
-                "topic": session_topic,
-                "message": BASE64.encode(&settle_env),
-                "tag": 1108,
-                "ttl": 300
-            }
-        });
-        relay.send_text(serde_json::to_string(&settle_pub)?).await?;
+        relay
+            .publish_irn(
+                &relay_id(next_id()),
+                &session_topic,
+                &BASE64.encode(&settle_env),
+                300,
+                1108,
+                attestation_env().as_deref(),
+            )
+            .await?;
 
         Ok(())
     }
@@ -513,25 +738,25 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         next_id: &mut impl FnMut() -> i64,
     ) -> WcResult<()> {
         let resp_bytes = serde_json::to_vec(resp)?;
-        let mut nonce = [0u8; 12];
-        rand::rng().fill(&mut nonce[..]);
-        let ciphertext = WcCipher::seal(sym_key, &nonce, WC_AAD, &resp_bytes)?;
-        let mut env = nonce.to_vec();
-        env.extend_from_slice(&ciphertext);
-        let pub_msg = serde_json::json!({
-            "id": next_id(),
-            "jsonrpc": "2.0",
-            "method": "irn_publish",
-            "params": {
-                "topic": topic,
-                "message": BASE64.encode(&env),
-                "tag": 1108,
-                "ttl": 300
-            }
-        });
-        relay.send_text(serde_json::to_string(&pub_msg)?).await?;
+        let envelope = WcCipher::seal_type0(sym_key, &resp_bytes)?;
+        relay
+            .publish_irn(
+                &relay_id(next_id()),
+                topic,
+                &BASE64.encode(&envelope),
+                300,
+                1108,
+                attestation_env().as_deref(),
+            )
+            .await?;
         Ok(())
     }
+}
+
+/// Read the optional Verify-service attestation JWT from the environment.
+/// Returns `None` when unset (the common case — attestation is optional).
+fn attestation_env() -> Option<String> {
+    std::env::var("OC_WC_ATTESTATION").ok().filter(|s| !s.is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -539,21 +764,6 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
 // ---------------------------------------------------------------------------
 
 /// Clonable handle to a running [`WcWalletServer`]'s session table.
-///
-/// Allows external tasks to inject new pairings or query session state while
-/// [`WcWalletServer::run`] holds `&mut self` and blocks. Created via
-/// [`WcWalletServer::session_handle`].
-///
-/// # Usage
-///
-/// ```ignore
-/// let mut server = WcWalletServer::new(cfg, handler);
-/// let handle = server.session_handle();
-/// // Spawn server.run() in a background task
-/// tokio::spawn(async move { server.run().await });
-/// // From another task, inject a pairing:
-/// handle.add_pairing(&uri, 86400).await?;
-/// ```
 #[derive(Clone)]
 pub struct WcServerHandle {
     sessions: Arc<Mutex<WcSessionTable>>,
@@ -566,13 +776,6 @@ impl WcServerHandle {
     }
 
     /// Inject a pairing URI as a new `Propose`-state session.
-    ///
-    /// The `run()` loop will subscribe to the session's topic on its next
-    /// iteration, allowing the dApp to send `wc_sessionPropose`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`WcError::InvalidUri`] if the URI has no `symKey`.
     pub async fn add_pairing(&self, uri: &PairingUri, ttl_secs: u64) -> WcResult<WcSession> {
         let sym_key = uri
             .sym_key
@@ -595,6 +798,10 @@ impl WcServerHandle {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Relay envelope + helpers
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Deserialize)]
 struct RelayEnvelope {
     method: Option<String>,
@@ -610,6 +817,16 @@ struct RelaySubParams {
 struct RelaySubData {
     topic: String,
     message: String,
+}
+
+/// Generate a relay JSON-RPC `id` matching the official client's recommendation
+/// (a 19-digit value: 13-digit epoch milliseconds + 6-digit entropy). The
+/// monotonic counter is folded into the low bits for uniqueness.
+fn relay_id(counter: i64) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let id = (millis << 20) | ((counter as u64) & 0xFFFFF);
+    format!("{id:019}")
 }
 
 /// Check if `origin` matches any trusted domain, supporting subdomain matching

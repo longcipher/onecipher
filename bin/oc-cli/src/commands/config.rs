@@ -81,6 +81,14 @@ pub(crate) fn set(key: &str, value: &str) -> Result<(), CliError> {
                 )));
             }
         },
+        ["wc", field] => match *field {
+            "relay_url" | "project_id" => serde_json::Value::String(value.to_string()),
+            _ => {
+                return Err(CliError::InvalidArgs(format!(
+                    "unknown wc field '{field}'. Valid fields: relay_url, project_id"
+                )));
+            }
+        },
         ["vault_path"] => serde_json::Value::String(value.to_string()),
         _ => {
             return Err(CliError::InvalidArgs(format!(

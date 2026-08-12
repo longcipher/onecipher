@@ -14,6 +14,9 @@ pub struct PairingUri {
     pub relay_data: Option<String>,
     pub sym_key: Option<String>,
     pub methods: Vec<String>,
+    /// WalletConnect Cloud project ID (`projectId` query param). Optional for
+    /// local relays; required for `relay.walletconnect.com`.
+    pub project_id: Option<String>,
 }
 
 impl PairingUri {
@@ -37,6 +40,7 @@ impl PairingUri {
         let mut relay_data = None;
         let mut sym_key = None;
         let mut methods = Vec::new();
+        let mut project_id = None;
         if let Some(q) = query {
             for pair in q.split('&') {
                 let (k, v) = pair
@@ -47,22 +51,35 @@ impl PairingUri {
                     "relay-data" => relay_data = Some(v.to_string()),
                     "symKey" => sym_key = Some(v.to_string()),
                     "methods" => methods = v.split(',').map(String::from).collect(),
+                    "projectId" => project_id = Some(v.to_string()),
                     _ => {} // forward-compat: ignore unknown keys
                 }
             }
         }
 
-        Ok(Self { topic: topic.to_string(), version, relay_protocol, relay_data, sym_key, methods })
+        Ok(Self {
+            topic: topic.to_string(),
+            version,
+            relay_protocol,
+            relay_data,
+            sym_key,
+            methods,
+            project_id,
+        })
     }
 
     pub fn new(topic: impl Into<String>, sym_key: impl Into<String>) -> Self {
         Self {
             topic: topic.into(),
             version: 2,
-            relay_protocol: Some("waku".into()),
+            // The official WC v2 default relay protocol is `irn` (Internal
+            // Relay Network). `waku` was an early-prototype value that the
+            // standard no longer uses for relay-protocol negotiation.
+            relay_protocol: Some("irn".into()),
             relay_data: None,
             sym_key: Some(sym_key.into()),
             methods: Vec::new(),
+            project_id: None,
         }
     }
 }
@@ -91,6 +108,9 @@ impl fmt::Display for PairingUri {
         }
         if !self.methods.is_empty() {
             emit("methods", &self.methods.join(","), &mut first)?;
+        }
+        if let Some(pid) = &self.project_id {
+            emit("projectId", pid, &mut first)?;
         }
         Ok(())
     }

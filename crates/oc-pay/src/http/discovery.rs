@@ -5,6 +5,11 @@ use super::{
 
 const CDP_DISCOVERY_URL: &str = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/resources";
 
+/// Env var override for the x402 discovery base URL. Used by tests to point
+/// at a local mock server; in production it stays unset and the built-in
+/// [`CDP_DISCOVERY_URL`] is used.
+const DISCOVERY_URL_ENV: &str = "OC_X402_DISCOVERY_URL";
+
 const TESTNETS: &[&str] = &["base-sepolia", "eip155:84532", "eip155:11155111", "solana-devnet"];
 
 // ===========================================================================
@@ -151,7 +156,8 @@ struct FetchResult {
 
 async fn fetch_x402(limit: u64, offset: u64) -> Result<FetchResult, OcPayHttpError> {
     let client = hpx::Client::new();
-    let url = format!("{CDP_DISCOVERY_URL}?limit={limit}&offset={offset}");
+    let base = std::env::var(DISCOVERY_URL_ENV).unwrap_or_else(|_| CDP_DISCOVERY_URL.to_string());
+    let url = format!("{base}?limit={limit}&offset={offset}");
     let resp = client.get(&url).send().await?;
 
     if !resp.status().is_success() {

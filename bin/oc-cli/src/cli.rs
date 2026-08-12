@@ -436,12 +436,99 @@ pub(crate) enum WcCommands {
         /// Session topic to disconnect
         topic: String,
     },
+    /// Configure the WC v2 relay endpoint (persisted to ~/.onecipher/config.json)
+    Relay {
+        /// Relay WSS URL (e.g. wss://relay.walletconnect.com, wss://127.0.0.1:7443)
+        url: String,
+        /// WalletConnect Cloud project ID (required for relay.walletconnect.com)
+        #[arg(long)]
+        project_id: Option<String>,
+    },
+    /// Probe the relay: subscribe to a fresh topic, publish a ping, and wait
+    /// for the echo (diagnostic for testing WC v2 connectivity)
+    Probe {
+        /// Relay URL (default: configured or OC_WC_RELAY_URL or built-in)
+        #[arg(long)]
+        url: Option<String>,
+        /// Project ID for the relay
+        #[arg(long)]
+        project_id: Option<String>,
+        /// How many seconds to wait for the echo (default 10)
+        #[arg(long, default_value_t = 10)]
+        timeout: u64,
+    },
+    /// Send a JSON-RPC request on the bound session as a dApp (testing aid)
+    DappSend {
+        /// Session topic (from `wc sessions` or the pairing topic)
+        topic: String,
+        /// JSON-RPC method (e.g. personal_sign, eth_sendTransaction)
+        method: String,
+        /// JSON params object (e.g. '{"data":"0xdead"}')
+        params: String,
+        /// SymKey hex for the session (from the pairing URI or wc_dapp.json)
+        #[arg(long)]
+        sym_key: Option<String>,
+        /// Relay URL override
+        #[arg(long)]
+        url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
 pub(crate) enum WebUiCommands {
     /// Open the Web UI in the default browser
     Open,
+    /// Inspect and resolve pending signing approvals (non-interactive bridge
+    /// to the daemon's local HTTP API)
+    Approval {
+        #[command(subcommand)]
+        subcommand: ApprovalCommands,
+    },
+    /// Query Web UI auth / passkey session state (non-interactive)
+    Auth {
+        #[command(subcommand)]
+        subcommand: AuthCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ApprovalCommands {
+    /// List all pending signing approvals
+    List,
+    /// Show a single pending approval by ID
+    Show {
+        /// Approval ID (UUID)
+        id: String,
+    },
+    /// Approve a pending signing request
+    Approve {
+        /// Approval ID (UUID)
+        id: String,
+        /// Skip the interactive confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+    },
+    /// Reject a pending signing request
+    Reject {
+        /// Approval ID (UUID)
+        id: String,
+        /// Rejection reason (shown in the audit trail)
+        #[arg(long)]
+        reason: Option<String>,
+        /// Skip the interactive confirmation prompt
+        #[arg(long, short)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AuthCommands {
+    /// Show whether a Web UI session / passkey registration exists
+    Status,
+    /// Expire all Web UI sessions (lock)
+    Lock,
+    /// Show whether first-time passkey registration is still needed
+    Bootstrap,
 }
 
 #[derive(Subcommand)]
@@ -526,6 +613,12 @@ pub(crate) enum SecretCommands {
         /// Display secret as QR code in terminal
         #[arg(long)]
         qr: bool,
+        /// Copy the secret value to the clipboard (auto-clears after timeout)
+        #[arg(long)]
+        copy: bool,
+        /// Clipboard auto-clear timeout in seconds (default 45, 0 = never clear)
+        #[arg(long, default_value_t = 45)]
+        timeout: u64,
     },
     /// Add a new secret
     Add {
@@ -852,6 +945,12 @@ pub(crate) enum WalletCommands {
         /// Wallet name or ID
         #[arg(long)]
         wallet: String,
+        /// Current passphrase (non-interactive; falls back to ONECIPHER_PASSPHRASE)
+        #[arg(long)]
+        passphrase: Option<String>,
+        /// New passphrase (non-interactive; falls back to ONECIPHER_NEW_PASSPHRASE)
+        #[arg(long)]
+        new_passphrase: Option<String>,
     },
 }
 

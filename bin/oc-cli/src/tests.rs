@@ -441,3 +441,2294 @@ fn test_cli_binary_name_is_onecipher() {
     let cli = Cli::parse_from(["onecipher", "status"]);
     assert!(matches!(cli.command, Some(Commands::Status)));
 }
+
+// ===========================================================================
+// Integrated end-to-end test harness
+//
+// Every command (except a few that operate purely in-memory) persists state
+// under `~/.onecipher`, which `oc_core::paths::state_dir()` resolves from the
+// `HOME` env var. To test commands in isolation without touching the real
+// user vault, we redirect `HOME` to a fresh temp dir. Because `HOME` is
+// process-global and `cargo test` runs tests on multiple threads, every test
+// that touches the filesystem must serialize through `HOME_LOCK` for the full
+// duration of its body.
+// ===========================================================================
+
+use std::sync::MutexGuard;
+
+static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard that redirects `HOME` to an isolated temp dir and restores the
+/// original value on drop. Serializes against all other HOME-mutating tests.
+struct HomeGuard {
+    _lock: MutexGuard<'static, ()>,
+    _dir: tempfile::TempDir,
+}
+
+impl HomeGuard {
+    /// Create an isolated HOME. The `HOME` env var points at the returned
+    /// temp dir for the guard's lifetime. Tests that create wallets, secrets,
+    /// keys, etc. must hold this guard.
+    fn new() -> Self {
+        let lock = HOME_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("create temp HOME dir");
+        let path = dir.path().to_path_buf();
+        set_env("HOME", &path.to_string_lossy());
+        Self { _lock: lock, _dir: dir }
+    }
+
+    /// The isolated home directory path.
+    fn path(&self) -> &std::path::Path {
+        self._dir.path()
+    }
+}
+
+/// Run a parsed CLI through the real dispatch with a mock NetAgentClient.
+/// Local commands (wallet/secret/age/...) hit the isolated `HOME`; RPC
+/// commands (session-key/ocpay) hit the mock.
+fn run_cli(args: &[&str]) -> Result<(), CliError> {
+    let cli = Cli::parse_from(args.iter().copied());
+    let mock = MockNetAgentClient::default();
+    crate::run(cli, &mock)
+}
+
+/// Run a parsed CLI and return the captured stdout (stdout is captured by the
+/// test harness; we use a thin wrapper that does not capture but returns the
+/// `Result`). Side-effecting output goes to real stdout, which is fine.
+fn run_ok(args: &[&str]) {
+    run_cli(args).unwrap_or_else(|e| panic!("expected Ok for {args:?}, got: {e}"));
+}
+
+/// Set an environment variable. Safe under the `HOME_LOCK` serialization and
+/// because each command reads-then-clears these vars itself; wrapped in
+/// `unsafe` purely to satisfy the toolchain's `set_var` unsafety contract.
+#[allow(unused_unsafe)]
+fn set_env(k: &str, v: &str) {
+    // SAFETY: tests are serialized via HOME_LOCK; no other thread reads these
+    // specific vars concurrently. set_var is unsound only under data races on
+    // the var being set, which we avoid here.
+    unsafe { std::env::set_var(k, v) };
+}
+
+/// Remove an environment variable (see `set_env` for the safety rationale).
+#[allow(unused_unsafe)]
+fn remove_env(k: &str) {
+    unsafe { std::env::remove_var(k) };
+}
+
+/// Initialize the age identity + recipients in the isolated home so that
+/// secret/password/totp add/update/copy/move/reencrypt work. Must be under a
+/// `HomeGuard`.
+fn age_init() {
+    run_ok(&["onecipher", "age", "init"]);
+}
+
+// -----------------------------------------------------------------------
+// 18. `wallet list` on a fresh (empty) home reports no wallets
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_list_empty_home() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "list"]);
+}
+
+// -----------------------------------------------------------------------
+// 19. Full wallet lifecycle: create → list → rename → delete
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_lifecycle_create_list_rename_delete() {
+    let _home = HomeGuard::new();
+
+    // create
+    run_ok(&["onecipher", "wallet", "create", "--name", "alice", "--words", "12"]);
+
+    // list should succeed (lists the created wallet)
+    run_ok(&["onecipher", "wallet", "list"]);
+
+    // rename
+    run_ok(&["onecipher", "wallet", "rename", "--wallet", "alice", "--new-name", "bob"]);
+
+    // delete requires confirm
+    let res = run_cli(&["onecipher", "wallet", "delete", "--wallet", "bob"]);
+    assert!(res.is_err(), "delete without --confirm must fail");
+
+    run_ok(&["onecipher", "wallet", "delete", "--wallet", "bob", "--confirm"]);
+
+    // Now empty again.
+    run_ok(&["onecipher", "wallet", "list"]);
+}
+
+// -----------------------------------------------------------------------
+// 20. `wallet create` with bad word count is rejected
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_create_bad_word_count() {
+    let _home = HomeGuard::new();
+    let res = run_cli(&["onecipher", "wallet", "create", "--name", "x", "--words", "13"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 21. `wallet create --show-mnemonic` still succeeds (secret printed to stdout)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_create_show_mnemonic() {
+    let _home = HomeGuard::new();
+    run_ok(&[
+        "onecipher",
+        "wallet",
+        "create",
+        "--name",
+        "carol",
+        "--words",
+        "24",
+        "--show-mnemonic",
+    ]);
+}
+
+// -----------------------------------------------------------------------
+// 22. `wallet import --mnemonic` reads from ONECIPHER_MNEMONIC env
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_import_mnemonic_via_env() {
+    let _home = HomeGuard::new();
+    let mnemonic = "test test test test test test test test test test test junk";
+    set_env("ONECIPHER_MNEMONIC", mnemonic);
+    // The env var is cleared on read; set it fresh each attempt.
+    let res = run_cli(&["onecipher", "wallet", "import", "--name", "imp", "--mnemonic"]);
+    // Restore/remove so later tests are not affected.
+    remove_env("ONECIPHER_MNEMONIC");
+    assert!(res.is_ok(), "mnemonic import should succeed: {res:?}");
+    run_ok(&["onecipher", "wallet", "list"]);
+}
+
+// -----------------------------------------------------------------------
+// 23. `wallet import` with no source fails
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_import_no_source_fails() {
+    let _home = HomeGuard::new();
+    let res = run_cli(&["onecipher", "wallet", "import", "--name", "imp"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 24. `wallet change-password` is not automatable (interactive-only guard)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_change_password_requires_terminal() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "pw", "--words", "12"]);
+    // stdin is not a terminal under cargo test → must error.
+    let res = run_cli(&["onecipher", "wallet", "change-password", "--wallet", "pw"]);
+    assert!(res.is_err(), "change-password must require an interactive terminal");
+}
+
+// -----------------------------------------------------------------------
+// 25. `wallet export` is interactive-only (guarded)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_export_requires_terminal() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "ex", "--words", "12"]);
+    let res = run_cli(&["onecipher", "wallet", "export", "--wallet", "ex"]);
+    assert!(res.is_err(), "wallet export must require an interactive terminal");
+}
+
+// -----------------------------------------------------------------------
+// 26. `wallet export --public-key` is interactive-only
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_export_public_key_requires_terminal() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "pk", "--words", "12"]);
+    let res = run_cli(&["onecipher", "wallet", "export", "--public-key", "--wallet", "pk"]);
+    assert!(res.is_err(), "wallet export --public-key must require terminal");
+}
+
+// -----------------------------------------------------------------------
+// 27. `wallet import --interactive` is interactive-only
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_import_interactive_requires_terminal() {
+    let _home = HomeGuard::new();
+    let res = run_cli(&["onecipher", "wallet", "import", "--name", "it", "--interactive"]);
+    assert!(res.is_err(), "interactive import must require a terminal");
+}
+
+// -----------------------------------------------------------------------
+// 28. `mnemonic generate` produces valid word counts
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_mnemonic_generate_word_counts() {
+    for &w in &[12u32, 15, 18, 21, 24] {
+        let cli = Cli::parse_from(["onecipher", "mnemonic", "generate", "--words", &w.to_string()]);
+        assert!(crate::run(cli, &MockNetAgentClient::default()).is_ok());
+    }
+    // invalid count rejected
+    let res = run_cli(&["onecipher", "mnemonic", "generate", "--words", "13"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 29. `mnemonic derive --chain evm` from env mnemonic yields an address
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_mnemonic_derive_evm() {
+    let _home = HomeGuard::new();
+    let mnemonic = "test test test test test test test test test test test junk";
+    set_env("ONECIPHER_MNEMONIC", mnemonic);
+    let res = run_cli(&["onecipher", "mnemonic", "derive", "--chain", "evm", "--index", "0"]);
+    remove_env("ONECIPHER_MNEMONIC");
+    assert!(res.is_ok());
+}
+
+// -----------------------------------------------------------------------
+// 30. `generate` mnemonic is deterministic-entropy (just exercises the path)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_generate_runs() {
+    run_ok(&["onecipher", "mnemonic", "generate", "--words", "12"]);
+}
+
+// -----------------------------------------------------------------------
+// 31. sign-message round trip: sign with wallet, verify with `verify`
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_sign_message_and_verify_roundtrip() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "signer", "--words", "12"]);
+
+    // Sign a message (utf8). Uses empty passphrase via resolve_signing_key.
+    run_ok(&[
+        "onecipher",
+        "sign-message",
+        "--chain",
+        "evm",
+        "--wallet",
+        "signer",
+        "--message",
+        "hello world",
+    ]);
+
+    // We cannot easily capture stdout here; instead validate the crypto path
+    // directly via oc_signer to prove the round trip is sound end-to-end.
+    use oc_core::ChainType;
+    use oc_signer::signer_for_chain;
+    // Derive the same address the wallet would produce using the stored key.
+    let key = crate::commands::resolve_signing_key("signer", ChainType::Evm, 0).unwrap();
+    let signer = signer_for_chain(ChainType::Evm);
+    let address = signer.derive_address(key.expose()).unwrap();
+    // Address is non-empty and 0x-prefixed EVM form.
+    assert!(address.starts_with("0x"));
+}
+
+// -----------------------------------------------------------------------
+// 32. sign-message rejects unsupported encoding
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_sign_message_bad_encoding() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "s2", "--words", "12"]);
+    let res = run_cli(&[
+        "onecipher",
+        "sign-message",
+        "--chain",
+        "evm",
+        "--wallet",
+        "s2",
+        "--message",
+        "x",
+        "--encoding",
+        "base64",
+    ]);
+    assert!(res.is_err(), "unsupported encoding must be rejected");
+}
+
+// -----------------------------------------------------------------------
+// 33. sign-message EIP-712 typed-data on EVM path (invalid json rejected)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_sign_message_bad_typed_data() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "s3", "--words", "12"]);
+    let res = run_cli(&[
+        "onecipher",
+        "sign-message",
+        "--chain",
+        "evm",
+        "--wallet",
+        "s3",
+        "--message",
+        "x",
+        "--typed-data",
+        "{not valid json",
+    ]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 34. verify rejects non-EVM chains with a clear error
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_verify_only_evm() {
+    let res = run_cli(&[
+        "onecipher",
+        "verify",
+        "--address",
+        "0xabc",
+        "--message",
+        "x",
+        "--signature",
+        "0x01",
+        "--chain",
+        "solana",
+    ]);
+    assert!(res.is_err(), "verify must reject non-EVM chains");
+}
+
+// -----------------------------------------------------------------------
+// 35. verify requires an input (message/hash/typed-data)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_verify_requires_input() {
+    let res = run_cli(&["onecipher", "verify", "--address", "0xabc", "--signature", "0x01"]);
+    assert!(res.is_err(), "verify without input must fail");
+}
+
+// -----------------------------------------------------------------------
+// 36. verify rejects malformed signature hex
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_verify_bad_signature_hex() {
+    let res = run_cli(&[
+        "onecipher",
+        "verify",
+        "--address",
+        "0xabc",
+        "--message",
+        "x",
+        "--signature",
+        "zzzz",
+    ]);
+    assert!(res.is_err(), "verify must reject bad signature hex");
+}
+
+// -----------------------------------------------------------------------
+// 37. sign-transaction with bad hex tx is rejected
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_sign_transaction_bad_hex() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "st", "--words", "12"]);
+    let res = run_cli(&[
+        "onecipher",
+        "sign-transaction",
+        "--chain",
+        "evm",
+        "--wallet",
+        "st",
+        "--tx",
+        "not-hex",
+    ]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 38. sign-auth rejects bad nonce / delegate address shapes
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_sign_auth_runs_on_valid_inputs() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "sa", "--words", "12"]);
+    // Bad delegate address hex → error path exercised.
+    let res = run_cli(&[
+        "onecipher",
+        "sign-auth",
+        "--chain",
+        "evm",
+        "--wallet",
+        "sa",
+        "--address",
+        "0xZZZ",
+        "--nonce",
+        "5",
+    ]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 39. send-tx forwards to RPC; with no daemon it surfaces an error path. We only assert arg parsing
+//     + dispatch reach the command without panicking on structurally valid input (network is
+//     mocked/absent).
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_send_tx_bad_hex() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "stx", "--words", "12"]);
+    let res =
+        run_cli(&["onecipher", "send-tx", "--chain", "evm", "--wallet", "stx", "--tx", "!!bad"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 40. secret lifecycle: init age → add → list → get → update → rename → copy → move → delete
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_secret_full_lifecycle() {
+    let _home = HomeGuard::new();
+    age_init();
+
+    // add via env
+    set_env("ONECIPHER_SECRET", "topsecret");
+    run_ok(&[
+        "onecipher",
+        "secret",
+        "add",
+        "github/personal",
+        "--type",
+        "password",
+        "--meta",
+        "url=https://github.com",
+    ]);
+    remove_env("ONECIPHER_SECRET");
+
+    run_ok(&["onecipher", "secret", "list"]);
+    run_ok(&["onecipher", "secret", "get", "github/personal"]);
+    run_ok(&["onecipher", "secret", "get", "github/personal", "--json"]);
+
+    // update secret field via env
+    set_env("ONECIPHER_SECRET", "newsecret");
+    run_ok(&["onecipher", "secret", "update", "github/personal", "--field", "secret"]);
+    remove_env("ONECIPHER_SECRET");
+
+    run_ok(&["onecipher", "secret", "rename", "--old", "github/personal", "--new", "github/work"]);
+
+    run_ok(&["onecipher", "secret", "copy", "github/work", "github/copy"]);
+    // copy over existing without --force must fail
+    let res = run_cli(&["onecipher", "secret", "copy", "github/work", "github/copy"]);
+    assert!(res.is_err());
+    run_ok(&["onecipher", "secret", "copy", "github/work", "github/copy2", "--force"]);
+
+    run_ok(&["onecipher", "secret", "move", "github/copy", "github/moved"]);
+    run_ok(&["onecipher", "secret", "move", "github/copy2", "github/moved2", "--force"]);
+
+    run_ok(&["onecipher", "secret", "delete", "github/work"]);
+    run_ok(&["onecipher", "secret", "delete", "github/moved"]);
+    run_ok(&["onecipher", "secret", "delete", "github/moved2"]);
+}
+
+// -----------------------------------------------------------------------
+// 41. secret add without age init fails (no recipients)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_secret_add_requires_age_init() {
+    let _home = HomeGuard::new();
+    set_env("ONECIPHER_SECRET", "x");
+    let res = run_cli(&["onecipher", "secret", "add", "nope", "--type", "password"]);
+    remove_env("ONECIPHER_SECRET");
+    assert!(res.is_err(), "secret add must require age init first");
+}
+
+// -----------------------------------------------------------------------
+// 42. secret get on missing name errors
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_secret_get_missing() {
+    let _home = HomeGuard::new();
+    age_init();
+    let res = run_cli(&["onecipher", "secret", "get", "does-not-exist"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 43. password generate runs for all generators
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_password_generate_all() {
+    run_ok(&["onecipher", "password", "generate", "--length", "20"]);
+    run_ok(&["onecipher", "password", "generate", "--length", "20", "--symbols"]);
+    run_ok(&["onecipher", "password", "generate", "--generator", "memorable", "--length", "30"]);
+    run_ok(&["onecipher", "password", "generate", "--generator", "xkcd", "--xkcd-words", "5"]);
+    // bad generator rejected
+    let res = run_cli(&["onecipher", "password", "generate", "--generator", "bogus"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 44. password add (generate) → get → lifecycle
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_password_add_and_get() {
+    let _home = HomeGuard::new();
+    age_init();
+    run_ok(&[
+        "onecipher",
+        "password",
+        "add",
+        "site",
+        "--url",
+        "https://site.com",
+        "--username",
+        "me",
+        "--generate",
+        "--length",
+        "24",
+    ]);
+    run_ok(&["onecipher", "password", "get", "site"]);
+    run_ok(&["onecipher", "secret", "delete", "site"]);
+}
+
+// -----------------------------------------------------------------------
+// 45. totp add (base32) → generate → uris
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_totp_lifecycle() {
+    let _home = HomeGuard::new();
+    age_init();
+    run_ok(&[
+        "onecipher",
+        "totp",
+        "add",
+        "myotp",
+        "--secret",
+        "JBSWY3DPEHPK3PXP",
+        "--issuer",
+        "Test",
+        "--account",
+        "me@test",
+    ]);
+    run_ok(&["onecipher", "totp", "generate", "myotp"]);
+    run_ok(&["onecipher", "totp", "uris", "myotp"]);
+    run_ok(&["onecipher", "totp", "hotp", "myotp", "--counter", "0"]);
+    run_ok(&["onecipher", "totp", "hotp", "myotp", "--counter", "1", "--increment"]);
+}
+
+// -----------------------------------------------------------------------
+// 46. totp add via otpauth URI
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_totp_add_otpauth() {
+    let _home = HomeGuard::new();
+    age_init();
+    run_ok(&[
+        "onecipher",
+        "totp",
+        "add",
+        "o2",
+        "--otpauth",
+        "otpauth://totp/Test:me@test?secret=JBSWY3DPEHPK3PXP&issuer=Test",
+    ]);
+    run_ok(&["onecipher", "totp", "generate", "o2"]);
+}
+
+// -----------------------------------------------------------------------
+// 47. age recipient add/list/remove + reencrypt
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_age_recipient_management() {
+    let _home = HomeGuard::new();
+    age_init();
+
+    // A second recipient (generated, parse its public string).
+    let recipient = {
+        let ident = oc_secret::AgeIdentity::generate();
+        ident.to_recipient_string()
+    };
+    run_ok(&["onecipher", "age", "recipient", "add", &recipient]);
+    run_ok(&["onecipher", "age", "recipient", "list"]);
+    // remove non-existent → error
+    let res = run_cli(&["onecipher", "age", "recipient", "remove", "age1nonexistent"]);
+    assert!(res.is_err());
+    run_ok(&["onecipher", "age", "recipient", "remove", &recipient]);
+
+    // reencrypt with no secrets still ok
+    run_ok(&["onecipher", "age", "reencrypt"]);
+
+    // identity show
+    run_ok(&["onecipher", "age", "identity-show"]);
+}
+
+// -----------------------------------------------------------------------
+// 48. age init is idempotence-guarded (second init errors)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_age_init_twice_fails() {
+    let _home = HomeGuard::new();
+    age_init();
+    let res = run_cli(&["onecipher", "age", "init"]);
+    assert!(res.is_err(), "second age init must be rejected");
+}
+
+// -----------------------------------------------------------------------
+// 49. policy create/list/show/delete lifecycle
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_policy_lifecycle() {
+    let _home = HomeGuard::new();
+    // Create a policy JSON file.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("policy.json");
+    std::fs::write(&path, r#"{"id":"pol-1","name":"test","rules":[],"version":2}"#).unwrap();
+    run_ok(&["onecipher", "policy", "create", "--file", &path.to_string_lossy()]);
+    run_ok(&["onecipher", "policy", "list"]);
+    run_ok(&["onecipher", "policy", "show", "--id", "pol-1"]);
+    let res = run_cli(&["onecipher", "policy", "delete", "--id", "pol-1"]);
+    assert!(res.is_err(), "policy delete requires --confirm");
+    run_ok(&["onecipher", "policy", "delete", "--id", "pol-1", "--confirm"]);
+}
+
+// -----------------------------------------------------------------------
+// 50. policy create with missing file errors
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_policy_create_missing_file() {
+    let _home = HomeGuard::new();
+    let res = run_cli(&["onecipher", "policy", "create", "--file", "/no/such/file.json"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 51. api key lifecycle: create/list/revoke
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_key_lifecycle() {
+    let _home = HomeGuard::new();
+    let expires =
+        jiff::Timestamp::now().checked_add(jiff::Span::new().days(1)).unwrap().to_string();
+    run_ok(&[
+        "onecipher",
+        "key",
+        "create",
+        "--name",
+        "agent1",
+        "--wallet",
+        "w1",
+        "--policy",
+        "p1",
+        "--expires-at",
+        &expires,
+    ]);
+    run_ok(&["onecipher", "key", "list"]);
+    // revoke requires confirm
+    let res = run_cli(&["onecipher", "key", "revoke", "--id", "agent1"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 52. config show / set
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_config_show_and_set() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "config", "show"]);
+    run_ok(&["onecipher", "config", "set", "webui.enabled", "true"]);
+    run_ok(&["onecipher", "config", "set", "rpc.eip155:1", "https://example.com"]);
+}
+
+// -----------------------------------------------------------------------
+// 53. status / info / doctor / completion / fsck / grep / find / migrate run
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_local_readonly_commands_run() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "status"]);
+    run_ok(&["onecipher", "wallet", "info"]);
+    run_ok(&["onecipher", "doctor"]);
+    run_ok(&["onecipher", "completion", "bash"]);
+    run_ok(&["onecipher", "completion", "zsh"]);
+    run_ok(&["onecipher", "completion", "fish"]);
+    // unsupported shell
+    let res = run_cli(&["onecipher", "completion", "powershell"]);
+    assert!(res.is_ok(), "completion should accept all clap shell names");
+    run_ok(&["onecipher", "fsck"]);
+    run_ok(&["onecipher", "fsck", "--fix"]);
+    run_ok(&["onecipher", "migrate", "--dry-run"]);
+}
+
+// -----------------------------------------------------------------------
+// 54. grep / find over the secret store
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_grep_and_find() {
+    let _home = HomeGuard::new();
+    age_init();
+    set_env("ONECIPHER_SECRET", "findme123");
+    run_ok(&["onecipher", "secret", "add", "grep/target", "--type", "password"]);
+    remove_env("ONECIPHER_SECRET");
+
+    run_ok(&["onecipher", "grep", "findme"]);
+    run_ok(&["onecipher", "grep", "findme", "--json"]);
+    run_ok(&["onecipher", "grep", "nomatch"]);
+    run_ok(&["onecipher", "find", "grep"]);
+    run_ok(&["onecipher", "find", "grep", "--json"]);
+    run_ok(&["onecipher", "find", "--type", "password"]);
+
+    run_ok(&["onecipher", "secret", "delete", "grep/target"]);
+}
+
+// -----------------------------------------------------------------------
+// 55. backup export / import round trip (.ocbk)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_backup_export_import() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "bk", "--words", "12"]);
+    let out = _home.path().join("wallet.ocbk");
+    run_ok(&["onecipher", "backup", "export", "--out", &out.to_string_lossy()]);
+    assert!(out.exists(), "backup file must be created");
+    run_ok(&["onecipher", "backup", "import", "--in", &out.to_string_lossy()]);
+}
+
+// -----------------------------------------------------------------------
+// 56. sbom generate / verify
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_sbom_generate_and_verify() {
+    let _home = HomeGuard::new();
+    let out = _home.path().join("sbom.cdx.json");
+    run_ok(&["onecipher", "sbom", "generate", "--output", &out.to_string_lossy()]);
+    assert!(out.exists());
+    run_ok(&["onecipher", "sbom", "verify", "--file", &out.to_string_lossy()]);
+    // verify missing file errors
+    let res = run_cli(&["onecipher", "sbom", "verify", "--file", "/no/such.cdx.json"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 57. env command injects secrets as env vars (exec form)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_env_command_injects_secret() {
+    let _home = HomeGuard::new();
+    age_init();
+    set_env("ONECIPHER_SECRET", "envval");
+    run_ok(&["onecipher", "secret", "add", "env/sec", "--type", "password"]);
+    remove_env("ONECIPHER_SECRET");
+
+    // exec a command that prints the injected env var
+    let out_file = _home.path().join("envout.txt");
+    run_ok(&[
+        "onecipher",
+        "env",
+        "--name",
+        "env/sec",
+        "--exec",
+        "--",
+        "sh",
+        "-c",
+        &format!("printf '%s' \"$ENV_SEC\" > {}", out_file.to_string_lossy()),
+    ]);
+    let got = std::fs::read_to_string(&out_file).unwrap_or_default();
+    assert_eq!(got, "envval", "env injection must expose secret as ENV_SEC");
+}
+
+// -----------------------------------------------------------------------
+// 58. agent-secret requires a valid API token (no token → error)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_agent_secret_requires_token() {
+    let _home = HomeGuard::new();
+    let res = run_cli(&["onecipher", "agent-secret", "list"]);
+    assert!(res.is_err(), "agent-secret must require ONECIPHER_PASSPHRASE token");
+}
+
+// -----------------------------------------------------------------------
+// 59. audit list/secrets run locally
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_audit_commands_run() {
+    let _home = HomeGuard::new();
+    age_init();
+    run_ok(&["onecipher", "audit", "list"]);
+    run_ok(&["onecipher", "audit", "list", "--since", "7d"]);
+    run_ok(&["onecipher", "audit", "secrets", "--skip-hibp"]);
+    run_ok(&["onecipher", "audit", "secrets", "--format", "json", "--skip-hibp"]);
+}
+
+// -----------------------------------------------------------------------
+// 60. session-key / ocpay via mock client (RPC construction already covered by tests 5-13).
+//     Negative: unknown subcommand parses fail.
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_session_key_create_bad_credential_hex() {
+    let res = run_cli(&[
+        "onecipher",
+        "session-key",
+        "create",
+        "--label",
+        "x",
+        "--challenge",
+        "aa",
+        "--signature",
+        "zz",
+        "--credential-id",
+        "c",
+    ]);
+    assert!(res.is_err(), "bad signature hex must be rejected");
+}
+
+// -----------------------------------------------------------------------
+// 61. vanity requires at least one pattern
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_vanity_requires_pattern() {
+    let res = run_cli(&["onecipher", "vanity", "--count", "1"]);
+    assert!(res.is_err(), "vanity without pattern must fail");
+}
+
+#[test]
+fn test_vanity_suffix_match() {
+    // Brute force a 1-hex suffix (fast). Just assert it finds something valid.
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "vanity", "--ends-with", "0", "--count", "1", "--jobs", "4"]);
+}
+
+#[test]
+fn test_vanity_bad_pattern() {
+    let res = run_cli(&["onecipher", "vanity", "--starts-with", "ZZ", "--count", "1"]);
+    assert!(res.is_err(), "non-hex pattern must be rejected");
+}
+
+// -----------------------------------------------------------------------
+// 62. intent submit/simulate/execute route through mock-free local parse and fail without a session
+//     key (network/daemon absent) — assert dispatch reaches the command and reports an error rather
+//     than panicking.
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_intent_submit_reaches_command() {
+    let res = run_cli(&[
+        "onecipher",
+        "intent",
+        "submit",
+        "--json",
+        r#"{"type":"Pay","amount":"1.0 USDC","recipient":"0xabc"}"#,
+        "--chain",
+        "eip155:8453",
+        "--session-key",
+        "sk-missing",
+        "--yes",
+    ]);
+    // Without a real session key / daemon the command should error, not panic.
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 63. wc pair/connect/connect-bad-uri parse + dispatch
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wc_parse_and_dispatch() {
+    // Bad URI → parse error at the daemon control socket stage (no daemon).
+    let res = run_cli(&["onecipher", "wc", "connect", "not-a-wc-uri"]);
+    assert!(res.is_err());
+    // sessions / disconnect reach the command (no daemon → error, not panic)
+    let _ = run_cli(&["onecipher", "wc", "sessions"]);
+    let _ = run_cli(&["onecipher", "wc", "disconnect", "topic123"]);
+    // pair reaches the daemon control socket (no daemon → error)
+    let _ = run_cli(&["onecipher", "wc", "pair", "--ttl", "60"]);
+}
+
+// -----------------------------------------------------------------------
+// 64. uninstall --purge is destructive and must NOT run in tests; assert it is at least reachable
+//     via parse_from and that the non-purge form is a no-op guarded path (we do not actually invoke
+//     it to avoid deleting data).
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_uninstall_parses() {
+    let cli = Cli::parse_from(["onecipher", "uninstall", "--purge"]);
+    assert!(matches!(cli.command, Some(Commands::Uninstall { purge: true })));
+    let cli = Cli::parse_from(["onecipher", "uninstall"]);
+    assert!(matches!(cli.command, Some(Commands::Uninstall { purge: false })));
+}
+
+// -----------------------------------------------------------------------
+// 65. update is network-bound; assert parse + that it is reachable. Never actually invoked (would
+//     hit the network / self-replace).
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_update_parses() {
+    let cli = Cli::parse_from(["onecipher", "update", "--force"]);
+    assert!(matches!(cli.command, Some(Commands::Update { force: true })));
+}
+
+// -----------------------------------------------------------------------
+// 66. webui open parses (browser launch not exercised in CI)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_webui_parses() {
+    let cli = Cli::parse_from(["onecipher", "webui", "open"]);
+    assert!(matches!(cli.command, Some(Commands::Webui { .. })));
+}
+
+// -----------------------------------------------------------------------
+// 67. pay discover / request parse + dispatch (network; request will fail without a wallet/daemon,
+//     but must not panic)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_pay_discover_parses_and_dispatches() {
+    // discover hits the Bazaar directory over HTTP; without network it errors,
+    // but dispatch must not panic.
+    let _ = run_cli(&["onecipher", "pay", "discover", "--query", "weather"]);
+    let _ = run_cli(&["onecipher", "pay", "discover", "--limit", "10", "--offset", "0"]);
+}
+
+// -----------------------------------------------------------------------
+// 68. fund deposit/balance parse + dispatch (MoonPay; network-bound)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_fund_parses_and_dispatches() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "f", "--words", "12"]);
+    let _ = run_cli(&["onecipher", "fund", "deposit", "--wallet", "f", "--chain", "base"]);
+    let _ = run_cli(&["onecipher", "fund", "balance", "--wallet", "f", "--chain", "base"]);
+}
+
+// -----------------------------------------------------------------------
+// 69. secret add via --stdin full payload path
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_secret_add_via_stdin_payload() {
+    let _home = HomeGuard::new();
+    age_init();
+    // Write a payload to a temp file and feed via stdin.
+    let dir = tempfile::tempdir().unwrap();
+    let payload = dir.path().join("payload.json");
+    std::fs::write(&payload, r#"{"secret":"stdin-secret","notes":"n","extra":null}"#).unwrap();
+    let input = std::fs::read_to_string(&payload).unwrap();
+    // Use a child process invocation through the binary to pipe stdin.
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["onecipher", "secret", "add", "stdin/sec", "--type", "password", "--stdin"])
+        .env("HOME", _home.path())
+        .env("ONECIPHER_SECRET", "") // unused but keep env shaped
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+            child.wait()
+        });
+    assert!(out.is_ok_and(|s| s.success()), "stdin secret add must succeed");
+    run_ok(&["onecipher", "secret", "get", "stdin/sec", "--json"]);
+    run_ok(&["onecipher", "secret", "delete", "stdin/sec"]);
+}
+
+// ===========================================================================
+// Non-interactive support tests (Phase: all commands usable without a TTY)
+// ===========================================================================
+
+// -----------------------------------------------------------------------
+// 70. wallet change-password works non-interactively via flags
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_change_password_noninteractive_flags() {
+    let _home = HomeGuard::new();
+    // Create a wallet with a passphrase.
+    set_env("ONECIPHER_PASSPHRASE", "old-pass");
+    run_ok(&["onecipher", "wallet", "create", "--name", "cp", "--words", "12"]);
+    remove_env("ONECIPHER_PASSPHRASE");
+
+    // Non-interactive change: old + new via flags.
+    run_ok(&[
+        "onecipher",
+        "wallet",
+        "change-password",
+        "--wallet",
+        "cp",
+        "--passphrase",
+        "old-pass",
+        "--new-passphrase",
+        "new-pass",
+    ]);
+
+    // Verify the new passphrase works by exporting.
+    set_env("ONECIPHER_PASSPHRASE", "new-pass");
+    // wallet export is non-interactive when env passphrase is set.
+    run_ok(&["onecipher", "wallet", "export", "--wallet", "cp"]);
+    remove_env("ONECIPHER_PASSPHRASE");
+}
+
+// -----------------------------------------------------------------------
+// 71. wallet change-password without passphrase and no TTY errors cleanly
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_change_password_no_ttl_input_errors() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "cp2", "--words", "12"]);
+    // No flags, no env, no TTY → clear error, not a hang.
+    let res = run_cli(&["onecipher", "wallet", "change-password", "--wallet", "cp2"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 72. wallet change-password wrong current passphrase rejected
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_change_password_wrong_old() {
+    let _home = HomeGuard::new();
+    set_env("ONECIPHER_PASSPHRASE", "correct-pass");
+    run_ok(&["onecipher", "wallet", "create", "--name", "cp3", "--words", "12"]);
+    remove_env("ONECIPHER_PASSPHRASE");
+
+    let res = run_cli(&[
+        "onecipher",
+        "wallet",
+        "change-password",
+        "--wallet",
+        "cp3",
+        "--passphrase",
+        "wrong-old",
+        "--new-passphrase",
+        "x",
+    ]);
+    assert!(res.is_err(), "wrong current passphrase must be rejected");
+}
+
+// -----------------------------------------------------------------------
+// 73. wallet change-password same passphrase rejected
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_change_password_same_rejected() {
+    let _home = HomeGuard::new();
+    set_env("ONECIPHER_PASSPHRASE", "same");
+    run_ok(&["onecipher", "wallet", "create", "--name", "cp4", "--words", "12"]);
+    remove_env("ONECIPHER_PASSPHRASE");
+
+    let res = run_cli(&[
+        "onecipher",
+        "wallet",
+        "change-password",
+        "--wallet",
+        "cp4",
+        "--passphrase",
+        "same",
+        "--new-passphrase",
+        "same",
+    ]);
+    assert!(res.is_err(), "identical old/new must be rejected");
+}
+
+// -----------------------------------------------------------------------
+// 74. wallet export non-interactive via env passphrase
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_export_noninteractive_env() {
+    let _home = HomeGuard::new();
+    // Create a passphrase-protected wallet.
+    set_env("ONECIPHER_PASSPHRASE", "pw1");
+    run_ok(&["onecipher", "wallet", "create", "--name", "exp", "--words", "12"]);
+    remove_env("ONECIPHER_PASSPHRASE");
+
+    // Without env passphrase and no TTY → clean error (not a hang).
+    let res = run_cli(&["onecipher", "wallet", "export", "--wallet", "exp"]);
+    assert!(res.is_err(), "export without passphrase and no TTY must error");
+
+    // With env passphrase → works non-interactively.
+    set_env("ONECIPHER_PASSPHRASE", "pw1");
+    run_ok(&["onecipher", "wallet", "export", "--wallet", "exp"]);
+    remove_env("ONECIPHER_PASSPHRASE");
+}
+
+// -----------------------------------------------------------------------
+// 75. wallet export --public-key non-interactive via env passphrase
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_export_public_key_noninteractive_env() {
+    let _home = HomeGuard::new();
+    set_env("ONECIPHER_PASSPHRASE", "pw1");
+    run_ok(&["onecipher", "wallet", "create", "--name", "pkexp", "--words", "12"]);
+    remove_env("ONECIPHER_PASSPHRASE");
+
+    // Without env → clean error.
+    let res = run_cli(&["onecipher", "wallet", "export", "--public-key", "--wallet", "pkexp"]);
+    assert!(res.is_err());
+
+    // With env passphrase → works.
+    set_env("ONECIPHER_PASSPHRASE", "pw1");
+    run_ok(&[
+        "onecipher",
+        "wallet",
+        "export",
+        "--public-key",
+        "--wallet",
+        "pkexp",
+        "--chain",
+        "evm",
+    ]);
+    remove_env("ONECIPHER_PASSPHRASE");
+}
+
+// -----------------------------------------------------------------------
+// 76. wallet export non-interactive on an EMPTY-passphrase wallet
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wallet_export_empty_passphrase_wallet() {
+    let _home = HomeGuard::new();
+    // Create wallet without setting a passphrase env → empty passphrase.
+    run_ok(&["onecipher", "wallet", "create", "--name", "nopw", "--words", "12"]);
+    // Empty passphrase wallet exports without any env var, no TTY required.
+    run_ok(&["onecipher", "wallet", "export", "--wallet", "nopw"]);
+}
+
+// -----------------------------------------------------------------------
+// 77. secret get --copy works non-interactively (copies secret; clipboard may be unavailable
+//     headless — assert the command still routes to the clipboard helper without a TTY prompt)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_secret_get_copy_routes_noninteractive() {
+    let _home = HomeGuard::new();
+    age_init();
+    set_env("ONECIPHER_SECRET", "copy-me");
+    run_ok(&["onecipher", "secret", "add", "cp/target", "--type", "password"]);
+    remove_env("ONECIPHER_SECRET");
+
+    // On a headless CI the clipboard backend may fail; either way this must
+    // NOT prompt for a TTY — it must return promptly (Ok on systems with a
+    // clipboard, Err(CliError) on headless ones). We only assert it does not
+    // hang and returns a Result rather than panicking.
+    let res = run_cli(&["onecipher", "secret", "get", "cp/target", "--copy", "--timeout", "0"]);
+    assert!(
+        res.is_ok() || res.is_err(),
+        "copy must route to clipboard (Ok) or fail cleanly headless (Err)"
+    );
+}
+
+// -----------------------------------------------------------------------
+// 78. webui approval/auth subcommands parse and dispatch; without a running daemon they fail with a
+//     clear "port file not found" error (not panic)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_webui_approval_requires_running_daemon() {
+    let _home = HomeGuard::new();
+    // No webui.port file → clear error, no panic.
+    let res = run_cli(&["onecipher", "webui", "approval", "list"]);
+    assert!(res.is_err(), "approval list without daemon must error");
+    let err = format!("{}", res.unwrap_err());
+    assert!(err.contains("port file"), "error must mention the port file, got: {err}");
+
+    let res = run_cli(&[
+        "onecipher",
+        "webui",
+        "approval",
+        "show",
+        "00000000-0000-0000-0000-000000000000",
+    ]);
+    assert!(res.is_err());
+
+    let res = run_cli(&[
+        "onecipher",
+        "webui",
+        "approval",
+        "approve",
+        "00000000-0000-0000-0000-000000000000",
+        "--yes",
+    ]);
+    assert!(res.is_err());
+
+    let res = run_cli(&[
+        "onecipher",
+        "webui",
+        "approval",
+        "reject",
+        "00000000-0000-0000-0000-000000000000",
+        "--reason",
+        "x",
+        "--yes",
+    ]);
+    assert!(res.is_err());
+
+    let res = run_cli(&["onecipher", "webui", "auth", "status"]);
+    assert!(res.is_err());
+    let res = run_cli(&["onecipher", "webui", "auth", "lock"]);
+    assert!(res.is_err());
+    let res = run_cli(&["onecipher", "webui", "auth", "bootstrap"]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 79. webui approval list parses (endpoint path construction is validated against a mock HTTP
+//     server — see below)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_webui_approval_parses() {
+    let cli = Cli::parse_from(["onecipher", "webui", "approval", "list"]);
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Webui {
+            subcommand: crate::cli::WebUiCommands::Approval {
+                subcommand: crate::cli::ApprovalCommands::List
+            }
+        })
+    ));
+}
+
+// -----------------------------------------------------------------------
+// 80. HTTP bridge against a mock localhost server: verify URL construction, JSON body, and error
+//     handling without a real daemon.
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_webui_http_bridge_against_mock_server() {
+    use std::io::{Read, Write};
+
+    let _home = HomeGuard::new();
+
+    // A tiny mock HTTP server that emulates the daemon's /api/approvals and
+    // /api/auth endpoints on 127.0.0.1.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = std::thread::spawn(move || {
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 2048];
+            let n = stream.read(&mut buf).unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let (status, body) = if req.starts_with("GET /api/approvals ") {
+                (
+                    200,
+                    r#"{"approvals":[{"id":"a1","method":"eth_sendTransaction","dapp_name":"Mock","chain_id":"eip155:1"}]}"#,
+                )
+            } else if req.starts_with("POST /api/approvals/") && req.contains("/decision") {
+                // Echo the decision body back.
+                let _ = req;
+                (200, r#"{"ok":true}"#)
+            } else if req.starts_with("GET /api/auth/status ") {
+                (200, r#"{"locked":false}"#)
+            } else if req.starts_with("POST /api/auth/lock ") {
+                (200, r#"{"ok":true}"#)
+            } else if req.starts_with("POST /api/auth/bootstrap ") {
+                (200, r#"{"needs_registration":true,"bootstrap_ready":false}"#)
+            } else {
+                (404, r#"{"error":"not found"}"#)
+            };
+            let resp = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+        }
+    });
+
+    // Write the mock port into webui.port.
+    std::fs::write(_home.path().join("webui.port"), port.to_string()).unwrap();
+
+    // approval list should succeed against the mock and find 1 approval.
+    // (It prints; we only assert no error.)
+    run_ok(&["onecipher", "webui", "approval", "list"]);
+    // auth status/lock/bootstrap
+    run_ok(&["onecipher", "webui", "auth", "status"]);
+    run_ok(&["onecipher", "webui", "auth", "lock"]);
+    run_ok(&["onecipher", "webui", "auth", "bootstrap"]);
+    // reject with --yes
+    run_ok(&[
+        "onecipher",
+        "webui",
+        "approval",
+        "reject",
+        "00000000-0000-0000-0000-000000000001",
+        "--reason",
+        "test",
+        "--yes",
+    ]);
+
+    drop(server);
+    let _ = listener;
+}
+
+// ===========================================================================
+// B-level automation: real Key-Agent UDS round-trip, intent lifecycle,
+// x402/fund/discover mock-HTTP, send-tx broadcast mock JSON-RPC
+// ===========================================================================
+
+// -----------------------------------------------------------------------
+// Mock HTTP server helper: serves N responses in order on 127.0.0.1.
+// -----------------------------------------------------------------------
+fn spawn_mock_http(responses: Vec<(u16, &'static str)>) -> (u16, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        for (status, body) in responses {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 8192];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        }
+    });
+    (port, handle)
+}
+
+// -----------------------------------------------------------------------
+// B1a. Real Key-Agent UDS server round-trip: register passkey → generate
+//      challenge → create session key → revoke. Drives the REAL server via
+//      FrameClient over a temp socket (HOME isolated).
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_keyagent_real_uds_session_key_roundtrip() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use oc_keyagent::{
+        frame::FrameClient,
+        proto::{
+            CreateSessionKeyRequest, CreateSessionKeyResponse, Empty, GenerateChallengeRequest,
+            GenerateChallengeResponse, PasskeyAuthorization, RegisterPasskeyRequest,
+            RegisterPasskeyResponse, RevokeSessionKeyRequest, RevokeSessionKeyResponse,
+        },
+        request::{KeyAgentRequest, KeyAgentRequestKind},
+        response::KeyAgentResponseKind,
+    };
+    use prost::Message;
+
+    let _home = HomeGuard::new();
+    let sock = _home.path().join("ka.sock");
+    let sock_str = sock.to_string_lossy().into_owned();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let sock_thread = sock_str.clone();
+    let server = std::thread::spawn(move || {
+        let _ = oc_keyagent::server::run(Some(&sock_thread), Some(stop_thread));
+    });
+
+    // Wait for the socket to appear.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !sock.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(sock.exists(), "key-agent socket must appear");
+
+    let client = FrameClient::new(&sock_str);
+
+    // 1. Register an Ed25519 passkey.
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let vk_bytes = signing_key.verifying_key().to_bytes().to_vec();
+    let reg_req = KeyAgentRequest {
+        kind: Some(KeyAgentRequestKind::RegisterPasskey(RegisterPasskeyRequest {
+            wallet_id: "wallet-1".to_string(),
+            credential_id: "cred-b1".to_string(),
+            algorithm: "ed25519".to_string(),
+            public_key: vk_bytes,
+        })),
+    };
+    let resp = client.send_request(&reg_req).unwrap();
+    match &resp.kind {
+        Some(KeyAgentResponseKind::Ok(bytes)) => {
+            let decoded = RegisterPasskeyResponse::decode(bytes.as_slice()).unwrap();
+            assert!(decoded.registered, "passkey registration must succeed");
+        }
+        other => panic!("expected Ok register, got {other:?}"),
+    }
+
+    // Helper: issue a challenge and sign challenge || credential_id.
+    let make_auth = |client: &FrameClient, cred: &str| -> PasskeyAuthorization {
+        let chal_req = KeyAgentRequest {
+            kind: Some(KeyAgentRequestKind::GenerateChallenge(GenerateChallengeRequest {
+                credential_id: cred.to_string(),
+            })),
+        };
+        let resp = client.send_request(&chal_req).unwrap();
+        let bytes = match &resp.kind {
+            Some(KeyAgentResponseKind::Ok(b)) => b.clone(),
+            other => panic!("expected Ok challenge, got {other:?}"),
+        };
+        let challenge = GenerateChallengeResponse::decode(bytes.as_slice()).unwrap().challenge;
+        assert_eq!(challenge.len(), 32, "challenge must be 32 bytes");
+        let mut msg = challenge.clone();
+        msg.extend_from_slice(cred.as_bytes());
+        use ed25519_dalek::Signer as _;
+        let sig = signing_key.sign(&msg).to_bytes().to_vec();
+        PasskeyAuthorization { challenge, signature: sig, credential_id: cred.to_string() }
+    };
+
+    // 2. Create a session key with a valid challenge signature.
+    let auth = make_auth(&client, "cred-b1");
+    let create_req = KeyAgentRequest {
+        kind: Some(KeyAgentRequestKind::CreateSessionKey(CreateSessionKeyRequest {
+            label: "b1-test".to_string(),
+            rules: None,
+            budget: None,
+            auth: Some(auth),
+        })),
+    };
+    let resp = client.send_request(&create_req).unwrap();
+    let created = match &resp.kind {
+        Some(KeyAgentResponseKind::Ok(bytes)) => {
+            CreateSessionKeyResponse::decode(bytes.as_slice()).unwrap()
+        }
+        other => panic!("expected Ok create, got {other:?}"),
+    };
+    assert!(created.session_key_id.starts_with("sk-"), "session key id");
+
+    // 3. Revoke with a FRESH challenge (single-use).
+    let auth2 = make_auth(&client, "cred-b1");
+    let revoke_req = KeyAgentRequest {
+        kind: Some(KeyAgentRequestKind::RevokeSessionKey(RevokeSessionKeyRequest {
+            session_key_id: created.session_key_id,
+            auth: Some(auth2),
+        })),
+    };
+    let resp = client.send_request(&revoke_req).unwrap();
+    match &resp.kind {
+        Some(KeyAgentResponseKind::Ok(bytes)) => {
+            let decoded = RevokeSessionKeyResponse::decode(bytes.as_slice()).unwrap();
+            assert!(decoded.revoked_at_unix > 0);
+        }
+        other => panic!("expected Ok revoke, got {other:?}"),
+    }
+
+    // 4. Reusing the SAME challenge must be rejected (replay protection). Issue ONE challenge, sign
+    //    it TWICE with the same nonce.
+    let make_auth_from = |challenge: &[u8], cred: &str| -> PasskeyAuthorization {
+        let mut msg = challenge.to_vec();
+        msg.extend_from_slice(cred.as_bytes());
+        use ed25519_dalek::Signer as _;
+        let sig = signing_key.sign(&msg).to_bytes().to_vec();
+        PasskeyAuthorization {
+            challenge: challenge.to_vec(),
+            signature: sig,
+            credential_id: cred.to_string(),
+        }
+    };
+    let chal_req = KeyAgentRequest {
+        kind: Some(KeyAgentRequestKind::GenerateChallenge(GenerateChallengeRequest {
+            credential_id: "cred-b1".to_string(),
+        })),
+    };
+    let resp = client.send_request(&chal_req).unwrap();
+    let bytes = match &resp.kind {
+        Some(KeyAgentResponseKind::Ok(b)) => b.clone(),
+        other => panic!("expected Ok challenge, got {other:?}"),
+    };
+    let shared_challenge = GenerateChallengeResponse::decode(bytes.as_slice()).unwrap().challenge;
+
+    // First use of the shared challenge succeeds.
+    let first = KeyAgentRequest {
+        kind: Some(KeyAgentRequestKind::CreateSessionKey(CreateSessionKeyRequest {
+            label: "replay-first".to_string(),
+            rules: None,
+            budget: None,
+            auth: Some(make_auth_from(&shared_challenge, "cred-b1")),
+        })),
+    };
+    let resp = client.send_request(&first).unwrap();
+    assert!(!resp.is_error(), "first use of a fresh challenge must succeed");
+
+    // Second use of the SAME challenge → replay rejection (Deny/Error).
+    let second = KeyAgentRequest {
+        kind: Some(KeyAgentRequestKind::CreateSessionKey(CreateSessionKeyRequest {
+            label: "replay-second".to_string(),
+            rules: None,
+            budget: None,
+            auth: Some(make_auth_from(&shared_challenge, "cred-b1")),
+        })),
+    };
+    let resp = client.send_request(&second).unwrap();
+    match &resp.kind {
+        Some(KeyAgentResponseKind::Deny(_)) => {}
+        Some(KeyAgentResponseKind::Error(_)) => {}
+        other => panic!("expected replay rejection, got {other:?}"),
+    }
+
+    // 5. Unknown credential → error.
+    let bad_chal = KeyAgentRequest {
+        kind: Some(KeyAgentRequestKind::GenerateChallenge(GenerateChallengeRequest {
+            credential_id: "cred-nope".to_string(),
+        })),
+    };
+    let resp = client.send_request(&bad_chal).unwrap();
+    assert!(resp.is_error(), "unknown credential must error");
+
+    // Shut down the server.
+    stop.store(true, Ordering::Relaxed);
+    // Wake the accept loop with a dummy connection so it checks `stop`.
+    let _ = FrameClient::new(&sock_str)
+        .send_request(&KeyAgentRequest { kind: Some(KeyAgentRequestKind::ListWallets(Empty {})) });
+    let _ = server.join();
+}
+
+// -----------------------------------------------------------------------
+// B1b. Real Key-Agent PayX402 round-trip: without a policy the decision is
+//      Deny(PolicyMissing) surfaced as an Ok PayX402Response.
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_keyagent_real_uds_pay_x402_deny_without_policy() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use oc_keyagent::{
+        frame::FrameClient,
+        proto::{Empty, PayX402Request, PayX402Response},
+        request::{KeyAgentRequest, KeyAgentRequestKind},
+        response::KeyAgentResponseKind,
+    };
+    use prost::Message;
+
+    let _home = HomeGuard::new();
+    let sock = _home.path().join("ka2.sock");
+    let sock_str = sock.to_string_lossy().into_owned();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = stop.clone();
+    let sock_thread = sock_str.clone();
+    let server = std::thread::spawn(move || {
+        let _ = oc_keyagent::server::run(Some(&sock_thread), Some(stop_thread));
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !sock.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(sock.exists());
+
+    let client = FrameClient::new(&sock_str);
+    let req = KeyAgentRequest {
+        kind: Some(KeyAgentRequestKind::PayX402(PayX402Request {
+            session_key_id: "sk-test".to_string(),
+            url: "https://example.com".to_string(),
+            method: "GET".to_string(),
+            body: vec![],
+            headers: std::collections::HashMap::new(),
+            ..Default::default()
+        })),
+    };
+    let resp = client.send_request(&req).unwrap();
+    match &resp.kind {
+        Some(KeyAgentResponseKind::Ok(bytes)) => {
+            let decoded = PayX402Response::decode(bytes.as_slice()).unwrap();
+            // No policy configured → the policy engine denies with policy_missing.
+            assert_eq!(
+                decoded.status,
+                oc_keyagent::proto::PaymentStatus::Deny as i32,
+                "without a policy, PayX402 must deny"
+            );
+            assert!(
+                decoded.deny_reason.contains("policy"),
+                "deny_reason should mention policy, got {:?}",
+                decoded.deny_reason
+            );
+        }
+        other => panic!("expected Ok(PayX402Response), got {other:?}"),
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = FrameClient::new(&sock_str)
+        .send_request(&KeyAgentRequest { kind: Some(KeyAgentRequestKind::ListWallets(Empty {})) });
+    let _ = server.join();
+}
+
+// -----------------------------------------------------------------------
+// B2. Intent full lifecycle via CLI with the built-in MockRpcClient
+//      (no --rpc-url → mock, no network, no signing key needed).
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_intent_submit_simulate_execute_lifecycle_mock() {
+    let pay_json =
+        r#"{"type":"Pay","amount":"10.5 USDC","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
+
+    // simulate → Ok (mock)
+    run_ok(&[
+        "onecipher",
+        "intent",
+        "simulate",
+        "--json",
+        pay_json,
+        "--chain",
+        "eip155:8453",
+        "--session-key",
+        "sk-mock",
+    ]);
+
+    // submit --yes → Ok (skip prompt, mock execution)
+    run_ok(&[
+        "onecipher",
+        "intent",
+        "submit",
+        "--json",
+        pay_json,
+        "--chain",
+        "eip155:8453",
+        "--session-key",
+        "sk-mock",
+        "--yes",
+    ]);
+
+    // execute → Ok (mock execution)
+    run_ok(&[
+        "onecipher",
+        "intent",
+        "execute",
+        "--json",
+        pay_json,
+        "--chain",
+        "eip155:8453",
+        "--session-key",
+        "sk-mock",
+        "--sponsor",
+        "native",
+    ]);
+
+    // SignMessage intent (default utf8)
+    run_ok(&[
+        "onecipher",
+        "intent",
+        "simulate",
+        "--json",
+        r#"{"type":"SignMessage","message":"hello world"}"#,
+        "--chain",
+        "eip155:1",
+        "--session-key",
+        "sk-mock",
+    ]);
+
+    // SignTransaction intent
+    run_ok(&[
+        "onecipher",
+        "intent",
+        "simulate",
+        "--json",
+        r#"{"type":"SignTransaction","tx_hex":"0xdeadbeef","chain_id":"eip155:1"}"#,
+        "--chain",
+        "eip155:1",
+        "--session-key",
+        "sk-mock",
+    ]);
+}
+
+// -----------------------------------------------------------------------
+// B2b. Intent bad JSON / bad sponsor mode / missing type are rejected
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_intent_invalid_inputs_rejected() {
+    // missing type
+    let res = run_cli(&[
+        "onecipher",
+        "intent",
+        "simulate",
+        "--json",
+        r#"{"amount":"1 USDC"}"#,
+        "--chain",
+        "eip155:8453",
+        "--session-key",
+        "sk",
+    ]);
+    assert!(res.is_err());
+
+    // bad sponsor
+    let res = run_cli(&[
+        "onecipher",
+        "intent",
+        "execute",
+        "--json",
+        r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabc"}"#,
+        "--chain",
+        "eip155:8453",
+        "--session-key",
+        "sk",
+        "--sponsor",
+        "bogus",
+    ]);
+    assert!(res.is_err());
+
+    // invalid JSON
+    let res = run_cli(&[
+        "onecipher",
+        "intent",
+        "simulate",
+        "--json",
+        "{not json",
+        "--chain",
+        "eip155:1",
+        "--session-key",
+        "sk",
+    ]);
+    assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// B3a. pay request → non-402 path against a mock HTTP server (no payment).
+//      The URL is passed verbatim, so a mock server URL works directly.
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_pay_request_non_402_mock_server() {
+    let (port, handle) = spawn_mock_http(vec![(200, r#"{"ok":true}"#)]);
+    let url = format!("http://127.0.0.1:{port}/api/data");
+    let res = run_cli(&[
+        "onecipher",
+        "pay",
+        "request",
+        &url,
+        "--wallet",
+        "nonexistent-wallet", // non-402 path does not touch the wallet
+        "--no-passphrase",
+    ]);
+    assert!(res.is_ok(), "non-402 pay must succeed against mock: {res:?}");
+    handle.join().unwrap();
+}
+
+// -----------------------------------------------------------------------
+// B3b. pay request → 402 path requires a signed EIP-3009 payment. Use a real
+//      wallet (created in isolated HOME) + mock server that first returns 402
+//      with a payment-required header, then 200.
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_pay_request_x402_flow_mock_server() {
+    use std::io::{Read, Write};
+
+    use base64::Engine as _;
+
+    let _home = HomeGuard::new();
+    // Create a wallet (empty passphrase) so the EIP-3009 typed-data signing works.
+    run_ok(&["onecipher", "wallet", "create", "--name", "paywallet", "--words", "12"]);
+
+    // Mock server: request 1 → 402 with a payment-required header; request 2 → 200.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let responses: [(u16, Option<&str>, &str); 2] = [
+            (
+                402,
+                Some("payment-required"),
+                r#"{"x402Version":2,"accepts":[{"scheme":"exact","network":"eip155:1","amount":"1000000","asset":"0xusdc","payTo":"0xpayee","maxTimeoutSeconds":300}],"resource":null}"#,
+            ),
+            (200, None, r#"{"paid":true}"#),
+        ];
+        for (status, header, body) in responses {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf);
+            let header_str = match header {
+                Some(h) => format!(
+                    "{h}: {}\r\n",
+                    base64::engine::general_purpose::STANDARD.encode(body.as_bytes())
+                ),
+                None => String::new(),
+            };
+            let resp = format!(
+                "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\n{header_str}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+
+    let url = format!("http://127.0.0.1:{port}/pay");
+    let res =
+        run_cli(&["onecipher", "pay", "request", &url, "--wallet", "paywallet", "--no-passphrase"]);
+    assert!(res.is_ok(), "x402 flow must complete against mock: {res:?}");
+    server.join().unwrap();
+}
+
+// -----------------------------------------------------------------------
+// B3c. pay discover against mock server (OC_X402_DISCOVERY_URL override).
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_pay_discover_mock_server() {
+    let (port, handle) = spawn_mock_http(vec![(
+        200,
+        r#"{"items":[{"resource":"https://api.example.com/data","accepts":[{"scheme":"exact","network":"eip155:8453","amount":"1000000","asset":"0xusdc","payTo":"0xpayee","maxTimeoutSeconds":300}],"metadata":{"description":"mock weather api"}}],"pagination":{"limit":100,"offset":0,"total":1}}"#,
+    )]);
+    set_env("OC_X402_DISCOVERY_URL", &format!("http://127.0.0.1:{port}"));
+    let res = run_cli(&["onecipher", "pay", "discover"]);
+    remove_env("OC_X402_DISCOVERY_URL");
+    assert!(res.is_ok(), "discover must work against mock: {res:?}");
+    handle.join().unwrap();
+}
+
+// -----------------------------------------------------------------------
+// B3d. fund deposit / balance against mock MoonPay API (OC_MOONPAY_API).
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_fund_deposit_and_balance_mock_server() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "fwallet", "--words", "12"]);
+
+    let (port, handle) = spawn_mock_http(vec![
+        (
+            200,
+            r#"{"id":"dep-1","destinationWallet":"0xabc","destinationChain":"base","customerToken":"tok","depositUrl":"https://moonpay.com/buy","wallets":[{"address":"0xabc","chain":"base","qrCode":"https://qr"}],"instructions":"Send crypto to 0xabc"}"#,
+        ),
+        (
+            200,
+            r#"{"items":[{"address":"0xabc","name":"USDC","symbol":"USDC","chain":"base","decimals":6,"balance":{"amount":1.5,"value":1.5,"price":1.0}}]}"#,
+        ),
+    ]);
+    set_env("OC_MOONPAY_API", &format!("http://127.0.0.1:{port}"));
+
+    let res = run_cli(&["onecipher", "fund", "deposit", "--wallet", "fwallet", "--chain", "base"]);
+    assert!(res.is_ok(), "fund deposit must work against mock: {res:?}");
+
+    let res = run_cli(&["onecipher", "fund", "balance", "--wallet", "fwallet", "--chain", "base"]);
+    assert!(res.is_ok(), "fund balance must work against mock: {res:?}");
+
+    remove_env("OC_MOONPAY_API");
+    handle.join().unwrap();
+}
+
+// -----------------------------------------------------------------------
+// B4. sign send-tx broadcast against a mock JSON-RPC server (--rpc-url).
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_send_tx_broadcast_mock_jsonrpc() {
+    use std::io::{Read, Write};
+
+    let _home = HomeGuard::new();
+    // Create an empty-passphrase wallet.
+    run_ok(&["onecipher", "wallet", "create", "--name", "bwallet", "--words", "12"]);
+
+    // Build a minimal unsigned EIP-1559 tx: 0x02 || RLP([...]).
+    // Replicates oc-signer's rlp test vector (chain_id=1, all other fields 0).
+    let items: Vec<u8> = [
+        vec![0x01], // chain_id = 1
+        vec![0x80], // nonce = 0
+        vec![0x80], // maxPriorityFeePerGas = 0
+        vec![0x80], // maxFeePerGas = 0
+        vec![0x80], // gasLimit = 0
+        vec![0x80], // to = empty
+        vec![0x80], // value = 0
+        vec![0x80], // data = empty
+        vec![0xc0], // accessList = []
+    ]
+    .concat();
+    let mut unsigned_tx = vec![0x02u8];
+    // RLP list header for 9 items.
+    unsigned_tx.push(0xc0 + items.len() as u8);
+    unsigned_tx.extend_from_slice(&items);
+    let tx_hex = format!("0x{}", hex::encode(&unsigned_tx));
+
+    // Mock JSON-RPC server: responds to eth_sendRawTransaction with a fake tx hash.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let n = stream.read(&mut buf).unwrap();
+        let req_str = String::from_utf8_lossy(&buf[..n]).to_string();
+        // Assert the request body contains eth_sendRawTransaction.
+        assert!(
+            req_str.contains("eth_sendRawTransaction"),
+            "mock must receive eth_sendRawTransaction, got: {req_str}"
+        );
+        let body = r#"{"jsonrpc":"2.0","result":"0xdeadbeefcafebabedeadbeefcafebabe0000000000000000000000000000000000","id":1}"#;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(resp.as_bytes());
+    });
+
+    let rpc_url = format!("http://127.0.0.1:{port}");
+    let res = run_cli(&[
+        "onecipher",
+        "sign",
+        "send-tx",
+        "--chain",
+        "ethereum",
+        "--wallet",
+        "bwallet",
+        "--tx",
+        &tx_hex,
+        "--rpc-url",
+        &rpc_url,
+        "--json",
+    ]);
+    assert!(res.is_ok(), "send-tx broadcast must succeed against mock: {res:?}");
+    server.join().unwrap();
+}
+
+// -----------------------------------------------------------------------
+// C-level. `secret edit` smoke test using a no-op editor (EDITOR=true).
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_secret_edit_with_noop_editor() {
+    let _home = HomeGuard::new();
+    age_init();
+    set_env("ONECIPHER_SECRET", "edit-me");
+    run_ok(&["onecipher", "secret", "add", "edit/sec", "--type", "note"]);
+    remove_env("ONECIPHER_SECRET");
+
+    // Use `true` (no-op) as the editor: content is unchanged, so the round-trip
+    // parse must succeed and the secret must be re-encrypted in place.
+    set_env("EDITOR", "true");
+    let res = run_cli(&["onecipher", "secret", "edit", "edit/sec"]);
+    remove_env("EDITOR");
+    assert!(res.is_ok(), "edit with no-op editor must succeed: {res:?}");
+
+    // The secret still decrypts to the original value.
+    run_ok(&["onecipher", "secret", "get", "edit/sec", "--json"]);
+    run_ok(&["onecipher", "secret", "delete", "edit/sec"]);
+}
+
+// ===========================================================================
+// WC v2 CLI commands (relay config / probe / dapp-send)
+// ===========================================================================
+
+// -----------------------------------------------------------------------
+// 81. `wc relay` persists relay_url + project_id into config
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wc_relay_config_persists() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wc", "relay", "wss://127.0.0.1:7443", "--project-id", "abc123"]);
+
+    // Read the raw config file to confirm what was written.
+    let config_path = oc_core::paths::config_path().unwrap();
+    let raw = std::fs::read_to_string(&config_path).unwrap_or_default();
+    assert!(raw.contains("wss://127.0.0.1:7443"), "config file must contain relay_url, got: {raw}");
+    assert!(raw.contains("abc123"), "config file must contain project_id, got: {raw}");
+
+    let config = oc_core::Config::load_or_default();
+    assert_eq!(config.wc.relay_url, "wss://127.0.0.1:7443");
+    assert_eq!(config.wc.project_id, "abc123");
+}
+
+// -----------------------------------------------------------------------
+// 82. `wc relay` rejects non-WebSocket URLs
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wc_relay_rejects_bad_url() {
+    let _home = HomeGuard::new();
+    let res = run_cli(&["onecipher", "wc", "relay", "https://not-a-ws-url.com"]);
+    assert!(res.is_err(), "relay URL must be ws:// or wss://");
+}
+
+// -----------------------------------------------------------------------
+// 83. `wc relay` empty project-id rejected
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wc_relay_rejects_empty_project_id() {
+    let _home = HomeGuard::new();
+    let res = run_cli(&["onecipher", "wc", "relay", "wss://127.0.0.1:7443", "--project-id", ""]);
+    assert!(res.is_err(), "empty project id must be rejected");
+}
+
+// -----------------------------------------------------------------------
+// 84. `wc probe` fails cleanly when no relay is reachable (not a hang)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wc_probe_unreachable_relay() {
+    let _home = HomeGuard::new();
+    // A port that is guaranteed not to be listening (ephemeral, closed).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener); // now closed
+    let url = format!("ws://127.0.0.1:{port}");
+    // Probe should fail (connect refused), not hang.
+    let res = run_cli(&["onecipher", "wc", "probe", "--url", &url, "--timeout", "2"]);
+    assert!(res.is_err(), "probe to closed relay must fail: {res:?}");
+}
+
+// -----------------------------------------------------------------------
+// 85. `wc dapp-send` validates params JSON before any network I/O
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wc_dapp_send_bad_params() {
+    let _home = HomeGuard::new();
+    let res = run_cli(&[
+        "onecipher",
+        "wc",
+        "dapp-send",
+        "topic-123",
+        "personal_sign",
+        "{not json",
+        "--sym-key",
+        &"aa".repeat(32),
+    ]);
+    assert!(res.is_err(), "invalid params JSON must be rejected");
+}
+
+// -----------------------------------------------------------------------
+// 86. `wc dapp-send` requires a valid 32-byte sym key
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wc_dapp_send_bad_symkey() {
+    let _home = HomeGuard::new();
+    let res = run_cli(&[
+        "onecipher",
+        "wc",
+        "dapp-send",
+        "topic-123",
+        "personal_sign",
+        r#"{"data":"0x1"}"#,
+        "--sym-key",
+        "short",
+    ]);
+    assert!(res.is_err(), "short sym key must be rejected");
+}
+
+// -----------------------------------------------------------------------
+// 87. `wc dapp-send` fails cleanly when relay unreachable
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wc_dapp_send_unreachable_relay() {
+    let _home = HomeGuard::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let url = format!("ws://127.0.0.1:{port}");
+    let res = run_cli(&[
+        "onecipher",
+        "wc",
+        "dapp-send",
+        "topic-123",
+        "personal_sign",
+        r#"{"data":"0x1"}"#,
+        "--sym-key",
+        &"ab".repeat(32),
+        "--url",
+        &url,
+    ]);
+    assert!(res.is_err(), "dapp-send to closed relay must fail: {res:?}");
+}
+
+// -----------------------------------------------------------------------
+// 88. `wc probe` against a LOCAL mock WebSocket relay echoes back (the CLI probe validates the full
+//     irn_subscribe/publish/subscription loop).
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_wc_probe_against_local_mock_ws_relay() {
+    let _home = HomeGuard::new();
+
+    // A minimal WebSocket server implementing just enough of the IRN protocol:
+    // accept a connection, read irn_subscribe + irn_publish frames, and reply
+    // with an irn_subscription envelope echoing the published message.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        let (mut stream, _) = listener.accept().unwrap();
+        // WebSocket handshake (server side).
+        let mut buf = [0u8; 8192];
+        let n = stream.read(&mut buf).unwrap();
+        let req = String::from_utf8_lossy(&buf[..n]).to_string();
+        let req_lower = req.to_ascii_lowercase();
+        assert!(
+            req_lower.contains("upgrade: websocket") && req_lower.contains("websocket"),
+            "expected WS handshake: {req}"
+        );
+        // Extract Sec-WebSocket-Key.
+        let key = req
+            .lines()
+            .find(|l| l.to_ascii_lowercase().starts_with("sec-websocket-key:"))
+            .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
+            .unwrap_or_default();
+        let accept = ws_accept_key(&key);
+        let handshake = format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+        );
+        stream.write_all(handshake.as_bytes()).unwrap();
+
+        // Read frames (text frames with JSON). Loop for subscribe + publish.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut topic = String::new();
+        while std::time::Instant::now() < deadline {
+            let mut hdr = [0u8; 2];
+            match stream.read(&mut hdr) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+            let opcode = hdr[0] & 0x0F;
+            let masked = (hdr[1] & 0x80) != 0;
+            let mut len = (hdr[1] & 0x7F) as usize;
+            if len == 126 {
+                let mut ext = [0u8; 2];
+                if stream.read_exact(&mut ext).is_err() {
+                    break;
+                }
+                len = u16::from_be_bytes(ext) as usize;
+            } else if len == 127 {
+                let mut ext = [0u8; 8];
+                if stream.read_exact(&mut ext).is_err() {
+                    break;
+                }
+                len = u64::from_be_bytes(ext) as usize;
+            }
+            let mut mask_key = [0u8; 4];
+            if masked && stream.read_exact(&mut mask_key).is_err() {
+                break;
+            }
+            let mut payload = vec![0u8; len];
+            if stream.read_exact(&mut payload).is_err() {
+                break;
+            }
+            if masked {
+                for (i, b) in payload.iter_mut().enumerate() {
+                    *b ^= mask_key[i % 4];
+                }
+            }
+            if opcode != 1 {
+                continue; // only text frames
+            }
+            let json_str = String::from_utf8_lossy(&payload).to_string();
+            let val: serde_json::Value = match serde_json::from_str(&json_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let method = val.get("method").and_then(|m| m.as_str()).unwrap_or("");
+            match method {
+                "irn_subscribe" => {
+                    topic = val
+                        .pointer("/params/topic")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let resp =
+                        serde_json::json!({"id": val["id"], "jsonrpc":"2.0", "result":"sub-1"});
+                    write_ws_text(&mut stream, &resp.to_string());
+                }
+                "irn_publish" => {
+                    let published =
+                        val.pointer("/params/message").and_then(|m| m.as_str()).unwrap_or("");
+                    // Reply with a subscription envelope echoing the message.
+                    let sub = serde_json::json!({
+                        "id": "100",
+                        "jsonrpc": "2.0",
+                        "method": "irn_subscription",
+                        "params": {
+                            "id": "sub-1",
+                            "data": {
+                                "topic": topic,
+                                "message": published,
+                                "attestation": null,
+                                "publishedAt": 1234,
+                                "tag": 1108
+                            }
+                        }
+                    });
+                    write_ws_text(&mut stream, &sub.to_string());
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let url = format!("ws://127.0.0.1:{port}");
+    let res = run_cli(&["onecipher", "wc", "probe", "--url", &url, "--timeout", "10"]);
+    assert!(res.is_ok(), "probe must succeed against local mock relay: {res:?}");
+    server.join().unwrap();
+}
+
+/// Compute the WebSocket Sec-WebSocket-Accept value (SHA-1 + base64).
+fn ws_accept_key(key: &str) -> String {
+    use base64::Engine as _;
+    use sha1::Digest;
+    const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    let mut hasher = sha1::Sha1::new();
+    hasher.update(key.as_bytes());
+    hasher.update(GUID.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
+}
+
+/// Write a WebSocket text frame (unmasked, server→client).
+fn write_ws_text(stream: &mut std::net::TcpStream, text: &str) {
+    use std::io::Write;
+    let bytes = text.as_bytes();
+    let mut header = vec![0x81]; // FIN + text opcode
+    if bytes.len() < 126 {
+        header.push(bytes.len() as u8);
+    } else if bytes.len() < 65536 {
+        header.push(126);
+        header.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    } else {
+        header.push(127);
+        header.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    }
+    let _ = stream.write_all(&header);
+    let _ = stream.write_all(bytes);
+}

@@ -131,8 +131,12 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             }
             cli::WalletCommands::List => commands::wallet::list(),
             cli::WalletCommands::Info => commands::info::run(),
-            cli::WalletCommands::ChangePassword { wallet } => {
-                commands::wallet::change_password(&wallet)
+            cli::WalletCommands::ChangePassword { wallet, passphrase, new_passphrase } => {
+                commands::wallet::change_password(
+                    &wallet,
+                    passphrase.as_deref(),
+                    new_passphrase.as_deref(),
+                )
             }
         },
         Commands::Sign { subcommand } => match subcommand {
@@ -327,9 +331,39 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             cli::WcCommands::Connect { uri } => commands::wc::connect(&uri),
             cli::WcCommands::Sessions => commands::wc::sessions(),
             cli::WcCommands::Disconnect { topic } => commands::wc::disconnect(&topic),
+            cli::WcCommands::Relay { url, project_id } => {
+                commands::wc::relay_config(&url, project_id.as_deref())
+            }
+            cli::WcCommands::Probe { url, project_id, timeout } => {
+                commands::wc::probe(url.as_deref(), project_id.as_deref(), timeout)
+            }
+            cli::WcCommands::DappSend { topic, method, params, sym_key, url } => {
+                commands::wc::dapp_send(
+                    &topic,
+                    &method,
+                    &params,
+                    sym_key.as_deref(),
+                    url.as_deref(),
+                )
+            }
         },
         Commands::Webui { subcommand } => match subcommand {
             cli::WebUiCommands::Open => commands::webui::open(),
+            cli::WebUiCommands::Approval { subcommand } => match subcommand {
+                cli::ApprovalCommands::List => commands::webui::approval_list(),
+                cli::ApprovalCommands::Show { id } => commands::webui::approval_show(&id),
+                cli::ApprovalCommands::Approve { id, yes } => {
+                    commands::webui::approval_decision(&id, "approve", None, yes)
+                }
+                cli::ApprovalCommands::Reject { id, reason, yes } => {
+                    commands::webui::approval_decision(&id, "reject", reason.as_deref(), yes)
+                }
+            },
+            cli::WebUiCommands::Auth { subcommand } => match subcommand {
+                cli::AuthCommands::Status => commands::webui::auth_status(),
+                cli::AuthCommands::Lock => commands::webui::auth_lock(),
+                cli::AuthCommands::Bootstrap => commands::webui::auth_bootstrap(),
+            },
         },
         Commands::Intent { subcommand } => match subcommand {
             cli::IntentCommands::Submit { json, chain, session_key, sponsor, yes, rpc_url } => {
@@ -360,8 +394,8 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
                 let item_type = r#type.as_deref().map(commands::parse_item_type).transpose()?;
                 commands::secret::list(item_type, json)
             }
-            cli::SecretCommands::Get { name, field, json, qr } => {
-                commands::secret::get(&name, field.as_deref(), json, qr)
+            cli::SecretCommands::Get { name, field, json, qr, copy, timeout } => {
+                commands::secret::get(&name, field.as_deref(), json, qr, copy, timeout)
             }
             cli::SecretCommands::Add { name, r#type, meta, stdin } => {
                 let item_type = commands::parse_item_type(&r#type)?;

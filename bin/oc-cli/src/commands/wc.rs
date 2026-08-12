@@ -205,3 +205,305 @@ pub(crate) fn disconnect(topic: &str) -> Result<(), CliError> {
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Relay configuration & protocol diagnostics (non-interactive, test-friendly)
+// ---------------------------------------------------------------------------
+
+/// `onecipher wc relay <url> [--project-id <id>]`
+///
+/// Persists the WC v2 relay endpoint + optional project ID into
+/// `~/.onecipher/config.json` (keys `wc.relay_url`, `wc.project_id`) so the
+/// daemon, CLI dApp client, and generated pairing URIs all target the same
+/// relay. Local relays (e.g. `wss://127.0.0.1:7443`) can omit the project ID.
+pub(crate) fn relay_config(url: &str, project_id: Option<&str>) -> Result<(), CliError> {
+    // Validate the URL parses as a WebSocket URL.
+    let normalized = url.trim();
+    if !normalized.starts_with("wss://") && !normalized.starts_with("ws://") {
+        return Err(CliError::InvalidArgs(format!(
+            "invalid relay URL '{normalized}' (expected wss:// or ws://)"
+        )));
+    }
+
+    crate::commands::config::set("wc.relay_url", normalized)?;
+    if let Some(pid) = project_id {
+        if pid.trim().is_empty() {
+            return Err(CliError::InvalidArgs("--project-id cannot be empty".into()));
+        }
+        crate::commands::config::set("wc.project_id", pid.trim())?;
+    }
+    Ok(())
+}
+
+/// Resolve the effective relay URL + project ID from, in priority order:
+/// explicit override > config (`wc.relay_url` / `wc.project_id`) >
+/// `OC_WC_RELAY_URL` / `OC_WC_PROJECT_ID` env > built-in default.
+fn resolve_relay(
+    url_override: Option<&str>,
+    project_id_override: Option<&str>,
+) -> (String, Option<String>) {
+    let config = oc_core::Config::load_or_default();
+    let url = url_override
+        .map(String::from)
+        .or_else(|| std::env::var("OC_WC_RELAY_URL").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            if config.wc.relay_url.is_empty() { None } else { Some(config.wc.relay_url.clone()) }
+        })
+        .unwrap_or_else(|| "wss://relay.walletconnect.com".to_string());
+    let project_id = project_id_override
+        .map(String::from)
+        .or_else(|| std::env::var("OC_WC_PROJECT_ID").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            if config.wc.project_id.is_empty() { None } else { Some(config.wc.project_id.clone()) }
+        });
+    (url, project_id)
+}
+
+/// `onecipher wc probe [--url <wss>] [--project-id <id>] [--timeout N]`
+///
+/// Connects to the relay, subscribes to a fresh random topic, publishes a
+/// probe message (with an attestation if `OC_WC_ATTESTATION` is set), and
+/// waits for the relay's `irn_subscription` echo. Exits 0 on success, nonzero
+/// with a diagnostic on failure. This is the CLI-level connectivity check for
+/// WC v2 relay testing.
+pub(crate) fn probe(
+    url_override: Option<&str>,
+    project_id_override: Option<&str>,
+    timeout_secs: u64,
+) -> Result<(), CliError> {
+    let (base_url, project_id) = resolve_relay(url_override, project_id_override);
+    let url = oc_walletconnect::apply_project_id(&base_url, project_id.as_deref());
+
+    eprintln!("probing relay: {url}");
+
+    crate::shared_runtime().block_on(async {
+        let cfg = oc_walletconnect::RelayConfig { url: url.clone(), reconnect_max_ms: 60_000 };
+        let mut relay = oc_walletconnect::RelayClient::connect(cfg)
+            .await
+            .map_err(|e| CliError::InvalidArgs(format!("relay connect failed: {e}")))?;
+
+        let topic = hex::encode(rand::random::<[u8; 32]>());
+        let sub_id = relay_id_string();
+        let sub_msg = serde_json::json!({
+            "id": sub_id,
+            "jsonrpc": "2.0",
+            "method": "irn_subscribe",
+            "params": { "topic": topic }
+        });
+        relay
+            .send_text(serde_json::to_string(&sub_msg).map_err(CliError::Json)?)
+            .await
+            .map_err(|e| CliError::InvalidArgs(format!("subscribe failed: {e}")))?;
+        eprintln!("subscribed to topic {topic}");
+
+        // Publish a probe message (type-2 plaintext envelope).
+        let probe_payload =
+            serde_json::json!({ "probe": true, "ts": jiff::Timestamp::now().to_string() });
+        let probe_bytes = serde_json::to_vec(&probe_payload).map_err(CliError::Json)?;
+        let mut envelope = vec![oc_walletconnect::crypto::ENVELOPE_TYPE_2];
+        envelope.extend_from_slice(&probe_bytes);
+        let message_b64 = base64_std(&envelope);
+
+        let attestation = std::env::var("OC_WC_ATTESTATION").ok().filter(|s| !s.is_empty());
+        relay
+            .publish_irn(&relay_id_string(), &topic, &message_b64, 60, 1108, attestation.as_deref())
+            .await
+            .map_err(|e| CliError::InvalidArgs(format!("publish failed: {e}")))?;
+        eprintln!("published probe on {topic}");
+
+        // Wait for the echo.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs.max(1));
+        loop {
+            if std::time::Instant::now() > deadline {
+                return Err(CliError::InvalidArgs("timeout waiting for relay echo".into()));
+            }
+            let raw = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs.max(1)),
+                relay.recv(),
+            )
+            .await
+            .map_err(|_| CliError::InvalidArgs("timeout waiting for relay echo".into()))?
+            .map_err(|e| CliError::InvalidArgs(format!("relay recv: {e}")))?;
+
+            let val: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| CliError::InvalidArgs(format!("bad relay message: {e}")))?;
+            if val.get("method").and_then(|m| m.as_str()) != Some("irn_subscription") {
+                continue;
+            }
+            let echo_topic =
+                val.pointer("/params/data/topic").and_then(|t| t.as_str()).unwrap_or("");
+            let echo_msg =
+                val.pointer("/params/data/message").and_then(|m| m.as_str()).unwrap_or("");
+            if echo_topic == topic {
+                // Decode the type-2 envelope and verify the payload.
+                let echo_bytes = base64_decode(echo_msg)?;
+                if echo_bytes.first() == Some(&oc_walletconnect::crypto::ENVELOPE_TYPE_2) {
+                    let echo_json: serde_json::Value = serde_json::from_slice(&echo_bytes[1..])
+                        .map_err(|e| CliError::InvalidArgs(format!("bad echo payload: {e}")))?;
+                    println!("relay echo received on {echo_topic}: {echo_json}");
+                    println!("OK");
+                    return Ok(());
+                }
+                eprintln!("echo received but not a type-2 envelope");
+            }
+        }
+    })
+}
+
+/// `onecipher wc dapp-send <topic> <method> <params-json> [--sym-key <hex>] [--url <wss>]`
+///
+/// Acts as a WC v2 dApp: binds to the given session topic and sends a
+/// JSON-RPC request, printing the (decrypted) response. Useful for driving a
+/// running daemon's wallet server from the CLI (non-interactive testing).
+pub(crate) fn dapp_send(
+    topic: &str,
+    method: &str,
+    params_json: &str,
+    sym_key_hex: Option<&str>,
+    url_override: Option<&str>,
+) -> Result<(), CliError> {
+    let params: serde_json::Value = serde_json::from_str(params_json)
+        .map_err(|e| CliError::InvalidArgs(format!("invalid params JSON: {e}")))?;
+
+    // Resolve the session symKey: explicit flag > wc_dapp.json.
+    let sym_key_hex = if let Some(h) = sym_key_hex {
+        Some(h.to_string())
+    } else {
+        let dapp_path = data_dir()?.join("wc_dapp.json");
+        if dapp_path.exists() {
+            let data = fs::read_to_string(&dapp_path)?;
+            let pairing: StoredPairing = serde_json::from_str(&data)?;
+            (pairing.topic == topic && !pairing.sym_key.is_empty()).then_some(pairing.sym_key)
+        } else {
+            None
+        }
+    };
+    let sym_key_hex = sym_key_hex
+        .ok_or_else(|| CliError::InvalidArgs("no sym key for topic (pass --sym-key)".into()))?;
+    let sym_bytes = hex::decode(sym_key_hex.strip_prefix("0x").unwrap_or(&sym_key_hex))
+        .map_err(|e| CliError::InvalidArgs(format!("invalid sym-key hex: {e}")))?;
+    if sym_bytes.len() != 32 {
+        return Err(CliError::InvalidArgs("sym-key must be 32 bytes (64 hex chars)".into()));
+    }
+    let mut sym_arr = [0u8; 32];
+    sym_arr.copy_from_slice(&sym_bytes);
+    let sym_key = oc_walletconnect::WcSymKey::from_bytes(sym_arr);
+
+    let (base_url, project_id) = resolve_relay(url_override, None);
+    let url = oc_walletconnect::apply_project_id(&base_url, project_id.as_deref());
+
+    crate::shared_runtime().block_on(async {
+        let cfg = oc_walletconnect::RelayConfig { url, reconnect_max_ms: 60_000 };
+        let mut relay = oc_walletconnect::RelayClient::connect(cfg)
+            .await
+            .map_err(|e| CliError::InvalidArgs(format!("relay connect failed: {e}")))?;
+
+        let sub_msg = serde_json::json!({
+            "id": relay_id_string(),
+            "jsonrpc": "2.0",
+            "method": "irn_subscribe",
+            "params": { "topic": topic }
+        });
+        relay
+            .send_text(serde_json::to_string(&sub_msg).map_err(CliError::Json)?)
+            .await
+            .map_err(|e| CliError::InvalidArgs(format!("subscribe failed: {e}")))?;
+
+        let id: i64 = i64::from(rand::random::<u32>());
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": id
+        });
+        let req_bytes = serde_json::to_vec(&req).map_err(CliError::Json)?;
+        let envelope = oc_walletconnect::WcCipher::seal_type0(&sym_key, &req_bytes)
+            .map_err(|e| CliError::InvalidArgs(format!("encrypt failed: {e}")))?;
+
+        let attestation = std::env::var("OC_WC_ATTESTATION").ok().filter(|s| !s.is_empty());
+        relay
+            .publish_irn(
+                &relay_id_string(),
+                topic,
+                &base64_std(&envelope),
+                300,
+                1108,
+                attestation.as_deref(),
+            )
+            .await
+            .map_err(|e| CliError::InvalidArgs(format!("publish failed: {e}")))?;
+
+        // Wait for the encrypted response.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if std::time::Instant::now() > deadline {
+                return Err(CliError::InvalidArgs("timeout waiting for response".into()));
+            }
+            let raw = relay
+                .recv()
+                .await
+                .map_err(|e| CliError::InvalidArgs(format!("relay recv: {e}")))?;
+            let val: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| CliError::InvalidArgs(format!("bad relay message: {e}")))?;
+            if val.get("method").and_then(|m| m.as_str()) != Some("irn_subscription") {
+                continue;
+            }
+            let echo_topic =
+                val.pointer("/params/data/topic").and_then(|t| t.as_str()).unwrap_or("");
+            let echo_msg =
+                val.pointer("/params/data/message").and_then(|m| m.as_str()).unwrap_or("");
+            if echo_topic != topic {
+                continue;
+            }
+            let env_bytes = base64_decode(echo_msg)?;
+            if env_bytes.first() != Some(&oc_walletconnect::crypto::ENVELOPE_TYPE_0) &&
+                env_bytes.first() != Some(&oc_walletconnect::crypto::ENVELOPE_TYPE_1)
+            {
+                continue;
+            }
+            let plaintext = match env_bytes[0] {
+                oc_walletconnect::crypto::ENVELOPE_TYPE_0 => {
+                    oc_walletconnect::WcCipher::open_type0(&sym_key, &env_bytes)
+                }
+                oc_walletconnect::crypto::ENVELOPE_TYPE_1 => {
+                    oc_walletconnect::WcCipher::open_type1(&sym_key, &env_bytes).map(|(_, p)| p)
+                }
+                _ => continue,
+            }
+            .map_err(|e| CliError::InvalidArgs(format!("decrypt failed: {e}")))?;
+
+            let resp: serde_json::Value = serde_json::from_slice(&plaintext)
+                .map_err(|e| CliError::InvalidArgs(format!("bad response JSON: {e}")))?;
+            if resp.get("id").and_then(|v| v.as_i64()) != Some(id) {
+                continue;
+            }
+            println!("{}", serde_json::to_string_pretty(&resp).map_err(CliError::Json)?);
+            return Ok(());
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn relay_id_string() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let millis = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64);
+    let entropy = u64::from(rand::random::<u16>());
+    let id = (millis << 20) | (entropy & 0xFFFFF);
+    format!("{id:019}")
+}
+
+fn base64_std(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, CliError> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .map_err(|e| CliError::InvalidArgs(format!("invalid base64: {e}")))
+}

@@ -21,7 +21,10 @@ pub fn generate_pairing_uri(ttl_secs: u64) -> (PairingUri, WcSession) {
 
     let sym_key = hex::encode(rand::random::<[u8; 32]>());
 
-    let uri = PairingUri::new(topic.clone(), sym_key.clone());
+    let mut uri = PairingUri::new(topic.clone(), sym_key.clone());
+    // Propagate the configured project ID into the pairing URI so the peer can
+    // reach the same relay. Optional; local relays may omit it.
+    uri.project_id = std::env::var("OC_WC_PROJECT_ID").ok();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());

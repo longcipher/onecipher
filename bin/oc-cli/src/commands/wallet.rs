@@ -39,36 +39,64 @@ pub(crate) fn create(name: &str, words: u32, show_mnemonic: bool) -> Result<(), 
     Ok(())
 }
 
-pub(crate) fn change_password(wallet_name: &str) -> Result<(), CliError> {
-    if !std::io::stdin().is_terminal() {
+pub(crate) fn change_password(
+    wallet_name: &str,
+    old_pass_flag: Option<&str>,
+    new_pass_flag: Option<&str>,
+) -> Result<(), CliError> {
+    let is_tty = std::io::stdin().is_terminal();
+
+    // Non-interactive mode: both old and new passphrases must be supplied via
+    // flags or env vars. Interactive mode: prompt for both.
+    let old_pass = if let Some(p) = old_pass_flag {
+        p.to_string()
+    } else if let Some(p) = super::peek_passphrase() {
+        // ONECIPHER_PASSPHRASE supplies the current passphrase.
+        p
+    } else if is_tty {
+        eprint!("Current passphrase (empty for none): ");
+        std::io::stderr().flush().ok();
+        rpassword::read_password().unwrap_or_default()
+    } else {
         return Err(CliError::InvalidArgs(
-            "wallet change-password requires an interactive terminal".into(),
+            "wallet change-password requires an interactive terminal, or provide \
+             --passphrase and --new-passphrase (or set ONECIPHER_PASSPHRASE / \
+             ONECIPHER_NEW_PASSPHRASE)"
+                .into(),
         ));
-    }
+    };
 
     // Load the wallet
     let wallet = oc_wallet::get_wallet(wallet_name, None)?;
-
-    // Read current passphrase
-    eprint!("Current passphrase (empty for none): ");
-    std::io::stderr().flush().ok();
-    let old_pass = rpassword::read_password().unwrap_or_default();
 
     // Verify by attempting to export
     let _ = oc_wallet::export_wallet(wallet_name, Some(&old_pass), None)
         .map_err(|_| CliError::InvalidArgs("incorrect current passphrase".into()))?;
 
     // Read new passphrase
-    eprint!("New passphrase (empty for none): ");
-    std::io::stderr().flush().ok();
-    let new_pass = rpassword::read_password().unwrap_or_default();
+    let new_pass = if let Some(p) = new_pass_flag {
+        p.to_string()
+    } else if let Some(p) = oc_signer::process_hardening::clear_env_var("ONECIPHER_NEW_PASSPHRASE")
+    {
+        p
+    } else if is_tty {
+        eprint!("New passphrase (empty for none): ");
+        std::io::stderr().flush().ok();
+        rpassword::read_password().unwrap_or_default()
+    } else {
+        return Err(CliError::InvalidArgs(
+            "new passphrase missing — provide --new-passphrase or set ONECIPHER_NEW_PASSPHRASE"
+                .into(),
+        ));
+    };
 
-    eprint!("Confirm new passphrase: ");
-    std::io::stderr().flush().ok();
-    let confirm_pass = rpassword::read_password().unwrap_or_default();
-
-    if new_pass != confirm_pass {
-        return Err(CliError::InvalidArgs("passphrases do not match".into()));
+    if is_tty && new_pass_flag.is_none() {
+        eprint!("Confirm new passphrase: ");
+        std::io::stderr().flush().ok();
+        let confirm_pass = rpassword::read_password().unwrap_or_default();
+        if new_pass != confirm_pass {
+            return Err(CliError::InvalidArgs("passphrases do not match".into()));
+        }
     }
 
     if old_pass == new_pass {
@@ -99,9 +127,14 @@ pub(crate) fn export_public_key(
     chain: Option<&str>,
     compressed: bool,
 ) -> Result<(), CliError> {
-    if !std::io::stdin().is_terminal() {
+    // Non-interactive support: with ONECIPHER_PASSPHRASE set (or an empty
+    // passphrase wallet) no terminal is required.
+    let has_env_passphrase = super::peek_passphrase().is_some();
+    if !std::io::stdin().is_terminal() && !has_env_passphrase {
         return Err(CliError::InvalidArgs(
-            "wallet export --public-key requires an interactive terminal".into(),
+            "wallet export --public-key requires an interactive terminal, or set \
+             ONECIPHER_PASSPHRASE"
+                .into(),
         ));
     }
 
@@ -291,9 +324,15 @@ pub(crate) fn import(
 }
 
 pub(crate) fn export(wallet_name: &str) -> Result<(), CliError> {
-    if !std::io::stdin().is_terminal() {
+    // Non-interactive support: when ONECIPHER_PASSPHRASE is set we can export
+    // without a terminal. Otherwise an interactive terminal is required to
+    // prompt for the passphrase.
+    let has_env_passphrase = super::peek_passphrase().is_some();
+    if !std::io::stdin().is_terminal() && !has_env_passphrase {
         return Err(CliError::InvalidArgs(
-            "wallet export requires an interactive terminal (do not pipe stdin)".into(),
+            "wallet export requires an interactive terminal, or set ONECIPHER_PASSPHRASE \
+             (do not pipe stdin without a passphrase)"
+                .into(),
         ));
     }
 
