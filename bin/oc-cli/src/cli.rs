@@ -139,6 +139,11 @@ pub(crate) enum Commands {
     },
     /// Show Key-Agent / Network-Agent status (LOCAL — no RPC)
     Status,
+    /// Manage the onecipher daemon as a systemd user service (LOCAL)
+    Service {
+        #[command(subcommand)]
+        subcommand: ServiceCommands,
+    },
     /// Vault operations (LOCAL)
     Vault {
         #[command(subcommand)]
@@ -382,6 +387,18 @@ pub(crate) enum OcPayCommands {
 pub(crate) enum VaultCommands {
     /// Unlock the vault (prompts for passphrase)
     Unlock,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum ServiceCommands {
+    /// Install the daemon as a systemd user service (writes
+    /// `~/.config/systemd/user/onecipher.service` and enables it)
+    Install,
+    /// Stop, disable and remove the systemd user service
+    Uninstall,
+    /// Show whether the service unit file exists and (best-effort) the
+    /// `systemctl --user status` output
+    Status,
 }
 
 #[derive(Subcommand)]

@@ -82,6 +82,23 @@ pub fn ApprovalDetail() -> impl IntoView {
                         let approval_id = a.id.clone();
                         let sim = a.simulation.clone();
                         let params_hex = a.params.clone();
+                        // Auth-class requests carry a human-readable `message`
+                        // param — render it in a monospace block instead of
+                        // dumping the raw JSON.
+                        let is_auth_method = matches!(
+                            a.method.as_str(),
+                            "onecipher_signAuth" | "wc_authRequest"
+                        );
+                        let auth_message = if is_auth_method {
+                            a.params
+                                .as_deref()
+                                .and_then(|p| serde_json::from_str::<serde_json::Value>(p).ok())
+                                .and_then(|v| {
+                                    v.get("message").and_then(serde_json::Value::as_str).map(String::from)
+                                })
+                        } else {
+                            None
+                        };
                         let on_decided = Callback::new(move |msg: String| {
                             decision_result.set(Some(msg));
                         });
@@ -106,12 +123,27 @@ pub fn ApprovalDetail() -> impl IntoView {
                                         {a.risk_level.clone()}
                                     </span>
                                 </div>
-                                <div style="margin-bottom:0.5rem;">
-                                    <strong>"Params: "</strong>
-                                    <pre style="background:#111827;padding:0.75rem;border-radius:4px;overflow-x:auto;font-size:0.8rem;white-space:pre-wrap;">
-                                        {params_display}
-                                    </pre>
-                                </div>
+                                {if let Some(msg) = auth_message {
+                                    // Human-readable message for auth-class
+                                    // methods (onecipher_signAuth / wc_authRequest).
+                                    view! {
+                                        <div style="margin-bottom:0.5rem;">
+                                            <strong>"Message: "</strong>
+                                            <pre style="background:#111827;padding:0.75rem;border-radius:4px;overflow-x:auto;font-size:0.8rem;white-space:pre-wrap;margin-top:0.25rem;">
+                                                {msg}
+                                            </pre>
+                                        </div>
+                                    }.into_any()
+                                } else {
+                                    view! {
+                                        <div style="margin-bottom:0.5rem;">
+                                            <strong>"Params: "</strong>
+                                            <pre style="background:#111827;padding:0.75rem;border-radius:4px;overflow-x:auto;font-size:0.8rem;white-space:pre-wrap;">
+                                                {params_display}
+                                            </pre>
+                                        </div>
+                                    }.into_any()
+                                }}
 
                                 // Simulation panel
                                 <SimPanel simulation=sim params_hex=params_hex />

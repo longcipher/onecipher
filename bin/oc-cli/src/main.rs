@@ -315,6 +315,11 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             }
         },
         Commands::Status => commands::status::run(),
+        Commands::Service { subcommand } => match subcommand {
+            cli::ServiceCommands::Install => commands::service::install(),
+            cli::ServiceCommands::Uninstall => commands::service::uninstall(),
+            cli::ServiceCommands::Status => commands::service::status(),
+        },
         Commands::Vault { subcommand } => match subcommand {
             cli::VaultCommands::Unlock => commands::vault::unlock(),
         },
@@ -604,7 +609,16 @@ fn run_daemon() -> Result<(), CliError> {
     // Approval channel shared between the WC method router (sender) and the
     // Web UI queue (receiver). Created unconditionally so the daemon can wire
     // it into the router even when the Web UI feature is compiled out.
-    let (approval_tx, approval_rx) = tokio::sync::mpsc::channel(64);
+    let (approval_tx, approval_rx): (
+        tokio::sync::mpsc::Sender<(
+            oc_core::approval::PendingApproval,
+            tokio::sync::oneshot::Sender<oc_core::approval::ApprovalDecision>,
+        )>,
+        tokio::sync::mpsc::Receiver<(
+            oc_core::approval::PendingApproval,
+            tokio::sync::oneshot::Sender<oc_core::approval::ApprovalDecision>,
+        )>,
+    ) = tokio::sync::mpsc::channel(64);
 
     rt.block_on(async {
         // Bind control socket (tokio UDS, mode 0600)
@@ -627,11 +641,14 @@ fn run_daemon() -> Result<(), CliError> {
         // enabled, the approval channel is wired into the router so signing
         // requests are gated by the browser approval flow.
         let wc_task = tokio::spawn(async move {
+            // dApp origin allowlist for wc_sessionPropose (deny-all by default).
+            let trusted_origins = oc_core::Config::load_or_default().wc.trusted_origins;
             #[cfg(feature = "webui")]
             let result = oc_netagent::run_server_controlled_with_approvals(
                 &ka_sock_for_wc,
                 &relay_url,
                 &state_dir_str,
+                trusted_origins,
                 pairing_rx,
                 Some(approval_tx),
                 None,
@@ -642,6 +659,7 @@ fn run_daemon() -> Result<(), CliError> {
                 &ka_sock_for_wc,
                 &relay_url,
                 &state_dir_str,
+                trusted_origins,
                 pairing_rx,
             )
             .await;
@@ -703,6 +721,7 @@ fn run_daemon() -> Result<(), CliError> {
                     &config.webui,
                     state_dir.clone(),
                     approval_rx,
+                    pairing_tx,
                     dual_register,
                 )
                 .await

@@ -1162,6 +1162,77 @@ fn test_config_show_and_set() {
 }
 
 // -----------------------------------------------------------------------
+// 52b. `config set wc.trusted_origins` accepts a JSON array and round-trips
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_config_set_trusted_origins_json_array() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "config", "set", "wc.trusted_origins", r#"["iam.example.com","x.com"]"#]);
+
+    let config = oc_core::Config::load_or_default();
+    assert_eq!(config.wc.trusted_origins, vec!["iam.example.com", "x.com"]);
+
+    // Non-array / non-string values are rejected.
+    let res = run_cli(&["onecipher", "config", "set", "wc.trusted_origins", "iam.example.com"]);
+    assert!(res.is_err(), "a bare string must be rejected");
+    let res = run_cli(&["onecipher", "config", "set", "wc.trusted_origins", "[1,2]"]);
+    assert!(res.is_err(), "non-string array entries must be rejected");
+}
+
+// -----------------------------------------------------------------------
+// 52c. systemd user service: install writes the unit file, status reports it,
+//      uninstall removes it (systemctl best-effort)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_service_install_status_uninstall() {
+    let _home = HomeGuard::new();
+    let unit = _home.path().join(".config/systemd/user/onecipher.service");
+
+    run_ok(&["onecipher", "service", "status"]);
+    assert!(!unit.exists(), "status must not create the unit file");
+
+    run_ok(&["onecipher", "service", "install"]);
+    assert!(unit.exists(), "install must write the unit file");
+
+    let contents = std::fs::read_to_string(&unit).unwrap_or_default();
+    assert!(contents.contains("ExecStart="), "unit must carry ExecStart");
+    assert!(contents.contains("--daemon"), "unit must run the daemon");
+    assert!(contents.contains("Restart=on-failure"), "unit must set Restart=on-failure");
+    assert!(contents.contains("RestartSec=2"), "unit must set RestartSec=2");
+    assert!(
+        contents.contains("WantedBy=default.target"),
+        "unit must be enabled for the default target"
+    );
+
+    run_ok(&["onecipher", "service", "status"]);
+
+    run_ok(&["onecipher", "service", "uninstall"]);
+    assert!(!unit.exists(), "uninstall must remove the unit file");
+}
+
+// -----------------------------------------------------------------------
+// 52d. `service` subcommands parse (arg-parse level)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_service_subcommands_parse() {
+    assert!(matches!(
+        Cli::parse_from(["onecipher", "service", "install"]).command,
+        Some(Commands::Service { subcommand: crate::cli::ServiceCommands::Install })
+    ));
+    assert!(matches!(
+        Cli::parse_from(["onecipher", "service", "uninstall"]).command,
+        Some(Commands::Service { subcommand: crate::cli::ServiceCommands::Uninstall })
+    ));
+    assert!(matches!(
+        Cli::parse_from(["onecipher", "service", "status"]).command,
+        Some(Commands::Service { subcommand: crate::cli::ServiceCommands::Status })
+    ));
+}
+
+// -----------------------------------------------------------------------
 // 53. status / info / doctor / completion / fsck / grep / find / migrate run
 // -----------------------------------------------------------------------
 

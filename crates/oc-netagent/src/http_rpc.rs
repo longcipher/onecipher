@@ -167,9 +167,9 @@ async fn handle_rpc(State(router): State<Arc<WcMethodRouter>>, body: String) -> 
     }
 
     // Everything else goes through the WC method router translation layer
-    // (empty session topic — the router ignores it for local dispatch).
+    // (empty session topic + no dApp metadata — local dispatch has none).
     let params = req.params.unwrap_or_else(|| Value::Object(Default::default()));
-    match router.handle(&method, params, "").await {
+    match router.handle(&method, params, "", None, None).await {
         Ok(result) => success_response(id, result),
         Err((code, message)) => error_response(id, code as i64, &message),
     }

@@ -175,6 +175,7 @@ mod linux {
     const BPF_ABS: u16 = 0x20;
     const BPF_JMP: u16 = 0x05;
     const BPF_JEQ: u16 = 0x10;
+    const BPF_JA: u16 = 0x00;
     const BPF_K: u16 = 0x00;
     const BPF_RET: u16 = 0x06;
 
@@ -253,7 +254,7 @@ mod linux {
     /// Also disables ptrace attach by non-root processes (a side effect of
     /// `PR_SET_DUMPABLE = 0`). Fully designed and implemented in accordance with the Open Wallet
     /// Standard's `ows-signer/src/process_hardening.rs` per R77.
-    pub(super) fn disable_coredump() -> Result<(), KeyAgentError> {
+    pub fn disable_coredump() -> Result<(), KeyAgentError> {
         // SAFETY: `prctl(PR_SET_DUMPABLE, 0, 0, 0, 0)` is a documented Linux
         // syscall with no memory-safety implications. The first arg is a
         // constant, the rest are 0.
@@ -269,7 +270,7 @@ mod linux {
 
     /// Anti-ptrace: same as `disable_coredump` (a non-dumpable process cannot
     /// be ptraced by non-root).
-    pub(super) fn anti_ptrace() -> Result<(), KeyAgentError> {
+    pub fn anti_ptrace() -> Result<(), KeyAgentError> {
         disable_coredump()
     }
 
@@ -287,7 +288,7 @@ mod linux {
     /// before it could even log). The R12 hard gate is additionally enforced
     /// at the binary-symbol level (`rg` source scan) and runtime syscall trace
     /// (`strace -e trace=network`, R57).
-    pub(super) fn apply_seccomp() -> Result<(), KeyAgentError> {
+    pub fn apply_seccomp() -> Result<(), KeyAgentError> {
         // Step 1: PR_SET_NO_NEW_PRIVS.
         // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)` takes integer
         // constant arguments and a well-known syscall number. It does not
@@ -315,8 +316,8 @@ mod linux {
         let rc = unsafe {
             libc::prctl(
                 PR_SET_SECCOMP,
-                SECCOMP_MODE_FILTER as libc::c_ulong,
-                &prog as *const sock_fprog as libc::c_ulong,
+                u64::from(SECCOMP_MODE_FILTER),
+                &raw const prog as libc::c_ulong,
                 0,
                 0,
             )
@@ -363,10 +364,10 @@ mod linux {
     /// trace (`strace -e trace=network`, R57) and the source-level scan
     /// (`rg TcpListener|TcpStream`, R12a).
     fn build_bpf_program() -> Vec<sock_filter> {
-        let mut p: Vec<sock_filter> = Vec::new();
+        let mut p: Vec<sock_filter> = Vec::with_capacity(40);
 
         // 0: load syscall number.
-        p.push(sock_filter { code: BPF_LD | BPF_W | BPF_ABS, jt: 0, jf: 0, k: OFF_NR as u32 });
+        p.push(sock_filter { code: BPF_LD | BPF_W | BPF_ABS, jt: 0, jf: 0, k: u32::from(OFF_NR) });
         // 1: route socket() to the domain gate (skip instructions 2-3).
         p.push(sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 2, jf: 0, k: SYS_SOCKET });
         // 2: route socketpair() to the domain gate (skip instruction 3).
@@ -374,7 +375,12 @@ mod linux {
         // 3: non-socket syscall → jump to 8 (allowlist reload).
         p.push(sock_filter { code: BPF_JMP | BPF_JA, jt: 0, jf: 0, k: 4 });
         // 4: domain gate: A = args[0].
-        p.push(sock_filter { code: BPF_LD | BPF_W | BPF_ABS, jt: 0, jf: 0, k: OFF_ARG0 as u32 });
+        p.push(sock_filter {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: u32::from(OFF_ARG0),
+        });
         // 5: AF_UNIX → 7 (ALLOW), else 6 (KILL).
         p.push(sock_filter { code: BPF_JMP | BPF_JEQ | BPF_K, jt: 1, jf: 0, k: AF_UNIX });
         // 6: kill on non-UDS socket domain.
@@ -382,7 +388,7 @@ mod linux {
         // 7: UDS socket/socketpair allowed.
         p.push(sock_filter { code: BPF_RET | BPF_K, jt: 0, jf: 0, k: SECCOMP_RET_ALLOW });
         // 8: allowlist — reload nr.
-        p.push(sock_filter { code: BPF_LD | BPF_W | BPF_ABS, jt: 0, jf: 0, k: OFF_NR as u32 });
+        p.push(sock_filter { code: BPF_LD | BPF_W | BPF_ABS, jt: 0, jf: 0, k: u32::from(OFF_NR) });
 
         // Unconditional allowlist: each `JEQ <nr> jt=0 jf=1` on match falls to
         // the immediately following `RET ALLOW`; on no-match it skips that
@@ -417,14 +423,22 @@ mod linux {
     /// Drop all Linux capabilities except `CAP_IPC_LOCK` (needed for `mlock`
     /// per R53).
     ///
-    /// Implementation: use the `capset` syscall with a bitmask that has only
-    /// `CAP_IPC_LOCK` set. We bypass the `caps` crate (YAGNI — ponytail step
+    /// Implementation: use `capget` to read the process's current capability
+    /// sets, intersect every set with the `CAP_IPC_LOCK` bitmask, then `capset`
+    /// the result. `capset` can only *reduce* capabilities — it can never
+    /// grant one the process does not already hold, so writing the full
+    /// `CAP_IPC_LOCK` mask unconditionally fails with EPERM in unprivileged
+    /// contexts (tests, CI runners). Intersecting with the current sets keeps
+    /// `CAP_IPC_LOCK` when it is genuinely held (privileged daemon) and
+    /// degrades to "drop everything" otherwise — which is exactly the R53 end
+    /// state in both cases. We bypass the `caps` crate (YAGNI — ponytail step
     /// 3, native libc + direct syscall).
     ///
-    /// `capset` takes two `cap_user_*_t` headers: one for the "effective"
-    /// set (what the process can do right now) and one for the "permitted"
-    /// set (what it can escalate to). We set both to just `CAP_IPC_LOCK`.
-    pub(super) fn drop_capabilities_except_ipc_lock() -> Result<(), KeyAgentError> {
+    /// `capget`/`capset` take two `cap_user_*_t` headers: one for the
+    /// "effective" set (what the process can do right now) and one for the
+    /// "permitted" set (what it can escalate to). We set both to just
+    /// `CAP_IPC_LOCK` when it is held.
+    pub fn drop_capabilities_except_ipc_lock() -> Result<(), KeyAgentError> {
         // `__user_cap_header_struct`: { __u32 version; int pid; }
         #[repr(C)]
         struct cap_user_header {
@@ -434,6 +448,7 @@ mod linux {
 
         // `__user_cap_data_struct`: { __u32 effective; __u32 permitted; __u32 inheritable; }
         #[repr(C)]
+        #[derive(Clone, Copy)]
         struct cap_user_data {
             effective: u32,
             permitted: u32,
@@ -442,7 +457,8 @@ mod linux {
 
         // `LINUX_CAPABILITY_VERSION_3` = 0x20080522 (current since 2.6.26).
         const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-        // `capset` syscall number on x86_64 = 126.
+        // `capget` syscall number on x86_64 = 125, `capset` = 126.
+        const SYS_CAPGET: libc::c_long = 125;
         const SYS_CAPSET: libc::c_long = 126;
 
         // Bitmask with only CAP_IPC_LOCK (bit 14) set.
@@ -454,21 +470,37 @@ mod linux {
         };
         // Version 3 uses an array of TWO `cap_user_data` structs (to cover
         // capabilities 0-63). We set CAP_IPC_LOCK (bit 14) in the first one.
-        let data = [
-            cap_user_data { effective: cap_mask, permitted: cap_mask, inheritable: cap_mask },
+        let mut data = [
+            cap_user_data { effective: 0, permitted: 0, inheritable: 0 },
             cap_user_data { effective: 0, permitted: 0, inheritable: 0 },
         ];
+
+        // SAFETY: `syscall(SYS_CAPGET, &hdr, &mut data)` is a documented Linux
+        // syscall. `hdr` and `data` are stack-allocated and properly aligned.
+        // The kernel writes the current capability sets into `data` during the
+        // call; it does not retain the pointers.
+        let rc = unsafe { libc::syscall(SYS_CAPGET, &raw const hdr, data.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(KeyAgentError::Sandbox(format!(
+                "capget failed: rc={rc} errno={}",
+                std::io::Error::last_os_error()
+            )));
+        }
+
+        // capset can only shrink the sets — intersect with the CAP_IPC_LOCK
+        // mask so we keep it only if already held, never gain it. Zero the
+        // high (second) word entirely.
+        data[0].effective &= cap_mask;
+        data[0].permitted &= cap_mask;
+        data[0].inheritable &= cap_mask;
+        data[1].effective = 0;
+        data[1].permitted = 0;
+        data[1].inheritable = 0;
 
         // SAFETY: `syscall(SYS_CAPSET, &hdr, &data)` is a documented Linux
         // syscall. `hdr` and `data` are stack-allocated and properly aligned.
         // The kernel reads from them; it does not retain the pointers.
-        let rc = unsafe {
-            libc::syscall(
-                SYS_CAPSET,
-                &hdr as *const cap_user_header,
-                data.as_ptr() as *const cap_user_data,
-            )
-        };
+        let rc = unsafe { libc::syscall(SYS_CAPSET, &raw const hdr, data.as_ptr()) };
         if rc != 0 {
             return Err(KeyAgentError::Sandbox(format!(
                 "capset(CAP_IPC_LOCK) failed: rc={rc} errno={}",

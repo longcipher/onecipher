@@ -11,6 +11,14 @@ pub const SESSION_PING: &str = "wc_sessionPing";
 pub const SESSION_UPDATE: &str = "wc_sessionUpdate";
 pub const SESSION_EVENT: &str = "wc_sessionEvent";
 
+/// WalletConnect v2 Auth protocol request (one-time sign-in, no session).
+///
+/// Published by a dApp on a **pairing** topic; the wallet responds with a
+/// signature over an EIP-4361 (SIWE) message. See [`crate::auth`].
+pub const AUTH_REQUEST: &str = "wc_authRequest";
+/// WalletConnect v2 Auth protocol response method (dApp → wallet completion).
+pub const AUTH_RESPONSE: &str = "wc_authResponse";
+
 pub const PERSONAL_SIGN: &str = "personal_sign";
 pub const ETH_SIGN: &str = "eth_sign";
 pub const ETH_SIGN_TYPED_DATA: &str = "eth_signTypedData";

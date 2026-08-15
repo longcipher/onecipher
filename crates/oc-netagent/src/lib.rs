@@ -51,6 +51,21 @@ pub use wc_session_store::{SessionStore, SessionStoreError};
 /// Default pairing TTL: 24 hours (in seconds).
 pub const DEFAULT_PAIRING_TTL: u64 = 86_400;
 
+/// Build the [`oc_walletconnect::WcWalletConfig`] shared by every WC v2
+/// server entry point. Centralizes the relay protocol + origin-allowlist
+/// wiring so the daemon's `wc.trusted_origins` config always reaches the
+/// wallet server.
+pub(crate) fn wc_wallet_config(
+    relay_url: &str,
+    trusted_origins: Vec<String>,
+) -> oc_walletconnect::WcWalletConfig {
+    oc_walletconnect::WcWalletConfig {
+        relay_url: relay_url.to_string(),
+        relay_protocol: "irn".into(),
+        trusted_origins,
+    }
+}
+
 /// Run the WC v2 wallet-role server. Blocks until shutdown.
 ///
 /// `key_agent_sock` is the UDS path to the Key-Agent.
@@ -64,11 +79,7 @@ pub async fn run_server(
     let router = WcMethodRouter::new(key_agent);
     let store = SessionStore::open(state_dir)?;
 
-    let cfg = oc_walletconnect::WcWalletConfig {
-        relay_url: relay_url.to_string(),
-        relay_protocol: "irn".into(),
-        trusted_origins: vec![],
-    };
+    let cfg = wc_wallet_config(relay_url, vec![]);
 
     let mut server = oc_walletconnect::WcWalletServer::new(cfg, router);
 
@@ -99,17 +110,21 @@ pub async fn run_server(
 /// - `key_agent_sock` — UDS path to the Key-Agent.
 /// - `relay_url` — WC v2 relay WSS URL.
 /// - `state_dir` — Directory for `wc_sessions.json` persistence.
+/// - `trusted_origins` — dApp origin allowlist for `wc_sessionPropose` (empty list = deny all
+///   proposals).
 /// - `pairing_rx` — Channel receiver for pairing URIs to inject at runtime.
 pub async fn run_server_controlled(
     key_agent_sock: &str,
     relay_url: &str,
     state_dir: &str,
+    trusted_origins: Vec<String>,
     pairing_rx: tokio::sync::mpsc::Receiver<oc_walletconnect::PairingUri>,
 ) -> Result<(), NetAgentError> {
     run_server_controlled_with_approvals(
         key_agent_sock,
         relay_url,
         state_dir,
+        trusted_origins,
         pairing_rx,
         None,
         None,
@@ -125,10 +140,12 @@ pub async fn run_server_controlled(
 /// `approval_log` (if provided) persists pending/resolved approvals for
 /// daemon-restart recovery. The plain [`run_server_controlled`] is a thin
 /// wrapper passing `None` for both.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_server_controlled_with_approvals(
     key_agent_sock: &str,
     relay_url: &str,
     state_dir: &str,
+    trusted_origins: Vec<String>,
     mut pairing_rx: tokio::sync::mpsc::Receiver<oc_walletconnect::PairingUri>,
     approvals: Option<
         tokio::sync::mpsc::Sender<(
@@ -139,6 +156,10 @@ pub async fn run_server_controlled_with_approvals(
     approval_log: Option<std::sync::Arc<oc_core::approval_log::ApprovalLog>>,
 ) -> Result<(), NetAgentError> {
     let key_agent = KeyAgentClient::new(key_agent_sock);
+    // Shared WC session table: handed to BOTH the method router (so the
+    // approval gate can resolve dApp name/origin) and the wallet server.
+    let sessions: std::sync::Arc<tokio::sync::Mutex<oc_walletconnect::WcSessionTable>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(oc_walletconnect::WcSessionTable::new()));
     let router = match approvals {
         Some(tx) => {
             let (channel, mut rx) = ApprovalChannel::new(64);
@@ -158,18 +179,15 @@ pub async fn run_server_controlled_with_approvals(
                 std::time::Duration::from_secs(300),
                 approval_log,
             )
+            .with_sessions(std::sync::Arc::clone(&sessions))
         }
-        None => WcMethodRouter::new(key_agent),
+        None => WcMethodRouter::new(key_agent).with_sessions(std::sync::Arc::clone(&sessions)),
     };
     let store = SessionStore::open(state_dir)?;
 
-    let cfg = oc_walletconnect::WcWalletConfig {
-        relay_url: relay_url.to_string(),
-        relay_protocol: "irn".into(),
-        trusted_origins: vec![],
-    };
+    let cfg = wc_wallet_config(relay_url, trusted_origins);
 
-    let mut server = oc_walletconnect::WcWalletServer::new(cfg, router);
+    let mut server = oc_walletconnect::WcWalletServer::with_session_table(cfg, router, sessions);
     let handle = server.session_handle();
 
     // Restore persisted sessions before starting the run loop.
@@ -204,4 +222,30 @@ pub async fn run_server_controlled_with_approvals(
     server_task.abort();
     tracing::info!("WC v2 server controlled loop ended");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The daemon's `wc.trusted_origins` config must reach the
+    /// [`oc_walletconnect::WcWalletConfig`] handed to the wallet server.
+    #[test]
+    fn trusted_origins_plumb_into_wc_wallet_config() {
+        let cfg = wc_wallet_config(
+            "wss://relay.walletconnect.com",
+            vec!["iam.example.com".to_string(), "app.uniswap.org".to_string()],
+        );
+        assert_eq!(cfg.relay_url, "wss://relay.walletconnect.com");
+        assert_eq!(cfg.relay_protocol, "irn");
+        assert_eq!(cfg.trusted_origins, vec!["iam.example.com", "app.uniswap.org"]);
+    }
+
+    /// An empty allowlist (the default) is forwarded as-is so the wallet
+    /// server keeps its deny-all behavior.
+    #[test]
+    fn empty_trusted_origins_reach_wc_wallet_config() {
+        let cfg = wc_wallet_config("wss://relay.walletconnect.com", vec![]);
+        assert!(cfg.trusted_origins.is_empty());
+    }
 }

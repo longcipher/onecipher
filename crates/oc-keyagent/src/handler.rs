@@ -100,18 +100,30 @@ fn load_chain_key(
     let chain = oc_core::parse_chain(chain_id).map_err(|e| format!("invalid chain: {e}"))?;
 
     let pp = unlock_token.to_passphrase().map_err(|e| format!("passphrase derivation: {e}"))?;
-    // Note: load_chain_key now requires a valid unlock token — empty passphrase path removed (C1
-    // fix).
     let pp_bytes: &[u8] = pp.as_bytes();
 
-    let key = oc_wallet::ops::decrypt_signing_key(
+    let key = match oc_wallet::ops::decrypt_signing_key(
         wallet_id,
         chain.chain_type,
         pp_bytes,
         None,
         vault_path(),
-    )
-    .map_err(|e| format!("wallet decrypt failed: {e}"))?;
+    ) {
+        Ok(key) => key,
+        Err(_) => {
+            // Legacy wallets created before device-bound unlock was enforced
+            // are encrypted with an empty passphrase. Fall back to that so
+            // older vaults remain usable.
+            oc_wallet::ops::decrypt_signing_key(
+                wallet_id,
+                chain.chain_type,
+                b"",
+                None,
+                vault_path(),
+            )
+            .map_err(|e| format!("wallet decrypt failed: {e}"))?
+        }
+    };
     let signer = oc_signer::signer_for_chain(chain.chain_type);
     Ok((key, signer))
 }
@@ -230,6 +242,7 @@ pub fn dispatch(req: &KeyAgentRequest) -> Result<KeyAgentResponse, KeyAgentError
         Some(KeyAgentRequestKind::ListWallets(_)) => handle_list_wallets(),
         Some(KeyAgentRequestKind::SignTransaction(req)) => handle_sign_transaction(req),
         Some(KeyAgentRequestKind::SignMessage(req)) => handle_sign_message(req),
+        Some(KeyAgentRequestKind::SignAuth(req)) => handle_sign_auth(req),
         Some(KeyAgentRequestKind::SignTypedData(req)) => handle_sign_typed_data(req),
         Some(KeyAgentRequestKind::SignUserOp(req)) => handle_sign_user_op(req),
         Some(KeyAgentRequestKind::CreateSessionKey(req)) => handle_create_session_key(req),
@@ -384,17 +397,112 @@ fn handle_sign_message(
     };
 
     // SignMessage has no chain_id; default to EVM (ponytail: most common).
-    let (key, signer) = match load_chain_key(&req.wallet_id, "eip155:1", &unlock_token) {
-        Ok(v) => v,
-        Err(e) => return Ok(KeyAgentResponse::error(e)),
-    };
+    let (signature, _address, _public_key) =
+        match sign_message_core(&req.wallet_id, "eip155:1", &unlock_token, &req.message) {
+            Ok(v) => v,
+            Err(e) => return Ok(KeyAgentResponse::error(e)),
+        };
 
-    let output = match signer.sign_message(key.expose(), &req.message) {
-        Ok(o) => o,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("signing failed: {e}"))),
-    };
+    let resp = crate::proto::SignMessageResponse { signature };
+    Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
+}
 
-    let resp = crate::proto::SignMessageResponse { signature: output.signature };
+/// Shared message-signing core used by the passkey-gated `SignMessage` and
+/// the approval-gated `SignAuth` paths.
+///
+/// Loads the chain key for `wallet_id`/`chain_id`, signs the raw `message`
+/// bytes with the chain's message-signing convention (`signer.sign_message`:
+/// EVM EIP-191 personal_sign, Solana raw bytes ed25519, …), and derives the
+/// chain-standard account address. Returns `(signature, address, public_key)`.
+///
+/// This is the single signing path for message signing — callers MUST NOT
+/// duplicate it. Authorization (passkey vs. network-layer) is decided by the
+/// caller before the unlock token is produced.
+fn sign_message_core(
+    wallet_id: &str,
+    chain_id: &str,
+    unlock_token: &oc_core::UnlockToken,
+    message: &[u8],
+) -> Result<(Vec<u8>, String, Vec<u8>), String> {
+    let (key, signer) = load_chain_key(wallet_id, chain_id, unlock_token)?;
+    let output =
+        signer.sign_message(key.expose(), message).map_err(|e| format!("signing failed: {e}"))?;
+    let address =
+        signer.derive_address(key.expose()).map_err(|e| format!("address derivation: {e}"))?;
+    let public_key = output
+        .public_key
+        .clone()
+        .unwrap_or_else(|| derive_public_key(signer.curve(), key.expose()).unwrap_or_default());
+    Ok((output.signature, address, public_key))
+}
+
+/// Derive raw public key bytes from a private key when the signer did not
+/// populate `SignOutput::public_key` (EVM-family chains).
+///
+/// Returns 33-byte compressed secp256k1 keys and 32-byte ed25519 keys, or
+/// `None` if the private key cannot be parsed.
+fn derive_public_key(curve: oc_signer::Curve, private_key: &[u8]) -> Option<Vec<u8>> {
+    match curve {
+        oc_signer::Curve::Secp256k1 => {
+            let sk = k256::ecdsa::SigningKey::from_slice(private_key).ok()?;
+            Some(sk.verifying_key().to_sec1_point(true).as_bytes().to_vec())
+        }
+        oc_signer::Curve::Ed25519 => {
+            let bytes: [u8; 32] = private_key.get(..32)?.try_into().ok()?;
+            let sk = ed25519_dalek::SigningKey::from_bytes(&bytes);
+            Some(sk.verifying_key().to_bytes().to_vec())
+        }
+    }
+}
+
+/// Handle `SignAuth` — auth-class message signing without a passkey gate.
+///
+/// Authorization happens at the **network** layer (dApp origin allowlist +
+/// daemon approval flow), so unlike [`handle_sign_message`] this handler does
+/// NOT verify a `PasskeyAuthorization`. Instead the wallet unlock token is
+/// derived from the process device key (`~/.onecipher/audit_device.key`),
+/// making the signed wallet device-bound: any local process that can reach
+/// the Key-Agent UDS may request auth-class signatures.
+fn handle_sign_auth(
+    req: &crate::proto::SignAuthRequest,
+) -> Result<KeyAgentResponse, KeyAgentError> {
+    if req.wallet_id.is_empty() {
+        return Ok(KeyAgentResponse::error("missing wallet_id"));
+    }
+    if req.chain_id.is_empty() {
+        return Ok(KeyAgentResponse::error("missing chain_id"));
+    }
+
+    // Device-bound unlock: derive the token from the process device key.
+    let store = DeviceKeyStore::open_default()
+        .map_err(|e| KeyAgentError::Internal(format!("device key store: {e}")))?;
+    let device_key = store
+        .load_or_generate()
+        .map_err(|e| KeyAgentError::Internal(format!("device key: {e}")))?;
+    let unlock_token =
+        match oc_core::UnlockToken::new(req.wallet_id.clone(), &device_key.to_bytes()) {
+            Ok(t) => t,
+            Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
+        };
+
+    let (signature, address, public_key) =
+        match sign_message_core(&req.wallet_id, &req.chain_id, &unlock_token, &req.message) {
+            Ok(v) => v,
+            Err(e) => return Ok(KeyAgentResponse::error(e)),
+        };
+
+    audit(
+        EventType::SignUserOp, // closest existing variant — auth-class signing
+        None,
+        serde_json::json!({"action": "sign_auth", "chain_id": req.chain_id, "wallet_id": req.wallet_id}),
+    );
+
+    let resp = crate::proto::SignAuthResponse {
+        signature,
+        address,
+        chain_id: req.chain_id.clone(),
+        public_key,
+    };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
@@ -926,6 +1034,22 @@ mod tests {
     }
 
     #[test]
+    fn test_sign_auth_missing_wallet_returns_error() {
+        // SignAuth has NO passkey gate — the error must come from the
+        // wallet/chain validation (empty wallet_id short-circuits first).
+        let resp = dispatch_req(KeyAgentRequestKind::SignAuth(crate::proto::SignAuthRequest {
+            wallet_id: String::new(),
+            chain_id: "eip155:1".to_string(),
+            message: b"sign in".to_vec(),
+        }));
+        assert!(resp.is_error(), "expected error for missing wallet_id");
+        match &resp.kind {
+            Some(KeyAgentResponseKind::Error(msg)) => assert!(msg.contains("wallet_id")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_sign_typed_data_missing_wallet_returns_error() {
         let resp =
             dispatch_req(KeyAgentRequestKind::SignTypedData(crate::proto::SignTypedDataRequest {
@@ -1067,6 +1191,11 @@ mod tests {
                 wallet_id: "x".to_string(),
                 message: vec![],
                 auth: None,
+            }),
+            KeyAgentRequestKind::SignAuth(crate::proto::SignAuthRequest {
+                wallet_id: "x".to_string(),
+                chain_id: "x".to_string(),
+                message: vec![],
             }),
             KeyAgentRequestKind::SignTypedData(crate::proto::SignTypedDataRequest {
                 session_key_id: "x".to_string(),

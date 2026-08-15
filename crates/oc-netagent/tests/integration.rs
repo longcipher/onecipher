@@ -15,7 +15,14 @@ use serde_json::{Value, json};
 struct EchoHandler;
 
 impl WalletMethodHandler for EchoHandler {
-    fn handle<'a>(&'a self, method: &str, params: Value, _topic: &str) -> HandlerResult<'a> {
+    fn handle<'a>(
+        &'a self,
+        method: &str,
+        params: Value,
+        _topic: &str,
+        _dapp_name: Option<&str>,
+        _dapp_origin: Option<&str>,
+    ) -> HandlerResult<'a> {
         let method = method.to_string();
         Box::pin(async move { Ok(json!({"method": method, "params": params})) })
     }

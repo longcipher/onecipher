@@ -32,6 +32,24 @@ pub(crate) fn show() -> Result<(), CliError> {
         println!("  {:<40} {} {}", key, url, annotation);
     }
 
+    println!();
+    println!("WalletConnect:");
+    println!(
+        "  {:<40} {}",
+        "wc.relay_url",
+        if config.wc.relay_url.is_empty() { "(default)" } else { &config.wc.relay_url }
+    );
+    println!(
+        "  {:<40} {}",
+        "wc.project_id",
+        if config.wc.project_id.is_empty() { "(not set)" } else { &config.wc.project_id }
+    );
+    if config.wc.trusted_origins.is_empty() {
+        println!("  {:<40} (none — deny all session proposals)", "wc.trusted_origins");
+    } else {
+        println!("  {:<40} {:?}", "wc.trusted_origins", config.wc.trusted_origins);
+    }
+
     Ok(())
 }
 
@@ -46,6 +64,9 @@ pub(crate) fn show() -> Result<(), CliError> {
 /// - `webui.listen` (string)
 /// - `webui.session_timeout_secs` (u64)
 /// - `webui.auto_lock_at` (string)
+/// - `wc.relay_url` (string)
+/// - `wc.project_id` (string)
+/// - `wc.trusted_origins` (JSON array of strings, e.g. `["iam.example.com"]`)
 pub(crate) fn set(key: &str, value: &str) -> Result<(), CliError> {
     let config_dir = oc_core::paths::state_dir()?;
     let config_path = config_dir.join("config.json");
@@ -83,16 +104,39 @@ pub(crate) fn set(key: &str, value: &str) -> Result<(), CliError> {
         },
         ["wc", field] => match *field {
             "relay_url" | "project_id" => serde_json::Value::String(value.to_string()),
+            "trusted_origins" => {
+                // Accept a JSON array (e.g. `["iam.example.com","x.com"]`) or a
+                // comma-separated plain list for convenience.
+                let parsed: serde_json::Value = serde_json::from_str(value).map_err(|_| {
+                    CliError::InvalidArgs(format!(
+                        "'{value}' is not a valid JSON array (e.g. '[\"iam.example.com\"]')"
+                    ))
+                })?;
+                let array = parsed.as_array().ok_or_else(|| {
+                    CliError::InvalidArgs(
+                        "wc.trusted_origins must be a JSON array of strings (e.g. '[\"iam.example.com\"]')"
+                            .into(),
+                    )
+                })?;
+                for item in array {
+                    if !item.is_string() {
+                        return Err(CliError::InvalidArgs(
+                            "wc.trusted_origins must contain only strings".into(),
+                        ));
+                    }
+                }
+                parsed
+            }
             _ => {
                 return Err(CliError::InvalidArgs(format!(
-                    "unknown wc field '{field}'. Valid fields: relay_url, project_id"
+                    "unknown wc field '{field}'. Valid fields: relay_url, project_id, trusted_origins"
                 )));
             }
         },
         ["vault_path"] => serde_json::Value::String(value.to_string()),
         _ => {
             return Err(CliError::InvalidArgs(format!(
-                "unknown config key '{key}'. Valid top-level keys: vault_path, rpc.<chain>, webui.<field>"
+                "unknown config key '{key}'. Valid top-level keys: vault_path, rpc.<chain>, webui.<field>, wc.<field>"
             )));
         }
     };

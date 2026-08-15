@@ -28,6 +28,8 @@ pub struct AppState {
     pub state_dir: PathBuf,
     /// In-memory session store for WebAuthn sessions.
     pub session_store: SessionStore,
+    /// Sender for injecting WC pairing URIs into the daemon's wallet server.
+    pub pairing_tx: tokio::sync::mpsc::Sender<oc_walletconnect::PairingUri>,
 }
 
 /// List all pending approvals.
@@ -115,7 +117,13 @@ mod tests {
     async fn test_simulate_returns_null() {
         let queue = ApprovalQueue::new(16);
         let session_store = SessionStore::new(1800);
-        let state = AppState { queue, state_dir: std::path::PathBuf::from("/tmp"), session_store };
+        let (pairing_tx, _pairing_rx) = tokio::sync::mpsc::channel(8);
+        let state = AppState {
+            queue,
+            state_dir: std::path::PathBuf::from("/tmp"),
+            session_store,
+            pairing_tx,
+        };
         let app = axum::Router::new()
             .route("/api/approvals/{id}/simulate", axum::routing::post(simulate_approval))
             .with_state(state);

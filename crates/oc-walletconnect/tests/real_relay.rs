@@ -100,7 +100,14 @@ async fn real_relay_encrypted_session_request_roundtrip() {
     #[derive(Clone, Default)]
     struct EchoHandler(Arc<Mutex<Vec<String>>>);
     impl WalletMethodHandler for EchoHandler {
-        fn handle<'a>(&'a self, method: &str, params: Value, _: &str) -> HandlerResult<'a> {
+        fn handle<'a>(
+            &'a self,
+            method: &str,
+            params: Value,
+            _: &str,
+            _dapp_name: Option<&str>,
+            _dapp_origin: Option<&str>,
+        ) -> HandlerResult<'a> {
             let method = method.to_string();
             Box::pin(async move {
                 self.0.lock().unwrap().push(method.clone());

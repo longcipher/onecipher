@@ -47,6 +47,7 @@ pub async fn run_webui_server(
     config: &WebuiConfig,
     state_dir: PathBuf,
     approval_rx: mpsc::Receiver<(PendingApproval, oneshot::Sender<ApprovalDecision>)>,
+    pairing_tx: mpsc::Sender<oc_walletconnect::PairingUri>,
     dual_register: Option<routes::auth::DualRegistrationFn>,
 ) -> io::Result<(JoinHandle<()>, u16)> {
     let addr: SocketAddr = config.listen.parse().map_err(|e| {
@@ -122,7 +123,7 @@ pub async fn run_webui_server(
         }
     }
 
-    let state = AppState { queue, state_dir, session_store };
+    let state = AppState { queue, state_dir, session_store, pairing_tx };
 
     // Auth routes carry their own state (WebAuthn manager + bootstrap token).
     let auth_router = axum::Router::new()
@@ -167,6 +168,8 @@ pub async fn run_webui_server(
         .route("/api/sessions/{topic}", axum::routing::delete(routes::sessions::disconnect_session))
         .route("/api/sessions/pair", axum::routing::post(routes::sessions::pair_session))
         .route("/api/sessions/generate", axum::routing::post(routes::sessions::generate_session))
+        // Pairings (URI injection into the daemon's wallet server)
+        .route("/api/pairings", axum::routing::post(routes::pairings::inject_pairing))
         // Audit
         .route("/api/audit", axum::routing::get(routes::audit::get_audit))
         // Settings
@@ -360,7 +363,8 @@ mod tests {
         let config =
             WebuiConfig { enabled: true, listen: "0.0.0.0:8080".to_string(), ..Default::default() };
         let (_tx, rx) = mpsc::channel(16);
-        let result = run_webui_server(&config, PathBuf::from("/tmp"), rx, None).await;
+        let (pairing_tx, _pairing_rx) = mpsc::channel(16);
+        let result = run_webui_server(&config, PathBuf::from("/tmp"), rx, pairing_tx, None).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
@@ -372,7 +376,9 @@ mod tests {
             WebuiConfig { enabled: true, listen: "127.0.0.1:0".to_string(), ..Default::default() };
         let state_dir = tempfile::tempdir().unwrap();
         let (_tx, rx) = mpsc::channel(16);
-        let result = run_webui_server(&config, state_dir.path().to_path_buf(), rx, None).await;
+        let (pairing_tx, _pairing_rx) = mpsc::channel(16);
+        let result =
+            run_webui_server(&config, state_dir.path().to_path_buf(), rx, pairing_tx, None).await;
         assert!(result.is_ok());
         let (handle, port) = result.unwrap();
         assert!(port > 0);
@@ -385,8 +391,11 @@ mod tests {
             WebuiConfig { enabled: true, listen: "127.0.0.1:0".to_string(), ..Default::default() };
         let state_dir = tempfile::tempdir().unwrap();
         let (_tx, rx) = mpsc::channel(16);
+        let (pairing_tx, _pairing_rx) = mpsc::channel(16);
         let (_handle, port) =
-            run_webui_server(&config, state_dir.path().to_path_buf(), rx, None).await.unwrap();
+            run_webui_server(&config, state_dir.path().to_path_buf(), rx, pairing_tx, None)
+                .await
+                .unwrap();
 
         // Make an HTTP request to the health endpoint
         let resp = reqwest::get(format!("http://127.0.0.1:{port}/api/health")).await.unwrap();

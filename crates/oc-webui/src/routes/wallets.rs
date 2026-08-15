@@ -151,10 +151,12 @@ mod tests {
     use crate::{approval_queue::ApprovalQueue, auth::SessionStore};
 
     fn test_state() -> AppState {
+        let (pairing_tx, _pairing_rx) = tokio::sync::mpsc::channel(8);
         AppState {
             queue: ApprovalQueue::new(16),
             state_dir: std::path::PathBuf::from("/tmp"),
             session_store: SessionStore::new(1800),
+            pairing_tx,
         }
     }
 

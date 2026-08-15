@@ -9,6 +9,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod crypto;
 pub mod dapp_client;
 pub mod error;
@@ -19,13 +20,15 @@ pub mod session;
 pub mod uri;
 pub mod wallet_server;
 
+pub use auth::{AuthError, AuthRequestParams, AuthType, build_siwe_message, eip4361_hash};
 pub use crypto::{WcCipher, WcKeyPair, WcSharedSecret, WcSymKey};
 pub use dapp_client::WcDappClient;
 pub use error::{WcError, WcResult};
 pub use jsonrpc::{JsonRpcError, JsonRpcErrorCode, JsonRpcRequest, JsonRpcResponse};
 pub use method::{
-    PERSONAL_SIGN, ProposerMetadata, SESSION_DELETE, SESSION_EVENT, SESSION_PING, SESSION_PROPOSE,
-    SESSION_REQUEST, SESSION_SETTLE, SESSION_UPDATE, SessionProposeParams, SessionSettleParams,
+    AUTH_REQUEST, AUTH_RESPONSE, PERSONAL_SIGN, ProposerMetadata, SESSION_DELETE, SESSION_EVENT,
+    SESSION_PING, SESSION_PROPOSE, SESSION_REQUEST, SESSION_SETTLE, SESSION_UPDATE,
+    SessionProposeParams, SessionSettleParams,
 };
 pub use relay::{RelayClient, RelayConfig, apply_project_id};
 pub use session::{WcSession, WcSessionState, WcSessionTable, WcSymKeyHex};

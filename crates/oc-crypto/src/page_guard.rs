@@ -55,14 +55,26 @@ pub fn lock(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
 ///
 /// - Linux: `madvise(MADV_DONTDUMP)`.
 /// - All other platforms: no-op success (no equivalent primitive).
-#[expect(clippy::missing_const_for_fn, reason = "contains FFI + non-const error path")]
 pub fn dont_dump(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
     if len == 0 {
         return Ok(());
     }
     #[cfg(target_os = "linux")]
     {
-        let ret = unsafe { libc::madvise(addr as *mut libc::c_void, len, libc::MADV_DONTDUMP) };
+        // `madvise(2)` (unlike `mlock`) requires the address to be
+        // **page-aligned** on all current kernels; unaligned heap pointers
+        // (a plain `Box<[u8]>` is only aligned to its element type) are
+        // rejected with EINVAL. Round the range down to the containing page
+        // and extend the length to the end of the original range — the
+        // kernel rounds down internally anyway, so this is semantically
+        // identical on kernels that accept unaligned addresses.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_mask = page_size - 1;
+        let base = (addr as usize) & !page_mask;
+        let end = (addr as usize).saturating_add(len);
+        let aligned_len = end.saturating_sub(base);
+        let ret =
+            unsafe { libc::madvise(base as *mut libc::c_void, aligned_len, libc::MADV_DONTDUMP) };
         if ret != 0 {
             return Err(MemGuardError::MadviseFailed(std::io::Error::last_os_error()));
         }

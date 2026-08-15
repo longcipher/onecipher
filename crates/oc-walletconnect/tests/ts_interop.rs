@@ -83,7 +83,14 @@ async fn ts_sign_client_full_pairing_and_request() {
     #[derive(Clone, Default)]
     struct EchoHandler;
     impl WalletMethodHandler for EchoHandler {
-        fn handle<'a>(&'a self, method: &str, params: Value, _: &str) -> HandlerResult<'a> {
+        fn handle<'a>(
+            &'a self,
+            method: &str,
+            params: Value,
+            _: &str,
+            _dapp_name: Option<&str>,
+            _dapp_origin: Option<&str>,
+        ) -> HandlerResult<'a> {
             let method = method.to_string();
             Box::pin(async move {
                 // The official client will call eth_requestAccounts / personal_sign.

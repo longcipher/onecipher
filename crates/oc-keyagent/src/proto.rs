@@ -318,6 +318,47 @@ pub struct SignMessageResponse {
     pub signature: Vec<u8>,
 }
 
+/// `SignAuth` request — auth-class message signing WITHOUT a passkey gate.
+///
+/// Unlike [`SignMessageRequest`] (which requires a
+/// [`PasskeyAuthorization`]), this method is authorized at the **network**
+/// layer: the dApp origin allowlist (`wc.trusted_origins`) plus the daemon's
+/// approval flow (Web UI / CLI / policy). The Key-Agent therefore derives the
+/// wallet unlock token from the process **device key** instead of a passkey
+/// signature — the wallet must be device-bound (encrypted with the
+/// device-token passphrase) for decryption to succeed.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct SignAuthRequest {
+    /// Wallet ID to sign with.
+    #[prost(string, tag = "1")]
+    pub wallet_id: String,
+    /// CAIP-2 chain id (e.g. `eip155:1`, `solana:mainnet`).
+    #[prost(string, tag = "2")]
+    pub chain_id: String,
+    /// Raw message bytes, signed with the chain's message-signing convention
+    /// (EVM: EIP-191 personal_sign; Solana: raw bytes ed25519; …).
+    #[prost(bytes, tag = "3")]
+    pub message: Vec<u8>,
+}
+
+/// `SignAuth` response — signature plus the derived account identity.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct SignAuthResponse {
+    /// Raw signature bytes (65-byte r‖s‖v for EVM, 64-byte ed25519 otherwise).
+    #[prost(bytes, tag = "1")]
+    pub signature: Vec<u8>,
+    /// Chain-standard account address (e.g. EIP-55 checksummed EVM address).
+    #[prost(string, tag = "2")]
+    pub address: String,
+    /// CAIP-2 chain id the signature is valid for.
+    #[prost(string, tag = "3")]
+    pub chain_id: String,
+    /// Public key bytes (33-byte compressed secp256k1 for EVM-family chains,
+    /// 32-byte raw ed25519 otherwise). Needed by non-EVM verifiers.
+    #[prost(bytes, tag = "4")]
+    pub public_key: Vec<u8>,
+}
+
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct SignTypedDataRequest {
     #[prost(string, tag = "1")]
@@ -813,6 +854,27 @@ mod tests {
             }],
         };
         assert_eq!(original, roundtrip(&original));
+    }
+
+    #[test]
+    fn sign_auth_request_and_response_roundtrip() {
+        let req = SignAuthRequest {
+            wallet_id: "w-auth".to_string(),
+            chain_id: "eip155:1".to_string(),
+            message: b"sign in with your wallet".to_vec(),
+        };
+        assert_eq!(req, roundtrip(&req));
+
+        let resp = SignAuthResponse {
+            signature: vec![0xAA; 65],
+            address: "0x9858EfFD232B4033E47d90003D41EC34EcaEda94".to_string(),
+            chain_id: "eip155:1".to_string(),
+            public_key: vec![0x02; 33],
+        };
+        let decoded = roundtrip(&resp);
+        assert_eq!(resp, decoded);
+        assert_eq!(decoded.signature.len(), 65);
+        assert_eq!(decoded.public_key.len(), 33);
     }
 
     #[test]

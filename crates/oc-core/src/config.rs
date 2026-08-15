@@ -26,6 +26,15 @@ pub struct WcConfig {
     /// WalletConnect Cloud project ID (required by the cloud relay).
     #[serde(default)]
     pub project_id: String,
+    /// dApp origin allowlist for `wc_sessionPropose` approval.
+    ///
+    /// An entry matches the dApp's origin host exactly or as a dot-boundary
+    /// subdomain (`example.com` matches `app.example.com` but not
+    /// `evil-example.com`). An empty list denies **all** session proposals
+    /// (secure default) — add the relying party's origin(s) before expecting
+    /// a dApp to connect.
+    #[serde(default)]
+    pub trusted_origins: Vec<String>,
 }
 
 impl WcConfig {
@@ -174,7 +183,11 @@ impl Default for Config {
             plugins: HashMap::new(),
             backup: None,
             webui: WebuiConfig::default(),
-            wc: WcConfig { relay_url: WcConfig::default_relay_url(), project_id: String::new() },
+            wc: WcConfig {
+                relay_url: WcConfig::default_relay_url(),
+                project_id: String::new(),
+                trusted_origins: Vec::new(),
+            },
         }
     }
 }
@@ -230,6 +243,11 @@ impl Config {
             }
             if !user_config.wc.project_id.is_empty() {
                 config.wc.project_id = user_config.wc.project_id;
+            }
+            // Honor user-specified trusted origins (empty list is a deliberate
+            // deny-all and must round-trip, so there is no "non-empty" guard).
+            if !user_config.wc.trusted_origins.is_empty() {
+                config.wc.trusted_origins = user_config.wc.trusted_origins;
             }
             // Honor any non-empty user-specified vault path. The previous
             // code also ignored the literal `/tmp/.onecipher`, because that
@@ -416,5 +434,57 @@ mod tests {
         assert!(!webui.approval_mode);
         assert_eq!(webui.approval_timeout_secs, 300);
         assert_eq!(webui.listen, "127.0.0.1:0");
+    }
+
+    #[test]
+    fn test_wc_config_defaults_to_empty_trusted_origins() {
+        // A config without `wc` section, or with a partial `wc` section, must
+        // yield an empty trusted_origins (deny-all secure default).
+        let json = r#"{"vault_path": "/tmp/.onecipher"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.wc.trusted_origins.is_empty());
+
+        let partial = r#"{"wc": {"relay_url": "wss://127.0.0.1:7443"}}"#;
+        let config: Config = serde_json::from_str(partial).unwrap();
+        assert_eq!(config.wc.relay_url, "wss://127.0.0.1:7443");
+        assert!(config.wc.trusted_origins.is_empty());
+    }
+
+    #[test]
+    fn test_wc_trusted_origins_serde_roundtrip() {
+        let wc = WcConfig {
+            relay_url: "wss://relay.walletconnect.com".into(),
+            project_id: "abc123".into(),
+            trusted_origins: vec!["iam.example.com".into(), "app.uniswap.org".into()],
+        };
+        let json = serde_json::to_string(&wc).unwrap();
+        let parsed: WcConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(wc, parsed);
+        assert_eq!(parsed.trusted_origins, vec!["iam.example.com", "app.uniswap.org"]);
+    }
+
+    #[test]
+    fn test_wc_trusted_origins_json_array_parse() {
+        // The `onecipher config set wc.trusted_origins '["iam.example.com"]'`
+        // command writes a JSON array into the config file — verify Config
+        // parses it.
+        let json = r#"{"wc": {"trusted_origins": ["iam.example.com", "x.com"]}}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(config.wc.trusted_origins, vec!["iam.example.com", "x.com"]);
+    }
+
+    #[test]
+    fn test_load_or_default_merges_trusted_origins() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        let user_config = serde_json::json!({
+            "wc": { "trusted_origins": ["iam.example.com"] }
+        });
+        std::fs::write(&config_path, serde_json::to_string(&user_config).unwrap()).unwrap();
+
+        let config = Config::load_or_default_from(&config_path);
+        assert_eq!(config.wc.trusted_origins, vec!["iam.example.com"]);
+        // Default relay URL preserved when not overridden.
+        assert_eq!(config.wc.relay_url, WcConfig::default_relay_url());
     }
 }

@@ -16,7 +16,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -36,7 +36,14 @@ pub type HandlerResult<'a> =
 
 /// Trait implemented by the Net-Agent's WC method router.
 pub trait WalletMethodHandler: Send + Sync {
-    fn handle<'a>(&'a self, method: &str, params: Value, session_topic: &str) -> HandlerResult<'a>;
+    fn handle<'a>(
+        &'a self,
+        method: &str,
+        params: Value,
+        session_topic: &str,
+        dapp_name: Option<&str>,
+        dapp_origin: Option<&str>,
+    ) -> HandlerResult<'a>;
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +74,31 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             #[cfg(any(test, feature = "test-utils"))]
             mock_relay: None,
         }
+    }
+
+    /// Construct a wallet server sharing an existing session table with the
+    /// method handler (e.g. so the router can resolve `dapp_name`/`dapp_origin`
+    /// for the approval gate without a second lookup path).
+    ///
+    /// [`Self::new`] remains available and constructs its own table.
+    pub fn with_session_table(
+        cfg: WcWalletConfig,
+        handler: H,
+        sessions: Arc<Mutex<WcSessionTable>>,
+    ) -> Self {
+        Self {
+            cfg,
+            handler,
+            sessions,
+            #[cfg(any(test, feature = "test-utils"))]
+            mock_relay: None,
+        }
+    }
+
+    /// Expose the shared session table (used by the daemon to hand the same
+    /// table to both the router and the server).
+    pub fn session_table(&self) -> Arc<Mutex<WcSessionTable>> {
+        Arc::clone(&self.sessions)
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -168,7 +200,18 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             return Ok(());
         }
 
-        {
+        // Session-level spec methods and the Auth protocol's wc_authRequest
+        // bypass the active-state + method-allowed gates (see
+        // `dispatch_session_request` for the live-relay equivalent).
+        let bypass_gate = matches!(
+            req.method.as_str(),
+            method::SESSION_DELETE |
+                method::SESSION_UPDATE |
+                method::SESSION_PING |
+                method::AUTH_REQUEST
+        );
+
+        if !bypass_gate {
             let t = self.sessions.lock().await;
             if let Some(s) = t.get(topic) {
                 if !s.is_active() {
@@ -190,6 +233,10 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                     return Ok(());
                 }
                 if !s.is_method_allowed(&req.method) {
+                    eprintln!(
+                        "[wsdbg] method {} NOT allowed on topic {} methods={:?} state={:?}",
+                        req.method, topic, s.methods, s.state
+                    );
                     let resp = JsonRpcResponse::error(
                         req.id,
                         JsonRpcError::new(
@@ -210,10 +257,92 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             }
         }
 
-        let result = self.handler.handle(&req.method, req.params.clone(), topic).await;
+        // Session-level lifecycle methods are answered directly by the server
+        // (they are spec-level and must never reach the dApp method router).
+        match req.method.as_str() {
+            method::SESSION_DELETE => {
+                self.sessions.lock().await.remove(topic);
+                let resp = JsonRpcResponse::success(req.id, json!({ "acknowledged": true }));
+                self.publish_response(
+                    &relay,
+                    topic,
+                    &resp,
+                    outbound_encrypted,
+                    session_key.as_ref(),
+                )
+                .await?;
+                return Ok(());
+            }
+            method::SESSION_UPDATE => {
+                let namespaces = req.params.get("namespaces").cloned().unwrap_or_else(|| json!({}));
+                let mut methods = Vec::new();
+                let mut ns: Vec<String> = Vec::new();
+                if let Some(obj) = namespaces.as_object() {
+                    for value in obj.values() {
+                        if let Some(arr) = value.get("chains").and_then(|m| m.as_array()) {
+                            ns.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
+                        }
+                        if let Some(arr) = value.get("methods").and_then(|m| m.as_array()) {
+                            methods.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
+                        }
+                    }
+                }
+                if let Some(s) = self.sessions.lock().await.get_mut(topic) {
+                    s.namespaces = ns;
+                    s.methods = methods;
+                }
+                let resp = JsonRpcResponse::success(req.id, json!({ "acknowledged": true }));
+                self.publish_response(
+                    &relay,
+                    topic,
+                    &resp,
+                    outbound_encrypted,
+                    session_key.as_ref(),
+                )
+                .await?;
+                return Ok(());
+            }
+            method::SESSION_PING => {
+                let resp = JsonRpcResponse::success(req.id, json!({ "acknowledged": true }));
+                self.publish_response(
+                    &relay,
+                    topic,
+                    &resp,
+                    outbound_encrypted,
+                    session_key.as_ref(),
+                )
+                .await?;
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        // Session metadata for the handler (dApp name/origin used in approval
+        // decisions). Both are `None` when the session is not in the table.
+        let (dapp_name, dapp_origin) = {
+            let t = self.sessions.lock().await;
+            match t.get(topic) {
+                Some(s) => (s.dapp_name.clone(), s.dapp_origin.clone()),
+                None => (None, None),
+            }
+        };
+
+        let result = self
+            .handler
+            .handle(
+                &req.method,
+                req.params.clone(),
+                topic,
+                dapp_name.as_deref(),
+                dapp_origin.as_deref(),
+            )
+            .await;
         let resp = match result {
             Ok(v) => JsonRpcResponse::success(req.id, v),
-            Err((code, msg)) => JsonRpcResponse::error(req.id, JsonRpcError::new(code, msg)),
+            Err((code, msg)) => {
+                eprintln!("[wsdbg] method {} error code={code:?} msg={msg}", req.method);
+                JsonRpcResponse::error(req.id, JsonRpcError::new(code, msg))
+            }
         };
 
         self.publish_response(&relay, topic, &resp, outbound_encrypted, session_key.as_ref())
@@ -471,8 +600,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                 let plaintext = match first_byte {
                     Some(crypto::ENVELOPE_TYPE_1) => {
                         // Derive the session key from the proposer's public key.
-                        let (proposer_pub, pt) = WcCipher::open_type1(&sym_key, &encrypted_bytes)?;
-                        self.derive_and_store_session_key(&session, &proposer_pub).await;
+                        let (_proposer_pub, pt) = WcCipher::open_type1(&sym_key, &encrypted_bytes)?;
                         pt
                     }
                     _ => WcCipher::open_type0(&sym_key, &encrypted_bytes)?,
@@ -512,20 +640,14 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         }
     }
 
-    /// Derive the session symmetric key from the proposer's X25519 public key
-    /// and store it on the session (updating the session's sym_key).
-    async fn derive_and_store_session_key(&self, session: &WcSession, proposer_pub: &[u8; 32]) {
-        // NOTE: The pairing symKey in `session.sym_key` is the pairing key from
-        // the URI. In the official flow the *wallet's* X25519 keypair is
-        // generated at startup and the session key is
-        // `deriveSymKey(wallet_priv, proposer_pub)`. The current implementation
-        // reuses the pairing key as a transitional measure; the real X25519
-        // session-key derivation is wired in the next step.
-        let _ = proposer_pub;
-        let _ = session;
-    }
-
     /// Dispatch a session JSON-RPC request (encrypted response, type-0 envelope).
+    ///
+    /// Session-level spec methods (`wc_sessionDelete`, `wc_sessionUpdate`,
+    /// `wc_sessionPing`) and the Auth protocol's `wc_authRequest` are handled
+    /// **before** the `is_method_allowed` gate: the former are protocol
+    /// lifecycle messages that the dApp may send regardless of the approved
+    /// namespace methods, and the latter is a one-time pairing-topic request
+    /// that never goes through session negotiation.
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_session_request(
         &self,
@@ -536,37 +658,110 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         sym_key: &WcSymKey,
         req_id: &mut i64,
     ) -> WcResult<()> {
-        let resp = {
-            let t = self.sessions.lock().await;
-            if let Some(s) = t.get(topic) {
-                if s.is_method_allowed(&req.method) {
-                    drop(t);
-                    match self.handler.handle(&req.method, req.params.clone(), topic).await {
-                        Ok(v) => JsonRpcResponse::success(req.id, v),
-                        Err((code, msg)) => {
-                            JsonRpcResponse::error(req.id, JsonRpcError::new(code, msg))
+        eprintln!(
+            "[wsdbg] dispatch topic={} method={} methods={:?}",
+            topic, req.method, session.methods
+        );
+        let resp = match req.method.as_str() {
+            method::SESSION_DELETE => {
+                // Remove the session from the table and acknowledge.
+                self.sessions.lock().await.remove(topic);
+                JsonRpcResponse::success(req.id, json!({ "acknowledged": true }))
+            }
+            method::SESSION_UPDATE => {
+                // Update namespaces/methods from the params object. The
+                // session's `namespaces` field holds CAIP-2 chain ids (per the
+                // existing convention), so each namespace's `chains` array is
+                // collected; `methods` is the union of all `methods` arrays.
+                let namespaces = req.params.get("namespaces").cloned().unwrap_or_else(|| json!({}));
+                let mut methods = Vec::new();
+                let mut ns: Vec<String> = Vec::new();
+                if let Some(obj) = namespaces.as_object() {
+                    for value in obj.values() {
+                        if let Some(arr) = value.get("chains").and_then(|m| m.as_array()) {
+                            ns.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
                         }
+                        if let Some(arr) = value.get("methods").and_then(|m| m.as_array()) {
+                            methods.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
+                        }
+                    }
+                }
+                if let Some(s) = self.sessions.lock().await.get_mut(topic) {
+                    s.namespaces = ns;
+                    s.methods = methods;
+                }
+                JsonRpcResponse::success(req.id, json!({ "acknowledged": true }))
+            }
+            method::SESSION_PING => {
+                JsonRpcResponse::success(req.id, json!({ "acknowledged": true }))
+            }
+            method::AUTH_REQUEST => {
+                // WC v2 Auth protocol: one-time sign-in on a pairing topic.
+                // No session namespaces/methods are required; dispatch straight
+                // through the handler (the router builds + signs the SIWE
+                // message and returns the signature).
+                let t = self.sessions.lock().await;
+                let session = t.get(topic);
+                match self
+                    .handler
+                    .handle(
+                        &req.method,
+                        req.params.clone(),
+                        topic,
+                        session.and_then(|s| s.dapp_name.as_deref()),
+                        session.and_then(|s| s.dapp_origin.as_deref()),
+                    )
+                    .await
+                {
+                    Ok(v) => JsonRpcResponse::success(req.id, v),
+                    Err((code, msg)) => {
+                        JsonRpcResponse::error(req.id, JsonRpcError::new(code, msg))
+                    }
+                }
+            }
+            _ => {
+                let t = self.sessions.lock().await;
+                if let Some(s) = t.get(topic) {
+                    if s.is_method_allowed(&req.method) {
+                        drop(t);
+                        match self
+                            .handler
+                            .handle(
+                                &req.method,
+                                req.params.clone(),
+                                topic,
+                                session.dapp_name.as_deref(),
+                                session.dapp_origin.as_deref(),
+                            )
+                            .await
+                        {
+                            Ok(v) => JsonRpcResponse::success(req.id, v),
+                            Err((code, msg)) => {
+                                JsonRpcResponse::error(req.id, JsonRpcError::new(code, msg))
+                            }
+                        }
+                    } else {
+                        JsonRpcResponse::error(
+                            req.id,
+                            JsonRpcError::new(
+                                JsonRpcErrorCode::UnsupportedMethod,
+                                format!("method {} not authorized", req.method),
+                            ),
+                        )
                     }
                 } else {
                     JsonRpcResponse::error(
                         req.id,
-                        JsonRpcError::new(
-                            JsonRpcErrorCode::UnsupportedMethod,
-                            format!("method {} not authorized", req.method),
-                        ),
+                        JsonRpcError::new(JsonRpcErrorCode::Internal, "session gone".into()),
                     )
                 }
-            } else {
-                JsonRpcResponse::error(
-                    req.id,
-                    JsonRpcError::new(JsonRpcErrorCode::Internal, "session gone".into()),
-                )
             }
         };
         let _ = session;
         let _ = sym_key;
 
         let resp_bytes = serde_json::to_vec(&resp)?;
+        eprintln!("[wsdbg] SEND-RESP {}", String::from_utf8_lossy(&resp_bytes));
         let envelope = WcCipher::seal_type0(sym_key, &resp_bytes)?;
 
         *req_id += 1;
@@ -714,16 +909,20 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         let settle_bytes = serde_json::to_vec(&settle_req)?;
         let settle_env = WcCipher::seal_type0(&session_key, &settle_bytes)?;
 
-        relay
-            .publish_irn(
-                &relay_id(next_id()),
-                &session_topic,
-                &BASE64.encode(&settle_env),
-                300,
-                1108,
-                attestation_env().as_deref(),
-            )
-            .await?;
+        if std::env::var("OC_SKIP_SETTLE").is_err() {
+            relay
+                .publish_irn(
+                    &relay_id(next_id()),
+                    &session_topic,
+                    &BASE64.encode(&settle_env),
+                    300,
+                    1108,
+                    attestation_env().as_deref(),
+                )
+                .await?;
+        } else {
+            eprintln!("[wsdbg] OC_SKIP_SETTLE set; skipping session settle");
+        }
 
         Ok(())
     }
@@ -850,4 +1049,60 @@ fn origin_matches_trusted(origin: &str, trusted_origins: &[String]) -> bool {
         let trusted = trusted.to_lowercase();
         origin_host == trusted || origin_host.ends_with(&format!(".{trusted}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn origins(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn trusted_origin_exact_match() {
+        assert!(origin_matches_trusted("https://iam.example.com", &origins(&["iam.example.com"])));
+        assert!(origin_matches_trusted("http://iam.example.com", &origins(&["iam.example.com"])));
+    }
+
+    #[test]
+    fn trusted_origin_subdomain_dot_boundary() {
+        let trusted = origins(&["example.com"]);
+        assert!(origin_matches_trusted("https://app.example.com", &trusted));
+        assert!(origin_matches_trusted("https://a.b.example.com", &trusted));
+        // dot-boundary: a suffix without the leading dot must NOT match.
+        assert!(!origin_matches_trusted("https://evil-example.com", &trusted));
+        assert!(!origin_matches_trusted("https://notexample.com", &trusted));
+    }
+
+    #[test]
+    fn trusted_origin_strips_scheme_port_and_path() {
+        let trusted = origins(&["example.com"]);
+        assert!(origin_matches_trusted("https://example.com:8443/app", &trusted));
+        assert!(origin_matches_trusted("https://app.example.com/x/y", &trusted));
+    }
+
+    #[test]
+    fn trusted_origin_case_insensitive() {
+        assert!(origin_matches_trusted("https://EXAMPLE.com", &origins(&["example.com"])));
+        assert!(origin_matches_trusted("https://example.com", &origins(&["EXAMPLE.COM"])));
+    }
+
+    #[test]
+    fn empty_trusted_origins_match_nothing() {
+        assert!(!origin_matches_trusted("https://example.com", &origins(&[])));
+    }
+
+    #[test]
+    fn trusted_origin_matches_any_entry() {
+        let trusted = origins(&["a.com", "b.org"]);
+        assert!(origin_matches_trusted("https://b.org", &trusted));
+        assert!(!origin_matches_trusted("https://c.net", &trusted));
+    }
+
+    #[test]
+    fn raw_host_without_scheme_matches() {
+        assert!(origin_matches_trusted("localhost:3000", &origins(&["localhost"])));
+        assert!(origin_matches_trusted("127.0.0.1", &origins(&["127.0.0.1"])));
+    }
 }

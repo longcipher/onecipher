@@ -18,8 +18,8 @@ use oc_keyagent::{
     KeyAgentRequest, KeyAgentRequestKind, KeyAgentResponse, KeyAgentResponseKind,
     proto::{
         GenerateChallengeRequest, GetBalanceRequest, ListWalletsResponse, PasskeyAuthorization,
-        PayX402Request, SignMessageRequest, SignTransactionRequest, SignTypedDataRequest,
-        SignUserOpRequest,
+        PayX402Request, SignAuthRequest, SignAuthResponse, SignMessageRequest,
+        SignTransactionRequest, SignTypedDataRequest, SignUserOpRequest,
     },
 };
 use oc_walletconnect::{
@@ -27,6 +27,7 @@ use oc_walletconnect::{
 };
 use prost::Message;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::{
     approval::{
@@ -55,6 +56,10 @@ pub struct WcMethodRouter {
     approval_log: Option<Arc<ApprovalLog>>,
     /// Loaded policy for pre-signing risk evaluation (W2.1).
     policy: Option<oc_policy::PolicyV2>,
+    /// Shared WC session table (when wired by the daemon) — used to resolve
+    /// the dApp name/origin for the approval gate when the wallet server did
+    /// not attach them (e.g. pairing-topic requests).
+    sessions: Option<Arc<tokio::sync::Mutex<oc_walletconnect::WcSessionTable>>>,
 }
 
 impl WcMethodRouter {
@@ -66,6 +71,7 @@ impl WcMethodRouter {
             approval_timeout: Duration::from_secs(300),
             approval_log: None,
             policy: None,
+            sessions: None,
         }
     }
 
@@ -84,6 +90,7 @@ impl WcMethodRouter {
             approval_timeout,
             approval_log,
             policy: None,
+            sessions: None,
         }
     }
 
@@ -91,6 +98,78 @@ impl WcMethodRouter {
     pub fn with_policy(mut self, policy: oc_policy::PolicyV2) -> Self {
         self.policy = Some(policy);
         self
+    }
+
+    /// Share the WC session table with the wallet server so the approval gate
+    /// can resolve the dApp name/origin for the request's session topic.
+    pub fn with_sessions(
+        mut self,
+        sessions: Arc<tokio::sync::Mutex<oc_walletconnect::WcSessionTable>>,
+    ) -> Self {
+        self.sessions = Some(sessions);
+        self
+    }
+
+    /// Resolve the dApp name/origin for an approval decision.
+    ///
+    /// Prefers the metadata the wallet server attached to the request; falls
+    /// back to the shared session table (keyed by `session_topic`) when the
+    /// caller passed empty strings — this is the case for pairing-topic
+    /// requests (e.g. `wc_authRequest`), where the session may carry the
+    /// proposer metadata.
+    fn resolve_dapp_metadata(
+        &self,
+        session_topic: &str,
+        dapp_name: &str,
+        dapp_origin: &str,
+    ) -> (String, String) {
+        if !dapp_name.is_empty() || !dapp_origin.is_empty() {
+            return (dapp_name.to_string(), dapp_origin.to_string());
+        }
+        let Some(sessions) = &self.sessions else {
+            return (String::new(), String::new());
+        };
+        let Ok(t) = sessions.try_lock() else {
+            return (String::new(), String::new());
+        };
+        match t.get(session_topic) {
+            Some(s) => {
+                (s.dapp_name.clone().unwrap_or_default(), s.dapp_origin.clone().unwrap_or_default())
+            }
+            None => (String::new(), String::new()),
+        }
+    }
+
+    /// Resolve the default (first) wallet and its chain address.
+    ///
+    /// Used by `onecipher_signAuth` (when `wallet_id` is omitted) and by
+    /// `wc_authRequest` (which never carries a wallet id). Prefers an account
+    /// matching `chain_id`; falls back to the wallet's first account when the
+    /// chain has no dedicated account (e.g. universal wallets).
+    async fn default_wallet_for_chain(
+        &self,
+        chain_id: &str,
+    ) -> Result<(String, String), (JsonRpcErrorCode, String)> {
+        let bytes =
+            self.forward(KeyAgentRequestKind::ListWallets(oc_keyagent::proto::Empty {})).await?;
+        let resp: ListWalletsResponse = Message::decode(bytes.as_slice())
+            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+        let wallet = resp.wallets.first().ok_or_else(|| {
+            (JsonRpcErrorCode::Internal, "no wallet available for auth request".into())
+        })?;
+        let address = wallet
+            .accounts
+            .iter()
+            .find(|a| !chain_id.is_empty() && a.chain_id == chain_id)
+            .or_else(|| wallet.accounts.first())
+            .map(|a| a.address.clone())
+            .ok_or_else(|| {
+                (
+                    JsonRpcErrorCode::Internal,
+                    "default wallet has no account for the requested chain".into(),
+                )
+            })?;
+        Ok((wallet.id.clone(), address))
     }
 
     /// Check if a signing request should be gated by the approval flow.
@@ -402,10 +481,22 @@ impl WalletMethodHandler for WcMethodRouter {
         &'a self,
         method: &str,
         params: Value,
-        _session_topic: &str,
+        session_topic: &str,
+        dapp_name: Option<&str>,
+        dapp_origin: Option<&str>,
     ) -> HandlerResult<'a> {
         let method = method.to_string();
+        // Own the dApp metadata so the future outlives the call's borrows.
+        let dapp_name = dapp_name.unwrap_or("").to_string();
+        let dapp_origin = dapp_origin.unwrap_or("").to_string();
+        let session_topic = session_topic.to_string();
         Box::pin(async move {
+            // Resolve dApp metadata from the shared session table when the
+            // wallet server did not attach it (pairing-topic requests).
+            let (resolved_name, resolved_origin) =
+                self.resolve_dapp_metadata(&session_topic, &dapp_name, &dapp_origin);
+            let dapp_name = resolved_name.as_str();
+            let dapp_origin = resolved_origin.as_str();
             match method.as_str() {
                 "onecipher_listWallets" => {
                     let bytes = self
@@ -467,8 +558,8 @@ impl WalletMethodHandler for WcMethodRouter {
                     self.maybe_gate_approval(
                         &method,
                         &params,
-                        "",
-                        "",
+                        dapp_name,
+                        dapp_origin,
                         &chain_id,
                         risk,
                         risk_reasons,
@@ -515,8 +606,8 @@ impl WalletMethodHandler for WcMethodRouter {
                     self.maybe_gate_approval(
                         &method,
                         &params,
-                        "",
-                        "",
+                        dapp_name,
+                        dapp_origin,
                         "",
                         risk,
                         risk_reasons,
@@ -531,6 +622,156 @@ impl WalletMethodHandler for WcMethodRouter {
                         Message::decode(bytes.as_slice())
                             .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
                     Ok(json!({"signature": resp.signature}))
+                }
+
+                // Auth-class message signing (`onecipher_signAuth`).
+                //
+                // Unlike `personal_sign`, this method does NOT require a
+                // Passkey: authorization is provided by the dApp origin
+                // allowlist (`wc.trusted_origins`) plus the daemon's approval
+                // flow (Web UI / CLI / policy). The Key-Agent signs the raw
+                // `message` bytes with the chain's message-signing convention
+                // (EVM: EIP-191; Solana: raw ed25519; …) and returns the
+                // signature, the derived account address and the public key.
+                "onecipher_signAuth" => {
+                    // wallet_id is optional — default to the first wallet.
+                    let wallet_id = match params.get("wallet_id").and_then(Value::as_str) {
+                        Some(w) => w.to_string(),
+                        None => self.default_wallet_for_chain("").await?.0,
+                    };
+                    let chain_id = params
+                        .get("chain_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
+                        })?
+                        .to_string();
+                    let message = params
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .map(|m| m.as_bytes().to_vec())
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing message".into())
+                        })?;
+
+                    // W2.1: Pre-signing policy evaluation (chain whitelist etc.)
+                    let (risk, risk_reasons) =
+                        self.policy_evaluate_signing(&method, &params, &chain_id)?;
+
+                    // Web UI approval gate (W1.3) — NO passkey involved.
+                    self.maybe_gate_approval(
+                        &method,
+                        &params,
+                        dapp_name,
+                        dapp_origin,
+                        &chain_id,
+                        risk,
+                        risk_reasons,
+                        None,
+                    )
+                    .await?;
+
+                    let req = SignAuthRequest { wallet_id, chain_id: chain_id.clone(), message };
+                    let bytes = self.forward(KeyAgentRequestKind::SignAuth(req)).await?;
+                    let resp: SignAuthResponse = Message::decode(bytes.as_slice())
+                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    Ok(json!({
+                        "signature": format!("0x{}", hex::encode(&resp.signature)),
+                        "address": resp.address,
+                        "chain_id": resp.chain_id,
+                        "public_key": format!("0x{}", hex::encode(&resp.public_key)),
+                    }))
+                }
+
+                // WalletConnect v2 Auth protocol (`wc_authRequest`) — one-time
+                // sign-in on a pairing topic, no session needed. The router
+                // builds the EIP-4361 (SIWE) message from the dApp's params,
+                // signs it via the Key-Agent's SignAuth path, and returns the
+                // signature + message hash + the original payload.
+                "wc_authRequest" => {
+                    use oc_walletconnect::{
+                        AuthRequestParams, AuthType, build_siwe_message, eip4361_hash,
+                    };
+
+                    let auth_params: AuthRequestParams = serde_json::from_value(params.clone())
+                        .map_err(|e| {
+                            (JsonRpcErrorCode::Internal, format!("bad wc_authRequest params: {e}"))
+                        })?;
+                    auth_params.validate().map_err(|e| {
+                        (JsonRpcErrorCode::Internal, format!("invalid wc_authRequest: {e}"))
+                    })?;
+
+                    // Only EVM chains are supported by the Auth protocol for
+                    // now — non-EVM chains should use `onecipher_signAuth`.
+                    let is_evm = auth_params
+                        .chain_id
+                        .parse::<oc_core::ChainId>()
+                        .map_or(false, |c| c.is_evm());
+                    if !is_evm {
+                        return Err((
+                            JsonRpcErrorCode::UnsupportedMethod,
+                            format!(
+                                "wc_authRequest not supported for non-EVM chain {}",
+                                auth_params.chain_id
+                            ),
+                        ));
+                    }
+
+                    // Resolve the default wallet + its address for the chain.
+                    let (wallet_id, address) =
+                        self.default_wallet_for_chain(&auth_params.chain_id).await?;
+
+                    let (message, hash): (Vec<u8>, Vec<u8>) = match auth_params.r#type {
+                        AuthType::Eip4361 => {
+                            let text = build_siwe_message(&address, &auth_params).map_err(|e| {
+                                (JsonRpcErrorCode::Internal, format!("siwe build: {e}"))
+                            })?;
+                            let hash = eip4361_hash(&text).to_vec();
+                            (text.into_bytes(), hash)
+                        }
+                        AuthType::Eip191 => {
+                            // Keep it simple: sign `aud || "\n" || nonce`, or
+                            // the raw `message` field when the dApp supplied one.
+                            let raw = match params.get("message").and_then(Value::as_str) {
+                                Some(m) => m.as_bytes().to_vec(),
+                                None => format!("{}\n{}", auth_params.aud, auth_params.nonce)
+                                    .into_bytes(),
+                            };
+                            let hash = Sha256::digest(&raw).to_vec();
+                            (raw, hash)
+                        }
+                    };
+
+                    // W2.1: policy evaluation (chain whitelist).
+                    let (risk, risk_reasons) =
+                        self.policy_evaluate_signing(&method, &params, &auth_params.chain_id)?;
+
+                    // Approval gate (W1.3).
+                    self.maybe_gate_approval(
+                        &method,
+                        &params,
+                        dapp_name,
+                        dapp_origin,
+                        &auth_params.chain_id,
+                        risk,
+                        risk_reasons,
+                        None,
+                    )
+                    .await?;
+
+                    let req = SignAuthRequest {
+                        wallet_id,
+                        chain_id: auth_params.chain_id.clone(),
+                        message,
+                    };
+                    let bytes = self.forward(KeyAgentRequestKind::SignAuth(req)).await?;
+                    let resp: SignAuthResponse = Message::decode(bytes.as_slice())
+                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    Ok(json!({
+                        "signature": format!("0x{}", hex::encode(&resp.signature)),
+                        "hash": format!("0x{}", hex::encode(&hash)),
+                        "payload": params,
+                    }))
                 }
 
                 "eth_signTypedData_v4" | "onecipher_signTypedData" => {
@@ -557,8 +798,8 @@ impl WalletMethodHandler for WcMethodRouter {
                     self.maybe_gate_approval(
                         &method,
                         &params,
-                        "",
-                        "",
+                        dapp_name,
+                        dapp_origin,
                         "",
                         risk,
                         risk_reasons,
@@ -603,8 +844,8 @@ impl WalletMethodHandler for WcMethodRouter {
                     self.maybe_gate_approval(
                         &method,
                         &params,
-                        "",
-                        "",
+                        dapp_name,
+                        dapp_origin,
                         &chain_id,
                         risk,
                         risk_reasons,
@@ -1105,6 +1346,281 @@ mod tests {
         });
         let result = WcMethodRouter::extract_passkey_auth(&params).unwrap().unwrap();
         assert!(result.challenge.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Session-metadata resolution (approval gate dApp name/origin)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_dapp_metadata_prefers_attached_values() {
+        let key_agent = KeyAgentClient::new("/tmp/nonexistent.sock");
+        let router = WcMethodRouter::new(key_agent);
+        let (name, origin) =
+            router.resolve_dapp_metadata("topic-1", "Uniswap", "https://uniswap.org");
+        assert_eq!(name, "Uniswap");
+        assert_eq!(origin, "https://uniswap.org");
+    }
+
+    #[tokio::test]
+    async fn resolve_dapp_metadata_falls_back_to_session_table() {
+        let key_agent = KeyAgentClient::new("/tmp/nonexistent.sock");
+        let sessions = Arc::new(tokio::sync::Mutex::new(oc_walletconnect::WcSessionTable::new()));
+        let router = WcMethodRouter::new(key_agent).with_sessions(Arc::clone(&sessions));
+
+        let mut session = oc_walletconnect::WcSession::new_pairing(
+            "topic-auth".into(),
+            "ab".repeat(32),
+            u64::MAX,
+        );
+        session.dapp_name = Some("AuthDApp".into());
+        session.dapp_origin = Some("https://iam.example.com".into());
+        sessions.lock().await.insert(session);
+
+        // Empty attached metadata → resolved from the shared table.
+        let (name, origin) = router.resolve_dapp_metadata("topic-auth", "", "");
+        assert_eq!(name, "AuthDApp");
+        assert_eq!(origin, "https://iam.example.com");
+
+        // Unknown topic → empty strings.
+        let (name, origin) = router.resolve_dapp_metadata("unknown", "", "");
+        assert_eq!(name, "");
+        assert_eq!(origin, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Mock Key-Agent over UDS: serves a canned response per request kind.
+    // -----------------------------------------------------------------------
+
+    /// Spawn a mock Key-Agent that answers `ListWallets` with a single-wallet
+    /// listing and every other request with `canned`. Each accepted connection
+    /// serves multiple requests (the client pools its connection, like the
+    /// real Key-Agent's per-connection request loop).
+    async fn spawn_mock_keyagent(
+        sock_path: String,
+        wallets: ListWalletsResponse,
+        canned: Vec<u8>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::UnixListener::bind(&sock_path).expect("bind mock keyagent");
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.expect("accept mock keyagent");
+                loop {
+                    // Read one request frame.
+                    let mut len_buf = [0u8; 4];
+                    if stream.read_exact(&mut len_buf).await.is_err() {
+                        break; // client closed the connection
+                    }
+                    let len = u32::from_be_bytes(len_buf);
+                    let mut req_buf = vec![0u8; len as usize];
+                    if stream.read_exact(&mut req_buf).await.is_err() {
+                        break;
+                    }
+                    // Decode the request kind to pick the response payload.
+                    let payload = match oc_keyagent::KeyAgentRequest::decode(req_buf.as_slice()) {
+                        Ok(req)
+                            if matches!(
+                                req.kind,
+                                Some(oc_keyagent::KeyAgentRequestKind::ListWallets(_))
+                            ) =>
+                        {
+                            wallets.encode_to_vec()
+                        }
+                        _ => canned.clone(),
+                    };
+                    let resp = oc_keyagent::KeyAgentResponse::ok(payload);
+                    let resp_bytes = resp.encode_to_vec();
+                    if stream.write_all(&(resp_bytes.len() as u32).to_be_bytes()).await.is_err() {
+                        break;
+                    }
+                    if stream.write_all(&resp_bytes).await.is_err() {
+                        break;
+                    }
+                    if stream.flush().await.is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    fn sample_list_wallets() -> ListWalletsResponse {
+        ListWalletsResponse {
+            wallets: vec![oc_keyagent::proto::WalletInfo {
+                id: "w1".into(),
+                name: "primary".into(),
+                key_type: "mnemonic".into(),
+                created_at: 0,
+                accounts: vec![oc_keyagent::proto::WalletAccount {
+                    account_id: "acc-1".into(),
+                    address: "0x9858EfFD232B4033E47d90003D41EC34EcaEda94".into(),
+                    chain_id: "eip155:1".into(),
+                    derivation_path: "m/44'/60'/0'/0/0".into(),
+                }],
+            }],
+        }
+    }
+
+    fn sample_sign_auth_response() -> oc_keyagent::proto::SignAuthResponse {
+        oc_keyagent::proto::SignAuthResponse {
+            signature: vec![0xAA; 65],
+            address: "0x9858EfFD232B4033E47d90003D41EC34EcaEda94".into(),
+            chain_id: "eip155:1".into(),
+            public_key: vec![0x02; 33],
+        }
+    }
+
+    #[tokio::test]
+    async fn sign_auth_does_not_require_passkey_and_returns_expected_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ka.sock").to_string_lossy().to_string();
+        let canned = sample_sign_auth_response().encode_to_vec();
+        let _mock = spawn_mock_keyagent(sock.clone(), sample_list_wallets(), canned).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let key_agent = KeyAgentClient::new(&sock);
+        let router = WcMethodRouter::new(key_agent);
+        // Approval mode is off by default → the gate passes through.
+        let params = json!({
+            "wallet_id": "w1",
+            "chain_id": "eip155:1",
+            "message": "Sign in to example service"
+            // NOTE: no `auth` (passkey) field — must NOT be required.
+        });
+        let result = router.handle("onecipher_signAuth", params, "topic-1", None, None).await;
+        let value = result.expect("signAuth must succeed without passkey auth");
+        assert_eq!(value["address"], "0x9858EfFD232B4033E47d90003D41EC34EcaEda94");
+        assert_eq!(value["chain_id"], "eip155:1");
+        assert_eq!(value["signature"], format!("0x{}", hex::encode(vec![0xAA; 65])));
+        assert_eq!(value["public_key"], format!("0x{}", hex::encode(vec![0x02; 33])));
+    }
+
+    #[tokio::test]
+    async fn sign_auth_defaults_wallet_from_list_wallets() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ka2.sock").to_string_lossy().to_string();
+        let canned = sample_sign_auth_response().encode_to_vec();
+        let _mock = spawn_mock_keyagent(sock.clone(), sample_list_wallets(), canned).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let key_agent = KeyAgentClient::new(&sock);
+        let router = WcMethodRouter::new(key_agent);
+        // wallet_id omitted → resolved via ListWallets (first wallet).
+        let params = json!({
+            "chain_id": "eip155:1",
+            "message": "hello"
+        });
+        let result = router.handle("onecipher_signAuth", params, "topic-2", None, None).await;
+        assert!(result.is_ok(), "signAuth without wallet_id must succeed: {:?}", result.err());
+        assert_eq!(result.unwrap()["address"], "0x9858EfFD232B4033E47d90003D41EC34EcaEda94");
+    }
+
+    #[tokio::test]
+    async fn sign_auth_missing_message_is_rejected() {
+        let key_agent = KeyAgentClient::new("/tmp/nonexistent.sock");
+        let router = WcMethodRouter::new(key_agent);
+        let params = json!({ "wallet_id": "w1", "chain_id": "eip155:1" });
+        let result = router.handle("onecipher_signAuth", params, "t", None, None).await;
+        assert!(result.is_err());
+        let (code, msg) = result.unwrap_err();
+        assert_eq!(code, JsonRpcErrorCode::UnsupportedMethod);
+        assert!(msg.contains("message"));
+    }
+
+    // -----------------------------------------------------------------------
+    // WC v2 Auth protocol (`wc_authRequest`) router tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn wc_auth_request_eip4361_builds_siwe_and_signs() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ka3.sock").to_string_lossy().to_string();
+        let canned = sample_sign_auth_response().encode_to_vec();
+        let _mock = spawn_mock_keyagent(sock.clone(), sample_list_wallets(), canned).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let key_agent = KeyAgentClient::new(&sock);
+        let router = WcMethodRouter::new(key_agent);
+        let params = json!({
+            "type": "eip4361",
+            "chainId": "eip155:1",
+            "aud": "https://iam.example.com/login",
+            "domain": "iam.example.com",
+            "nonce": "a1b2c3d4e5f6g7h8",
+            "statement": "Sign in with your wallet",
+            "resources": ["https://iam.example.com/terms"]
+        });
+        let result =
+            router.handle("wc_authRequest", params.clone(), "pairing-topic", None, None).await;
+        let value = result.expect("wc_authRequest must succeed");
+        // The signature is 0x-prefixed hex of the 65-byte canned signature.
+        assert_eq!(value["signature"], format!("0x{}", hex::encode(vec![0xAA; 65])));
+        // hash = keccak256 of the SIWE message for eip4361.
+        let hash_hex = value["hash"].as_str().unwrap();
+        assert!(hash_hex.starts_with("0x"));
+        assert_eq!(hash_hex.len(), 2 + 64);
+        // The original payload is echoed back verbatim.
+        assert_eq!(value["payload"], params);
+    }
+
+    #[tokio::test]
+    async fn wc_auth_request_eip191_signs_aud_nonce() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ka4.sock").to_string_lossy().to_string();
+        let canned = sample_sign_auth_response().encode_to_vec();
+        let _mock = spawn_mock_keyagent(sock.clone(), sample_list_wallets(), canned).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let key_agent = KeyAgentClient::new(&sock);
+        let router = WcMethodRouter::new(key_agent);
+        let params = json!({
+            "type": "eip191",
+            "chainId": "eip155:1",
+            "aud": "https://iam.example.com",
+            "domain": "iam.example.com",
+            "nonce": "abcdefgh12345678"
+        });
+        let result =
+            router.handle("wc_authRequest", params.clone(), "pairing-topic", None, None).await;
+        let value = result.expect("eip191 auth must succeed");
+        assert!(value["signature"].as_str().unwrap().starts_with("0x"));
+        // sha256 fallback hash.
+        let hash_hex = value["hash"].as_str().unwrap();
+        assert_eq!(hash_hex.len(), 2 + 64);
+        assert_eq!(value["payload"], params);
+    }
+
+    #[tokio::test]
+    async fn wc_auth_request_non_evm_chain_is_method_not_supported() {
+        let key_agent = KeyAgentClient::new("/tmp/nonexistent.sock");
+        let router = WcMethodRouter::new(key_agent);
+        let params = json!({
+            "type": "eip4361",
+            "chainId": "solana:mainnet",
+            "aud": "https://iam.example.com",
+            "domain": "iam.example.com",
+            "nonce": "abcdefgh12345678"
+        });
+        let result = router.handle("wc_authRequest", params, "pairing-topic", None, None).await;
+        let (code, msg) = result.unwrap_err();
+        assert_eq!(code, JsonRpcErrorCode::UnsupportedMethod);
+        assert!(msg.contains("non-EVM"));
+    }
+
+    #[tokio::test]
+    async fn wc_auth_request_missing_required_fields_is_rejected() {
+        let key_agent = KeyAgentClient::new("/tmp/nonexistent.sock");
+        let router = WcMethodRouter::new(key_agent);
+        // Missing nonce → validation error.
+        let params = json!({
+            "type": "eip4361",
+            "chainId": "eip155:1",
+            "aud": "https://iam.example.com",
+            "domain": "iam.example.com"
+        });
+        let result = router.handle("wc_authRequest", params, "pairing-topic", None, None).await;
+        assert!(result.is_err());
     }
 }
 

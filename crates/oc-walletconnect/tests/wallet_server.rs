@@ -21,6 +21,8 @@ impl WalletMethodHandler for CountingHandler {
         method: &str,
         params: Value,
         _session_topic: &str,
+        _dapp_name: Option<&str>,
+        _dapp_origin: Option<&str>,
     ) -> HandlerResult<'a> {
         let method = method.to_string();
         Box::pin(async move {
@@ -87,7 +89,14 @@ async fn server_returns_method_error_when_handler_fails() {
 
     struct FailHandler;
     impl WalletMethodHandler for FailHandler {
-        fn handle<'a>(&'a self, _: &str, _: Value, _: &str) -> HandlerResult<'a> {
+        fn handle<'a>(
+            &'a self,
+            _: &str,
+            _: Value,
+            _: &str,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> HandlerResult<'a> {
             Box::pin(async { Err((JsonRpcErrorCode::UserRejected, "no".into())) })
         }
     }

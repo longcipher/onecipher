@@ -29,6 +29,7 @@ pub(crate) mod policy;
 pub(crate) mod sbom;
 pub(crate) mod secret;
 pub(crate) mod send_transaction;
+pub(crate) mod service;
 pub(crate) mod session_key;
 pub(crate) mod sign_auth;
 pub(crate) mod sign_message;

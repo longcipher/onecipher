@@ -20,6 +20,7 @@ path = "src/lib.rs"
 ed25519-dalek = { workspace = true, features = ["hazmat", "rand_core"] }
 hex = { workspace = true }
 jiff = { workspace = true }
+k256 = { workspace = true }
 oc-core = { workspace = true, features = ["hardened"] }
 oc-crypto = { workspace = true }
 oc-policy = { workspace = true }

@@ -12,6 +12,7 @@ axum = { workspace = true, features = ["ws", "macros"] }
 dashmap = "6"
 hex = { workspace = true }
 oc-core = { workspace = true }
+oc-walletconnect = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

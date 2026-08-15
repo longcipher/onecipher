@@ -140,7 +140,7 @@ fn disable_core_dumps() -> bool {
         let prctl_ok = libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) == 0;
 
         let rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-        let rlimit_ok = libc::setrlimit(libc::RLIMIT_CORE, &rlim) == 0;
+        let rlimit_ok = libc::setrlimit(libc::RLIMIT_CORE, &raw const rlim) == 0;
 
         prctl_ok && rlimit_ok
     }
@@ -164,7 +164,7 @@ fn disable_core_dumps() -> bool {
     // This is a standard POSIX operation with no undefined behavior.
     unsafe {
         let rlim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-        libc::setrlimit(libc::RLIMIT_CORE, &rlim) == 0
+        libc::setrlimit(libc::RLIMIT_CORE, &raw const rlim) == 0
     }
 }
 

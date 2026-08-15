@@ -3,6 +3,7 @@
 pub mod approvals;
 pub mod audit;
 pub mod auth;
+pub mod pairings;
 pub mod sessions;
 pub mod settings;
 pub mod wallets;

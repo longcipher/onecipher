@@ -12,8 +12,9 @@
 use crate::proto::{
     CreateSessionKeyRequest, DrainTelemetryRequest, GenerateChallengeRequest, GenerateTotpRequest,
     GetBalanceRequest, GetPaymentHistoryRequest, GetSecretRequest, ListSecretsRequest,
-    PayX402Request, RegisterPasskeyRequest, RevokeSessionKeyRequest, SignMessageRequest,
-    SignTransactionRequest, SignTypedDataRequest, SignUserOpRequest, UnlockVaultRequest,
+    PayX402Request, RegisterPasskeyRequest, RevokeSessionKeyRequest, SignAuthRequest,
+    SignMessageRequest, SignTransactionRequest, SignTypedDataRequest, SignUserOpRequest,
+    UnlockVaultRequest,
 };
 
 /// A request sent from the Network-Agent to the Key-Agent over UDS.
@@ -29,7 +30,7 @@ pub struct KeyAgentRequest {
     /// The request payload (exactly one variant set).
     #[prost(
         oneof = "KeyAgentRequestKind",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18"
+        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
     )]
     pub kind: Option<KeyAgentRequestKind>,
 }
@@ -114,6 +115,13 @@ pub enum KeyAgentRequestKind {
     /// outside the allowlist is redacted before it ever reaches the buffer).
     #[prost(message, tag = "18")]
     DrainTelemetry(DrainTelemetryRequest),
+    /// `AgentService.SignAuth` — auth-class message signing, NO passkey gate.
+    ///
+    /// Authorized at the network layer (dApp origin allowlist + daemon
+    /// approval flow). The Key-Agent derives the wallet unlock token from the
+    /// process device key instead of a Passkey signature.
+    #[prost(message, tag = "19")]
+    SignAuth(SignAuthRequest),
 }
 
 #[cfg(test)]
@@ -167,6 +175,28 @@ mod tests {
         let bytes = req.encode_to_vec();
         let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();
         assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn test_sign_auth_round_trip() {
+        let req = KeyAgentRequest {
+            kind: Some(KeyAgentRequestKind::SignAuth(SignAuthRequest {
+                wallet_id: "w1".to_string(),
+                chain_id: "eip155:1".to_string(),
+                message: b"sign in to example".to_vec(),
+            })),
+        };
+        let bytes = req.encode_to_vec();
+        let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();
+        assert_eq!(req, decoded);
+        match decoded.kind {
+            Some(KeyAgentRequestKind::SignAuth(sa)) => {
+                assert_eq!(sa.wallet_id, "w1");
+                assert_eq!(sa.chain_id, "eip155:1");
+                assert_eq!(sa.message, b"sign in to example");
+            }
+            other => panic!("expected SignAuth, got {other:?}"),
+        }
     }
 
     #[test]
