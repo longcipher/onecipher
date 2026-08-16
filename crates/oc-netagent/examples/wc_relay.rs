@@ -19,10 +19,12 @@ use std::{
 use axum::{
     Router,
     extract::{
-        State,
+        Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    response::IntoResponse,
+    http::{header, HeaderValue},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use futures::{SinkExt, StreamExt};
@@ -47,11 +49,42 @@ async fn main() {
         .unwrap_or(7443);
 
     let state = Arc::new(RelayState::default());
-    let app = Router::new().route("/", get(ws_handler)).with_state(state);
+    let app = Router::new()
+        .route("/", get(ws_handler))
+        .layer(middleware::from_fn(compat_ws_headers))
+        .with_state(state);
     let addr = format!("127.0.0.1:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     println!("mock WC relay listening on ws://{addr}");
     axum::serve(listener, app).await.unwrap();
+}
+
+/// Cloudflare Tunnel forwards WebSocket upgrades over HTTP/2 (CONNECT +
+/// `:protocol`), and the origin leg can omit the HTTP/1.1 `Connection:
+/// upgrade` header that axum's `WebSocketUpgrade` extractor requires. This
+/// middleware re-adds it when an `Upgrade: websocket` request lacks it, so
+/// the relay accepts tunneled WebSocket connections.
+async fn compat_ws_headers(mut req: Request, next: Next) -> Response {
+    let wants_ws = req
+        .headers()
+        .get(header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+    let _ = wants_ws;
+    // Cloudflare Tunnel 把 WebSocket 升级经 HTTP/2 转发到回源（CONNECT +
+    // `:protocol`），回源请求会丢失 HTTP/1.1 的 `Upgrade` 头，并把
+    // `Connection` 改写为 `keep-alive`。只要请求带 WS 握手特征头
+    // （sec-websocket-key / sec-websocket-version），就补全完整的升级头，
+    // 使 axum 的 `WebSocketUpgrade` 接受该握手。
+    if req.headers().contains_key(header::SEC_WEBSOCKET_KEY)
+        && req.headers().contains_key(header::SEC_WEBSOCKET_VERSION)
+    {
+        req.headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+        req.headers_mut()
+            .insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+    }
+    next.run(req).await
 }
 
 async fn ws_handler(
