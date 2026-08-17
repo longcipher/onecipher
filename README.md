@@ -1,5 +1,7 @@
 # OneCipher
 
+[Project Home](https://onecipher.longcipher.com/) | [Documentation](https://book.longcipher.com/onecipher/)
+
 Policy-gated, local-key-custody signing stack and **unified sensitive data
 vault** for AI agents — fully designed and implemented in accordance with the
 [WalletConnect v2 Specification](https://specs.walletconnect.com/) and [Open Wallet Standard](https://openwallet.sh) and hardened for production
