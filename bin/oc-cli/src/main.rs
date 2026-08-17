@@ -151,7 +151,7 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             } => commands::sign_message::run(
                 &chain,
                 &wallet,
-                &message,
+                message.as_deref(),
                 &encoding,
                 typed_data.as_deref(),
                 index,

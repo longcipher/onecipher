@@ -78,6 +78,17 @@ pub trait ChainSigner: Send + Sync {
         )))
     }
 
+    /// Returns `false` when this chain's support was compiled out (e.g. an
+    /// optional `xrpl` feature) and the signer is a fail-closed placeholder.
+    ///
+    /// Callers that enumerate all chains (wallet import / creation / account
+    /// listing) MUST skip unavailable chains instead of failing the whole
+    /// operation, while signing flows MUST still reject with the feature
+    /// error. Defaults to `true`.
+    fn is_available(&self) -> bool {
+        true
+    }
+
     /// Returns the default BIP-44 derivation path template for this chain.
     fn default_derivation_path(&self, index: u32) -> String;
 

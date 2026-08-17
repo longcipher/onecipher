@@ -990,9 +990,9 @@ pub(crate) enum SignCommands {
         /// Wallet name or ID (uses stored encrypted mnemonic)
         #[arg(long, env = "ONECIPHER_WALLET")]
         wallet: String,
-        /// Message to sign
-        #[arg(long)]
-        message: String,
+        /// Message to sign (optional when --typed-data is provided)
+        #[arg(long, required_unless_present = "typed_data")]
+        message: Option<String>,
         /// Message encoding: "utf8" or "hex"
         #[arg(long, default_value = "utf8")]
         encoding: String,

@@ -57,6 +57,10 @@ impl ChainSigner for UnsupportedSigner {
         self.chain_type
     }
 
+    fn is_available(&self) -> bool {
+        false
+    }
+
     fn curve(&self) -> Curve {
         Curve::Secp256k1
     }

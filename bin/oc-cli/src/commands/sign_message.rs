@@ -5,12 +5,18 @@ use crate::{CliError, parse_chain};
 pub(crate) fn run(
     chain_str: &str,
     wallet_name: &str,
-    message: &str,
+    message: Option<&str>,
     encoding: &str,
     typed_data: Option<&str>,
     index: u32,
     json_output: bool,
 ) -> Result<(), CliError> {
+    if typed_data.is_none() && message.is_none() {
+        return Err(CliError::InvalidArgs(
+            "a --message (or --typed-data) is required".into(),
+        ));
+    }
+
     // Check for API token in passphrase — route through library for policy enforcement
     let passphrase = super::peek_passphrase();
     if passphrase.as_deref().is_some_and(|p| p.starts_with(oc_wallet::key_store::TOKEN_PREFIX)) {
@@ -28,7 +34,7 @@ pub(crate) fn run(
         let result = oc_wallet::sign_message(
             wallet_name,
             chain_str,
-            message,
+            message.unwrap_or_default(),
             passphrase.as_deref(),
             Some(encoding),
             Some(index),
@@ -51,6 +57,7 @@ pub(crate) fn run(
         }
         EvmSigner.sign_typed_data(key.expose(), td_json)?
     } else {
+        let message = message.unwrap_or_default();
         let msg_bytes = match encoding {
             "utf8" => message.as_bytes().to_vec(),
             "hex" => hex::decode(message)

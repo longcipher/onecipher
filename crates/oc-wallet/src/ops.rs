@@ -44,6 +44,12 @@ fn derive_all_accounts(
     for ct in &ALL_CHAIN_TYPES {
         let chain = default_chain_for_type(*ct);
         let signer = signer_for_chain(*ct);
+        // Skip chains whose support was compiled out (e.g. `xrpl` off by
+        // default). Importing/creating a wallet must not fail because a
+        // single optional chain is disabled.
+        if !signer.is_available() {
+            continue;
+        }
         let path = signer.default_derivation_path(index);
         let curve = signer.curve();
         let key = HdDeriver::derive_from_mnemonic(mnemonic, "", &path, curve)?;
@@ -111,6 +117,12 @@ fn derive_all_accounts_from_keys(keys: &KeyPair) -> Result<Vec<WalletAccount>, O
     let mut accounts = Vec::with_capacity(ALL_CHAIN_TYPES.len());
     for ct in &ALL_CHAIN_TYPES {
         let signer = signer_for_chain(*ct);
+        // Skip chains whose support was compiled out (e.g. `xrpl` off by
+        // default). Importing/creating a wallet must not fail because a
+        // single optional chain is disabled.
+        if !signer.is_available() {
+            continue;
+        }
         let key = keys.key_for_curve(signer.curve());
         let address = signer.derive_address(key)?;
         let chain = default_chain_for_type(*ct);
@@ -1041,10 +1053,14 @@ mod tests {
         )
         .unwrap();
 
+        let available_chain_count = ALL_CHAIN_TYPES
+            .iter()
+            .filter(|ct| oc_signer::signer_for_chain(**ct).is_available())
+            .count();
         assert_eq!(
             info.accounts.len(),
-            ALL_CHAIN_TYPES.len(),
-            "should have one account per chain type"
+            available_chain_count,
+            "should have one account per available chain type (unavailable chains are skipped)"
         );
 
         // Sign on EVM (secp256k1)
