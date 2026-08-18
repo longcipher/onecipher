@@ -11,10 +11,9 @@
 
 use crate::proto::{
     CreateSessionKeyRequest, DrainTelemetryRequest, GenerateChallengeRequest, GenerateTotpRequest,
-    GetBalanceRequest, GetPaymentHistoryRequest, GetSecretRequest, ListSecretsRequest,
-    PayX402Request, RegisterPasskeyRequest, RevokeSessionKeyRequest, SignAuthRequest,
-    SignMessageRequest, SignTransactionRequest, SignTypedDataRequest, SignUserOpRequest,
-    UnlockVaultRequest,
+    GetBalanceRequest, GetSecretRequest, ListSecretsRequest, RegisterPasskeyRequest,
+    RevokeSessionKeyRequest, SignAuthRequest, SignMessageRequest, SignTransactionRequest,
+    SignTypedDataRequest, SignUserOpRequest, UnlockVaultRequest,
 };
 
 /// A request sent from the Network-Agent to the Key-Agent over UDS.
@@ -30,7 +29,7 @@ pub struct KeyAgentRequest {
     /// The request payload (exactly one variant set).
     #[prost(
         oneof = "KeyAgentRequestKind",
-        tags = "1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
+        tags = "1, 2, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
     )]
     pub kind: Option<KeyAgentRequestKind>,
 }
@@ -56,9 +55,6 @@ pub enum KeyAgentRequestKind {
     /// `AgentService.RevokeSessionKey` — requires PasskeyAuthorization (T15).
     #[prost(message, tag = "2")]
     RevokeSessionKey(RevokeSessionKeyRequest),
-    /// `AgentService.PayX402` — x402 payment (T16 policy + T13 signing).
-    #[prost(message, tag = "3")]
-    PayX402(PayX402Request),
     /// `AgentService.SignTransaction` — generic chain tx signing (T13).
     #[prost(message, tag = "4")]
     SignTransaction(SignTransactionRequest),
@@ -71,9 +67,6 @@ pub enum KeyAgentRequestKind {
     /// `AgentService.SignTypedData` — EIP-712 typed data signing (T13).
     #[prost(message, tag = "7")]
     SignTypedData(SignTypedDataRequest),
-    /// `AgentService.GetPaymentHistory` — read-only (T18).
-    #[prost(message, tag = "8")]
-    GetPaymentHistory(GetPaymentHistoryRequest),
     /// `AgentService.GetBalance` — read-only (T18).
     #[prost(message, tag = "9")]
     GetBalance(GetBalanceRequest),
@@ -126,7 +119,6 @@ pub enum KeyAgentRequestKind {
 
 #[cfg(test)]
 mod tests {
-    use proptest::prelude::*;
     use prost::Message;
 
     use super::*;
@@ -213,52 +205,9 @@ mod tests {
     }
 
     #[test]
-    fn test_pay_x402_round_trip() {
-        let mut headers = std::collections::HashMap::new();
-        headers.insert("X-Idempotency-Key".to_string(), "abc-123".to_string());
-        let req = KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::PayX402(PayX402Request {
-                session_key_id: "sk-test".to_string(),
-                url: "https://example.com".to_string(),
-                method: "GET".to_string(),
-                body: vec![0xDE, 0xAD],
-                headers,
-                ..Default::default()
-            })),
-        };
-        let bytes = req.encode_to_vec();
-        let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();
-        assert_eq!(req, decoded);
-    }
-
-    #[test]
     fn test_decode_garbage_no_panic() {
         // Garbage bytes must return Err, not panic.
         let garbage = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01, 0x02];
         let _ = KeyAgentRequest::decode(garbage.as_slice());
-    }
-
-    proptest! {
-        #[test]
-        fn test_pay_x402_fuzz_round_trip(
-            session_key_id in "[a-z0-9-]{1,32}",
-            url in "https?://[a-z]{1,16}.[a-z]{1,8}",
-            method in "(GET|POST|PUT|DELETE)",
-            body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256),
-        ) {
-            let req = KeyAgentRequest {
-                kind: Some(KeyAgentRequestKind::PayX402(PayX402Request {
-                    session_key_id,
-                    url,
-                    method,
-                    body,
-                    headers: std::collections::HashMap::new(),
-                    ..Default::default()
-                })),
-            };
-            let bytes = req.encode_to_vec();
-            let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();
-            prop_assert_eq!(req, decoded);
-        }
     }
 }

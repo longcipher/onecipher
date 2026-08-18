@@ -88,7 +88,7 @@ fn test_append_multiple_entries_chain() {
     for i in 0..5u64 {
         let et = match i % 3 {
             0 => EventType::CreateSessionKey,
-            1 => EventType::PayX402,
+            1 => EventType::HumanAlert,
             _ => EventType::SignUserOp,
         };
         let seq = log.append(et, Some(format!("sk-{}", i)), json!({"i": i})).unwrap();
@@ -370,8 +370,6 @@ proptest! {
             proptest::sample::select(vec![
                 EventType::CreateSessionKey,
                 EventType::RevokeSessionKey,
-                EventType::PayX402,
-                EventType::PayMpp,
                 EventType::SignUserOp,
                 EventType::PasskeyForged,
                 EventType::PasskeyMissing,
@@ -382,8 +380,6 @@ proptest! {
                 EventType::BudgetReclaim,
                 EventType::BackupAttemptFailed,
                 EventType::BackupLocked,
-                EventType::MppChannelOpen,
-                EventType::MppChannelClose,
                 EventType::AuthFailed,
             ]),
             1..=32,

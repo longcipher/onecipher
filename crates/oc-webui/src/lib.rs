@@ -398,7 +398,11 @@ mod tests {
                 .unwrap();
 
         // Make an HTTP request to the health endpoint
-        let resp = reqwest::get(format!("http://127.0.0.1:{port}/api/health")).await.unwrap();
+        let resp = hpx::Client::new()
+            .get(format!("http://127.0.0.1:{port}/api/health"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["ok"], true);

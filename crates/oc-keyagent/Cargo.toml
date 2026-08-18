@@ -16,14 +16,12 @@ path = "src/lib.rs"
 # T13 (memory hardening): oc-crypto (HardenedBytes) + oc-vault (Vault::decrypt) + oc-signer (Mnemonic, HdDeriver).
 # T14 (audit): serde + sha2 + ed25519-dalek + hex + jiff (chain hash + signatures).
 # T15 (passkey): p256 + ed25519-dalek + rand (P-256/Ed25519 verify + OsRng).
-# T16 (policy integration): oc-policy (evaluate_11_step + PolicyState + AlertSink).
 ed25519-dalek = { workspace = true, features = ["hazmat", "rand_core"] }
 hex = { workspace = true }
-jiff = { workspace = true }
+jiff = { workspace = true, features = ["serde", "std"] }
 k256 = { workspace = true }
 oc-core = { workspace = true, features = ["hardened"] }
 oc-crypto = { workspace = true }
-oc-policy = { workspace = true }
 oc-signer = { workspace = true }
 oc-vault = { workspace = true }
 oc-wallet = { workspace = true, default-features = false }

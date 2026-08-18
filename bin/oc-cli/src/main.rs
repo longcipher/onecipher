@@ -229,22 +229,6 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
                 Err(CliError::InvalidArgs("signature verification failed".into()))
             }
         }
-        Commands::Fund { subcommand } => match subcommand {
-            cli::FundCommands::Deposit { wallet, chain, token } => {
-                commands::fund::run(&wallet, Some(&chain), Some(&token))
-            }
-            cli::FundCommands::Balance { wallet, chain } => {
-                commands::fund::balance(&wallet, Some(&chain))
-            }
-        },
-        Commands::Pay { subcommand } => match subcommand {
-            cli::PayCommands::Request { url, wallet, method, body, no_passphrase } => {
-                commands::pay::run(&url, &wallet, &method, body.as_deref(), no_passphrase)
-            }
-            cli::PayCommands::Discover { query, limit, offset } => {
-                commands::pay::discover(query.as_deref(), limit, offset)
-            }
-        },
         Commands::Mnemonic { subcommand } => match subcommand {
             cli::MnemonicCommands::Generate { words } => commands::generate::run(words),
             cli::MnemonicCommands::Derive { chain, index, path, count, show_private_key } => {
@@ -309,11 +293,6 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             ),
             cli::SessionKeyCommands::List => commands::session_key::list(client),
         },
-        Commands::OcPay { subcommand } => match subcommand {
-            cli::OcPayCommands::X402 { url, session_key, method, body } => {
-                commands::pay_x402::run(&url, &session_key, &method, body.as_deref(), client)
-            }
-        },
         Commands::Status => commands::status::run(),
         Commands::Service { subcommand } => match subcommand {
             cli::ServiceCommands::Install => commands::service::install(),
@@ -371,27 +350,14 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             },
         },
         Commands::Intent { subcommand } => match subcommand {
-            cli::IntentCommands::Submit { json, chain, session_key, sponsor, yes, rpc_url } => {
-                commands::intent::run_submit(
-                    &json,
-                    &chain,
-                    &session_key,
-                    &sponsor,
-                    yes,
-                    rpc_url.as_deref(),
-                )
+            cli::IntentCommands::Submit { json, chain, session_key, yes, rpc_url } => {
+                commands::intent::run_submit(&json, &chain, &session_key, yes, rpc_url.as_deref())
             }
             cli::IntentCommands::Simulate { json, chain, session_key, rpc_url } => {
                 commands::intent::run_simulate(&json, &chain, &session_key, rpc_url.as_deref())
             }
-            cli::IntentCommands::Execute { json, chain, session_key, sponsor, rpc_url } => {
-                commands::intent::run_execute(
-                    &json,
-                    &chain,
-                    &session_key,
-                    &sponsor,
-                    rpc_url.as_deref(),
-                )
+            cli::IntentCommands::Execute { json, chain, session_key, rpc_url } => {
+                commands::intent::run_execute(&json, &chain, &session_key, rpc_url.as_deref())
             }
         },
         Commands::Secret { subcommand } => match subcommand {
@@ -506,6 +472,11 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             cli::GitCommands::Push => commands::git_cmd::push(),
             cli::GitCommands::Log { name } => commands::git_cmd::log(name.as_deref()),
             cli::GitCommands::Status => commands::git_cmd::status(),
+        },
+        Commands::WalletRpc { subcommand } => match subcommand {
+            cli::WalletRpcCommands::Serve { listen, wallet, index } => {
+                commands::wallet_rpc::serve(&listen, &wallet, index)
+            }
         },
     }
 }
@@ -677,8 +648,8 @@ fn run_daemon() -> Result<(), CliError> {
 
         // --- Web UI server (conditionally spawned) ---
         // Compiled out entirely without the `webui` feature: `webauthn-rs` is
-        // the only thing that links OpenSSL into a binary that already links
-        // BoringSSL (via `hpx`), so a signing-only build should not pay for it.
+        // the only thing that links OpenSSL at all (hpx uses pure-Rust rustls),
+        // so a signing-only build has zero C-crypto and should not pay for it.
         #[cfg(not(feature = "webui"))]
         let webui_handle: Option<tokio::task::JoinHandle<()>> = None;
         #[cfg(feature = "webui")]
@@ -690,8 +661,8 @@ fn run_daemon() -> Result<(), CliError> {
                 // same credential can authorize dApp signing. The closure is
                 // built here (in oc-cli, which links oc-keyagent) rather than
                 // inside oc-webui — pulling oc-keyagent into oc-webui would
-                // drag BoringSSL into that crate's graph and break the
-                // OpenSSL/BoringSSL link ordering in this binary.
+                // drag hpx into that crate's graph and break the feature
+                // isolation in this binary.
                 let dual_register: Option<oc_webui::routes::auth::DualRegistrationFn> =
                     Some(std::sync::Arc::new(move |cred_id, algorithm, pubkey| {
                         use oc_keyagent::{
@@ -790,6 +761,40 @@ fn run_daemon() -> Result<(), CliError> {
             }
         };
 
+        // --- WalletSigner JSON-RPC server (LedgerFlow WalletSigner, daemon-resident) ---
+        // Runs by default on loopback 127.0.0.1:18080 so a LedgerFlow
+        // LocalRpcSigner can reach the wallet without a separate one-shot
+        // `wallet-rpc serve`. Disable with OC_WALLET_RPC_LISTEN=off.
+        let (wallet_rpc_listen, wallet_rpc_wallet, wallet_rpc_index) =
+            commands::wallet_rpc::daemon_config();
+        let wallet_rpc_handle: Option<tokio::task::JoinHandle<()>> = {
+            const DISABLED: &str = "off";
+            if wallet_rpc_listen.is_empty() || wallet_rpc_listen == DISABLED {
+                None
+            } else {
+                match commands::wallet_rpc::parse_loopback(&wallet_rpc_listen) {
+                    Ok(parsed) => {
+                        let state = commands::wallet_rpc::SignerState::new(
+                            &wallet_rpc_wallet,
+                            wallet_rpc_index,
+                        );
+                        Some(tokio::spawn(async move {
+                            if let Err(e) = commands::wallet_rpc::serve_async(state, parsed).await {
+                                eprintln!("WalletSigner server error: {e}");
+                            }
+                        }))
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "invalid OC_WALLET_RPC_LISTEN '{}': {e}; WalletSigner server disabled",
+                            wallet_rpc_listen
+                        );
+                        None
+                    }
+                }
+            }
+        };
+
         eprintln!("daemon running (Ctrl+C to stop)");
 
         // Monitor the Key-Agent thread: bridge the sync mpsc receiver into the
@@ -830,6 +835,15 @@ fn run_daemon() -> Result<(), CliError> {
                 }
             } => {
                 eprintln!("HTTP-RPC server exited");
+                Ok(())
+            }
+            () = async {
+                match wallet_rpc_handle {
+                    Some(h) => { let _ = h.await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                eprintln!("WalletSigner server exited");
                 Ok(())
             }
             ka_err = ka_monitor => {

@@ -19,7 +19,6 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 │   ├── oc-crypto/          # Memory hardening (mlock, zeroize, page guards)
 │   ├── oc-keyagent/        # Key-Agent lib (sync std, NO tokio — R56)
 │   ├── oc-netagent/        # Network-Agent lib (tokio + WC v2 + intent layer)
-│   ├── oc-pay/             # Payment primitives (x402 + MPP settlers)
 │   ├── oc-policy/          # Policy Engine v2/v3 (11-step evaluation)
 │   ├── oc-secret/          # Secret vault (age-encrypted secrets + TOTP)
 │   ├── oc-session-key/     # Multi-chain SessionKeyProvider (EVM/Solana)
@@ -30,6 +29,11 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 ├── docs/                   # Specification documents
 └── Cargo.toml              # Workspace root (pure [workspace] declaration)
 ```
+
+> **Note:** The payment protocol layer (`oc-pay`, x402/MPP) was removed from this
+> workspace; it is owned by the sister project `ledgerflow`. OneCipher now acts
+> as a pure wallet and exposes a loopback JSON-RPC 2.0 WalletSigner server
+> (`onecipher wallet-rpc`) for ledgerflow.
 
 ### Storage Boundary (authoritative)
 

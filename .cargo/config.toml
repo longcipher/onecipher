@@ -24,15 +24,16 @@ retry = 3
 # platform and broke Linux builds, where the `/opt/homebrew/...` paths do not
 # exist. On Linux/CI openssl-sys resolves OpenSSL via pkg-config.
 #
-# macOS-only background: the final binary links BOTH BoringSSL (via hpx's
-# boring-tls) AND OpenSSL (via webauthn-rs's openssl). Both emit `-lssl
-# -lcrypto`, and the linker resolves `-lcrypto` to the FIRST matching library
-# in `-L` order — so when openssl-sys links the bare `libssl`/`libcrypto`, it
-# can resolve to BoringSSL's static `libcrypto.a` instead of Homebrew's, which
-# lacks OpenSSL 3.2+ symbols (`_ERR_get_error_all`). Versioned library names
-# (`libcrypto.3.dylib`) are unique to Homebrew's OpenSSL keg and sidestep the
-# collision entirely. macOS developers should set these in
-# `~/.cargo/config.toml` (machine-level) instead of this committed file:
+# Historical dual-stack collision (now resolved at source): the binary used to
+# link BOTH BoringSSL (via hpx's `boring-tls`) AND OpenSSL (via webauthn-rs's
+# openssl). Both emit `-lssl -lcrypto`, and the linker resolves `-lcrypto` to
+# the FIRST matching library in `-L` order — so when openssl-sys linked the
+# bare `libssl`/`libcrypto`, it could resolve to BoringSSL's static
+# `libcrypto.a` instead of Homebrew's, which lacks OpenSSL 3.2+ symbols
+# (`_ERR_get_error_all`). hpx now uses pure-Rust rustls instead of BoringSSL,
+# so this collision no longer occurs. macOS developers only need the overrides
+# below if a system OpenSSL is upgraded or a custom keg is in the default
+# search path:
 #
 # [env]
 # OPENSSL_LIBS = { value = "crypto.3:ssl.3", relative = false, force = false }

@@ -14,16 +14,17 @@ path = "src/main.rs"
 
 [features]
 # `git` is OFF by default: `git2` pulls in `libgit2-sys` → `libssh2-sys` →
-# OpenSSL. Linking OpenSSL into a signing wallet that already links BoringSSL
-# (via `hpx`'s `boring-tls`) doubles the C-crypto attack surface and inflates
-# both binary size and cold-build time, for a feature most users never touch.
+# OpenSSL. Linking OpenSSL into a signing wallet that already links a C-crypto
+# stack (webauthn-rs's OpenSSL when `webui` is enabled) doubles the C-crypto
+# attack surface and inflates both binary size and cold-build time, for a
+# feature most users never touch.
 # Build with `--features git` to enable the `onecipher git` subcommand.
 #
-# `webui` is ON by default but can be switched off: `webauthn-rs` is the sole
-# source of OpenSSL in the dependency graph, and the binary already links
-# BoringSSL through `hpx`'s `boring-tls`. `--no-default-features --features
-# tui,walletconnect` yields a signing-focused binary with a single C-crypto
-# stack.
+# `webui` is ON by default but can be switched off. `webauthn-rs` is the sole
+# source of OpenSSL in the dependency graph. hpx's HTTP client uses pure-Rust
+# rustls (NOT BoringSSL), so there is no OpenSSL/BoringSSL symbol collision in
+# the final binary. `--no-default-features --features tui,walletconnect` yields
+# a signing-focused binary with zero C-crypto (rustls+ring only).
 #
 # `xrpl` is OFF by default — see the rationale in `oc-signer/Cargo.toml`.
 default = ["webui"]
@@ -33,21 +34,21 @@ xrpl = ["oc-signer/xrpl"]
 
 [dependencies]
 arboard = { workspace = true }
+axum = { workspace = true }
 base64 = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 crossterm = { workspace = true }
-dirs = "6"
+dirs = { workspace = true }
 ed25519-dalek = { workspace = true }
 eyre = { workspace = true }
 hex = { workspace = true }
-hpx = { workspace = true }
-jiff = { workspace = true }
+hpx = { workspace = true, features = ["rustls-tls", "http1", "http2", "json"] }
+jiff = { workspace = true, features = ["serde", "std"] }
 k256 = { workspace = true }
 oc-core = { workspace = true, features = ["hardened"] }
 oc-keyagent = { workspace = true }
 oc-netagent = { workspace = true }
-oc-pay = { workspace = true, features = ["http"] }
 oc-secret = { workspace = true }
 oc-signer = { workspace = true }
 oc-vault = { workspace = true }
@@ -68,7 +69,7 @@ sha3 = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
-toml = "0.8"
+toml = { workspace = true }
 zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

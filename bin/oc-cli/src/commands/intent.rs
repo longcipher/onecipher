@@ -18,28 +18,9 @@ use oc_netagent::intent::{
     Intent, IntentError, IntentKind, IntentResult, IntentStatus, IntentSummary, MessageEncoding,
     MockRpcClient, RpcClient, execute_intent, simulate_intent,
 };
-use oc_pay::paymaster::{PaymasterClient, SponsorMode, UserOperation};
 use serde_json::Value;
 
 use crate::CliError;
-
-// ---------------------------------------------------------------------------
-// Sponsor mode parsing
-// ---------------------------------------------------------------------------
-
-/// Parse `--sponsor` flag value into [`SponsorMode`].
-///
-/// Accepts: `native` (default), `sponsored`, `payin-usdc`.
-fn parse_sponsor_mode(s: &str) -> Result<SponsorMode, CliError> {
-    match s.to_ascii_lowercase().as_str() {
-        "native" | "" => Ok(SponsorMode::Native),
-        "sponsored" => Ok(SponsorMode::Sponsored),
-        "payin-usdc" | "payin_usdc" | "usdc" => Ok(SponsorMode::PayInUsdc),
-        other => Err(CliError::InvalidArgs(format!(
-            "invalid --sponsor value: '{other}' (expected native|sponsored|payin-usdc)"
-        ))),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Intent JSON parsing
@@ -221,67 +202,6 @@ fn build_rpc_client(chain_id: &str, rpc_url: Option<&str>) -> Box<dyn RpcClient>
 }
 
 // ---------------------------------------------------------------------------
-// Sponsor mode application
-// ---------------------------------------------------------------------------
-
-/// Apply sponsor mode to an intent result.
-///
-/// For `Native` mode, this is a no-op (the intent execution already broadcast
-/// via the RPC client). For `Sponsored` / `PayInUsdc`, this constructs a
-/// [`UserOperation`] and submits it via the [`PaymasterClient`].
-///
-/// Stage 2.5 uses a mock paymaster flow (no real bundler URL configured) —
-/// the function returns the original result unchanged when paymaster env vars
-/// are not set, with a warning printed to stderr.
-async fn apply_sponsor_mode(
-    result: IntentResult,
-    sponsor_mode: SponsorMode,
-) -> Result<IntentResult, CliError> {
-    if matches!(sponsor_mode, SponsorMode::Native) {
-        return Ok(result);
-    }
-
-    // Try to construct a PaymasterClient from env. If env vars are missing,
-    // fall back to the original result with a warning.
-    let pm = match PaymasterClient::from_env() {
-        Ok(pm) => pm,
-        Err(e) => {
-            eprintln!("warning: paymaster not configured ({e}); falling back to native gas");
-            return Ok(result);
-        }
-    };
-
-    // Build a minimal UserOperation from the intent result. The real
-    // integration would use the signed transaction bytes; here we use a
-    // placeholder since oc-intent's execute_intent already broadcast the tx.
-    let sender = result
-        .tx_hash
-        .as_deref()
-        .unwrap_or("0x0000000000000000000000000000000000000000")
-        .to_string();
-    let user_op = UserOperation::builder(sender).build();
-
-    match pm.sponsor_user_op(&user_op, sponsor_mode).await {
-        Ok(sponsored) => {
-            eprintln!(
-                "paymaster sponsored via {:?}: bundler tx hash: {}",
-                sponsored.sponsor_strategy, sponsored.tx_hash
-            );
-            // Override the result's tx_hash with the sponsored one (if any).
-            let mut result = result;
-            if !sponsored.tx_hash.is_empty() {
-                result.tx_hash = Some(sponsored.tx_hash);
-            }
-            Ok(result)
-        }
-        Err(e) => {
-            eprintln!("warning: paymaster sponsorship failed ({e}); keeping original tx");
-            Ok(result)
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Subcommand entry points
 // ---------------------------------------------------------------------------
 
@@ -292,13 +212,11 @@ pub(crate) fn run_submit(
     json: &str,
     chain_id: &str,
     session_key_id: &str,
-    sponsor: &str,
     yes: bool,
     rpc_url: Option<&str>,
 ) -> Result<(), CliError> {
     let kind = parse_intent_kind(json)?;
     let intent = Intent::new(kind, chain_id.to_string(), session_key_id.to_string());
-    let sponsor_mode = parse_sponsor_mode(sponsor)?;
     let rpc = build_rpc_client(chain_id, rpc_url);
 
     crate::shared_runtime().block_on(async move {
@@ -343,10 +261,7 @@ pub(crate) fn run_submit(
         // 3. Execute
         let result = run_execution(&intent, &*rpc).await?;
 
-        // 4. Apply sponsor mode (no-op for Native)
-        let result = apply_sponsor_mode(result, sponsor_mode).await?;
-
-        // 5. Print result
+        // 4. Print result
         print_result(&result);
         Ok(())
     })
@@ -380,17 +295,14 @@ pub(crate) fn run_execute(
     json: &str,
     chain_id: &str,
     session_key_id: &str,
-    sponsor: &str,
     rpc_url: Option<&str>,
 ) -> Result<(), CliError> {
     let kind = parse_intent_kind(json)?;
     let intent = Intent::new(kind, chain_id.to_string(), session_key_id.to_string());
-    let sponsor_mode = parse_sponsor_mode(sponsor)?;
     let rpc = build_rpc_client(chain_id, rpc_url);
 
     crate::shared_runtime().block_on(async move {
         let result = run_execution(&intent, &*rpc).await?;
-        let result = apply_sponsor_mode(result, sponsor_mode).await?;
         print_result(&result);
         Ok(())
     })
@@ -559,35 +471,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // parse_sponsor_mode
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_sponsor_mode_native_variants() {
-        assert_eq!(parse_sponsor_mode("native").unwrap(), SponsorMode::Native);
-        assert_eq!(parse_sponsor_mode("").unwrap(), SponsorMode::Native);
-        assert_eq!(parse_sponsor_mode("NATIVE").unwrap(), SponsorMode::Native);
-    }
-
-    #[test]
-    fn parse_sponsor_mode_sponsored() {
-        assert_eq!(parse_sponsor_mode("sponsored").unwrap(), SponsorMode::Sponsored);
-        assert_eq!(parse_sponsor_mode("SPONSORED").unwrap(), SponsorMode::Sponsored);
-    }
-
-    #[test]
-    fn parse_sponsor_mode_payin_usdc_variants() {
-        assert_eq!(parse_sponsor_mode("payin-usdc").unwrap(), SponsorMode::PayInUsdc);
-        assert_eq!(parse_sponsor_mode("payin_usdc").unwrap(), SponsorMode::PayInUsdc);
-        assert_eq!(parse_sponsor_mode("usdc").unwrap(), SponsorMode::PayInUsdc);
-    }
-
-    #[test]
-    fn parse_sponsor_mode_rejects_unknown() {
-        assert!(matches!(parse_sponsor_mode("foo"), Err(CliError::InvalidArgs(_))));
-    }
-
-    // -----------------------------------------------------------------------
     // build_rpc_client
     // -----------------------------------------------------------------------
 
@@ -632,15 +515,14 @@ mod tests {
     #[test]
     fn run_execute_pay_intent_succeeds_with_mock_rpc() {
         let json = r#"{"type":"Pay","amount":"10.5 USDC","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
-        // Native sponsor mode (default) — no paymaster env required.
-        let result = run_execute(json, "eip155:8453", "sk-test", "native", None);
+        let result = run_execute(json, "eip155:8453", "sk-test", None);
         assert!(result.is_ok(), "run_execute should succeed with mock RPC");
     }
 
     #[test]
     fn run_execute_sign_transaction_intent() {
         let json = r#"{"type":"SignTransaction","tx_hex":"0xdeadbeef","chain_id":"eip155:1"}"#;
-        let result = run_execute(json, "eip155:1", "sk-test", "native", None);
+        let result = run_execute(json, "eip155:1", "sk-test", None);
         assert!(result.is_ok());
     }
 
@@ -649,7 +531,7 @@ mod tests {
         // --yes skips the interactive prompt, so this should succeed even
         // in non-interactive test contexts.
         let json = r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
-        let result = run_submit(json, "eip155:8453", "sk-test", "native", true, None);
+        let result = run_submit(json, "eip155:8453", "sk-test", true, None);
         assert!(result.is_ok(), "run_submit --yes should succeed");
     }
 
@@ -658,7 +540,7 @@ mod tests {
         // In test context stdin is not a terminal, so prompt returns false.
         // The function should return Ok(()) with "cancelled" message.
         let json = r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabc"}"#;
-        let result = run_submit(json, "eip155:8453", "sk-test", "native", false, None);
+        let result = run_submit(json, "eip155:8453", "sk-test", false, None);
         assert!(result.is_ok(), "cancelled submit should return Ok(())");
     }
 
@@ -672,26 +554,8 @@ mod tests {
             "to_chain":"eip155:42161",
             "recipient":"0xdefdefdefdefdefdefdefdefdefdefdefdef"
         }"#;
-        let result = run_submit(json, "eip155:8453", "sk-test", "native", true, None);
+        let result = run_submit(json, "eip155:8453", "sk-test", true, None);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn run_submit_rejects_invalid_sponsor_mode() {
-        let json = r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabc"}"#;
-        let result = run_submit(json, "eip155:8453", "sk-test", "invalid-mode", true, None);
-        assert!(matches!(result, Err(CliError::InvalidArgs(_))));
-    }
-
-    #[test]
-    fn run_execute_with_sponsor_mode_falls_back_when_env_unset() {
-        // Paymaster env vars are not set in tests, so sponsor mode falls back
-        // to native with a warning. The execution should still succeed.
-        let json = r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
-        let result = run_execute(json, "eip155:8453", "sk-test", "sponsored", None);
-        // Either Ok (fallback) or error is acceptable depending on env state,
-        // but with no env vars it should fall back gracefully.
-        assert!(result.is_ok(), "should fall back to native when paymaster unset");
     }
 
     // -----------------------------------------------------------------------

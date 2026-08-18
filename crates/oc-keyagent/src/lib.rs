@@ -15,7 +15,6 @@ pub mod frame;
 pub mod handler;
 pub mod key_ops;
 pub mod passkey;
-pub mod policy_integration;
 pub mod proto;
 pub mod request;
 pub mod response;
@@ -32,9 +31,8 @@ pub use key_ops::{decrypt_mnemonic, derive_chain_key};
 // Re-export key types for convenience (formerly in oc-signing-core).
 pub use oc_core::{Passphrase, UnlockToken, WalletId};
 pub use passkey::{PasskeyError, PasskeyPubkey, PasskeyVerifier};
-pub use policy_integration::PolicyIntegration;
 // Re-export IPC wire types at the crate root so downstream crates can use
-// `oc_keyagent::PayX402Request` etc. (replaces the former `oc-proto` crate).
+// `oc_keyagent::GenerateChallengeRequest` etc. (replaces the former `oc-proto` crate).
 pub use proto::*;
 pub use request::{KeyAgentRequest, KeyAgentRequestKind};
 pub use response::{KeyAgentResponse, KeyAgentResponseKind};

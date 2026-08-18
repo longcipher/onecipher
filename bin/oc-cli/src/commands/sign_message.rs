@@ -12,9 +12,7 @@ pub(crate) fn run(
     json_output: bool,
 ) -> Result<(), CliError> {
     if typed_data.is_none() && message.is_none() {
-        return Err(CliError::InvalidArgs(
-            "a --message (or --typed-data) is required".into(),
-        ));
+        return Err(CliError::InvalidArgs("a --message (or --typed-data) is required".into()));
     }
 
     // Check for API token in passphrase — route through library for policy enforcement

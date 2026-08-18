@@ -74,7 +74,6 @@ onecipher/
 │   ├── oc-crypto/              # Memory hardening (mlock, zeroize, page guards)
 │   ├── oc-keyagent/            # Key-Agent handler logic (sync)
 │   ├── oc-netagent/            # Network-Agent (WC v2 + intent layer)
-│   ├── oc-pay/                 # Payment primitives (x402 + MPP settlers)
 │   ├── oc-policy/              # Policy Engine v2/v3 (11-step + Cedar DSL)
 │   ├── oc-secret/              # Secret vault (age-encrypted secrets + TOTP)
 │   ├── oc-session-key/         # Multi-chain SessionKeyProvider (EVM/Solana)

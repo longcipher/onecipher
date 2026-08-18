@@ -19,8 +19,7 @@ pub struct KeyAgentResponse {
 #[derive(Clone, PartialEq, Eq, prost::Oneof)]
 pub enum KeyAgentResponseKind {
     /// Success — opaque prost-encoded response payload. The caller decodes
-    /// this into the specific response type matching the request variant
-    /// (e.g. `PayX402Response` for a `PayX402` request).
+    /// this into the specific response type matching the request variant.
     #[prost(bytes, tag = "1")]
     Ok(Vec<u8>),
     /// Policy DENY — the request was rejected by the Policy Engine. Carries
@@ -91,7 +90,7 @@ mod tests {
 
     #[test]
     fn test_error_round_trip() {
-        let resp = KeyAgentResponse::error("not yet implemented: PayX402 (T16/T13)");
+        let resp = KeyAgentResponse::error("not yet implemented: phase-6 operation");
         let bytes = resp.encode_to_vec();
         let decoded = KeyAgentResponse::decode(bytes.as_slice()).unwrap();
         assert_eq!(resp, decoded);

@@ -20,10 +20,12 @@ runs as a sync `std::thread` with UDS; the WC v2 server runs on tokio.
 ### Stage 2 — AI Agent Native Features
 - **Intent Layer (`oc-netagent::intent`):** Declarative intent framing,
   simulation, and execution for Pay/SignTransaction/SignMessage/CrossChainTransfer.
-- **Paymaster (`oc-pay`):** ERC-4337 gas abstraction via sponsor strategies.
 - **Real Session Keys:** ERC-7579 (EVM) and Session Tokens (Solana).
 - **Policy v3:** Cedar-like DSL with permit/forbid rules.
-- **CLI integration:** `onecipher intent`, `onecipher pay` commands.
+- **CLI integration:** `onecipher intent` command.
+- **Paymaster (ERC-4337 gas abstraction):** owned by the sister project
+  `ledgerflow`; OneCipher acts as its WalletSigner via the loopback JSON-RPC
+  server.
 
 ### Stage 3 — TEE + Cross-Chain (Planned)
 Documented but not yet implemented: TEE-based subprocess enclave,

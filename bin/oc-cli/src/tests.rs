@@ -2,9 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 use oc_keyagent::proto::{
-    CreateSessionKeyRequest, CreateSessionKeyResponse, ListSessionKeysResponse, PayX402Request,
-    PayX402Response, RevokeSessionKeyRequest, RevokeSessionKeyResponse, SessionKeyInfo,
-    SessionKeyStatus,
+    CreateSessionKeyRequest, CreateSessionKeyResponse, ListSessionKeysResponse,
+    RevokeSessionKeyRequest, RevokeSessionKeyResponse, SessionKeyInfo, SessionKeyStatus,
 };
 
 use crate::{
@@ -21,11 +20,9 @@ struct MockNetAgentClient {
     create_session_key_requests: Arc<Mutex<Vec<CreateSessionKeyRequest>>>,
     revoke_session_key_requests: Arc<Mutex<Vec<RevokeSessionKeyRequest>>>,
     list_session_keys_calls: Arc<Mutex<u32>>,
-    pay_x402_requests: Arc<Mutex<Vec<PayX402Request>>>,
     next_create_resp: Arc<Mutex<Option<CreateSessionKeyResponse>>>,
     next_revoke_resp: Arc<Mutex<Option<RevokeSessionKeyResponse>>>,
     next_list_resp: Arc<Mutex<Option<ListSessionKeysResponse>>>,
-    next_pay_x402_resp: Arc<Mutex<Option<PayX402Response>>>,
 }
 
 impl NetAgentClient for MockNetAgentClient {
@@ -48,11 +45,6 @@ impl NetAgentClient for MockNetAgentClient {
     fn list_session_keys(&self) -> Result<ListSessionKeysResponse, CliError> {
         *self.list_session_keys_calls.lock().unwrap() += 1;
         Ok(self.next_list_resp.lock().unwrap().clone().unwrap_or_default())
-    }
-
-    fn pay_x402(&self, req: PayX402Request) -> Result<PayX402Response, CliError> {
-        self.pay_x402_requests.lock().unwrap().push(req);
-        Ok(self.next_pay_x402_resp.lock().unwrap().clone().unwrap_or_default())
     }
 }
 
@@ -237,86 +229,6 @@ fn test_session_key_list_calls_rpc_once() {
 }
 
 // -----------------------------------------------------------------------
-// 9. `ocpay x402` builds the correct PayX402Request RPC
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_ocpay_x402_builds_correct_rpc() {
-    let mock = MockNetAgentClient::default();
-    let cli = Cli::parse_from([
-        "onecipher",
-        "ocpay",
-        "x402",
-        "https://example.com/api",
-        "--session-key",
-        "sk-1",
-        "--method",
-        "POST",
-        "--body",
-        "{\"k\":\"v\"}",
-    ]);
-    let result = crate::run(cli, &mock);
-    assert!(result.is_ok());
-
-    let recorded = mock.pay_x402_requests.lock().unwrap();
-    assert_eq!(recorded.len(), 1);
-    assert_eq!(recorded[0].session_key_id, "sk-1");
-    assert_eq!(recorded[0].url, "https://example.com/api");
-    assert_eq!(recorded[0].method, "POST");
-    assert_eq!(recorded[0].body, b"{\"k\":\"v\"}".to_vec());
-    assert!(recorded[0].headers.is_empty());
-}
-
-// -----------------------------------------------------------------------
-// 10. `ocpay x402` defaults method to GET and body to empty
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_ocpay_x402_defaults() {
-    let mock = MockNetAgentClient::default();
-    let cli = Cli::parse_from([
-        "onecipher",
-        "ocpay",
-        "x402",
-        "https://example.com/",
-        "--session-key",
-        "sk-9",
-    ]);
-    let result = crate::run(cli, &mock);
-    assert!(result.is_ok());
-
-    let recorded = mock.pay_x402_requests.lock().unwrap();
-    assert_eq!(recorded[0].method, "GET");
-    assert!(recorded[0].body.is_empty());
-}
-
-// -----------------------------------------------------------------------
-// 11. `ocpay x402` prints DENY when response status = Deny
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_ocpay_x402_handles_deny_status() {
-    let mock = MockNetAgentClient::default();
-    *mock.next_pay_x402_resp.lock().unwrap() = Some(PayX402Response {
-        status: oc_keyagent::proto::PaymentStatus::Deny as i32,
-        receipt: vec![],
-        retry_authorization: String::new(),
-        deny_reason: "RATE_LIMIT_MINUTE".to_string(),
-        error: String::new(),
-    });
-    let cli = Cli::parse_from([
-        "onecipher",
-        "ocpay",
-        "x402",
-        "https://example.com/",
-        "--session-key",
-        "sk-1",
-    ]);
-    let result = crate::run(cli, &mock);
-    assert!(result.is_ok(), "Deny is a successful RPC, not a CLI error");
-}
-
-// -----------------------------------------------------------------------
 // 12. `session-key list` prints "no session keys" when response is empty
 // -----------------------------------------------------------------------
 
@@ -366,10 +278,6 @@ fn test_unimplemented_client_returns_error() {
     ));
     assert!(matches!(
         client.revoke_session_key(RevokeSessionKeyRequest::default()),
-        Err(CliError::NetAgentUnavailable)
-    ));
-    assert!(matches!(
-        client.pay_x402(PayX402Request::default()),
         Err(CliError::NetAgentUnavailable)
     ));
 }
@@ -1481,31 +1389,6 @@ fn test_webui_parses() {
 }
 
 // -----------------------------------------------------------------------
-// 67. pay discover / request parse + dispatch (network; request will fail without a wallet/daemon,
-//     but must not panic)
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_pay_discover_parses_and_dispatches() {
-    // discover hits the Bazaar directory over HTTP; without network it errors,
-    // but dispatch must not panic.
-    let _ = run_cli(&["onecipher", "pay", "discover", "--query", "weather"]);
-    let _ = run_cli(&["onecipher", "pay", "discover", "--limit", "10", "--offset", "0"]);
-}
-
-// -----------------------------------------------------------------------
-// 68. fund deposit/balance parse + dispatch (MoonPay; network-bound)
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_fund_parses_and_dispatches() {
-    let _home = HomeGuard::new();
-    run_ok(&["onecipher", "wallet", "create", "--name", "f", "--words", "12"]);
-    let _ = run_cli(&["onecipher", "fund", "deposit", "--wallet", "f", "--chain", "base"]);
-    let _ = run_cli(&["onecipher", "fund", "balance", "--wallet", "f", "--chain", "base"]);
-}
-
-// -----------------------------------------------------------------------
 // 69. secret add via --stdin full payload path
 // -----------------------------------------------------------------------
 
@@ -1873,32 +1756,8 @@ fn test_webui_http_bridge_against_mock_server() {
 
 // ===========================================================================
 // B-level automation: real Key-Agent UDS round-trip, intent lifecycle,
-// x402/fund/discover mock-HTTP, send-tx broadcast mock JSON-RPC
+// send-tx broadcast mock JSON-RPC
 // ===========================================================================
-
-// -----------------------------------------------------------------------
-// Mock HTTP server helper: serves N responses in order on 127.0.0.1.
-// -----------------------------------------------------------------------
-fn spawn_mock_http(responses: Vec<(u16, &'static str)>) -> (u16, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let handle = std::thread::spawn(move || {
-        for (status, body) in responses {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut buf = [0u8; 8192];
-                let _ = stream.read(&mut buf);
-                let resp = format!(
-                    "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(resp.as_bytes());
-            }
-        }
-    });
-    (port, handle)
-}
 
 // -----------------------------------------------------------------------
 // B1a. Real Key-Agent UDS server round-trip: register passkey → generate
@@ -2093,78 +1952,6 @@ fn test_keyagent_real_uds_session_key_roundtrip() {
 }
 
 // -----------------------------------------------------------------------
-// B1b. Real Key-Agent PayX402 round-trip: without a policy the decision is
-//      Deny(PolicyMissing) surfaced as an Ok PayX402Response.
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_keyagent_real_uds_pay_x402_deny_without_policy() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    use oc_keyagent::{
-        frame::FrameClient,
-        proto::{Empty, PayX402Request, PayX402Response},
-        request::{KeyAgentRequest, KeyAgentRequestKind},
-        response::KeyAgentResponseKind,
-    };
-    use prost::Message;
-
-    let _home = HomeGuard::new();
-    let sock = _home.path().join("ka2.sock");
-    let sock_str = sock.to_string_lossy().into_owned();
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_thread = stop.clone();
-    let sock_thread = sock_str.clone();
-    let server = std::thread::spawn(move || {
-        let _ = oc_keyagent::server::run(Some(&sock_thread), Some(stop_thread));
-    });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while !sock.exists() && std::time::Instant::now() < deadline {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert!(sock.exists());
-
-    let client = FrameClient::new(&sock_str);
-    let req = KeyAgentRequest {
-        kind: Some(KeyAgentRequestKind::PayX402(PayX402Request {
-            session_key_id: "sk-test".to_string(),
-            url: "https://example.com".to_string(),
-            method: "GET".to_string(),
-            body: vec![],
-            headers: std::collections::HashMap::new(),
-            ..Default::default()
-        })),
-    };
-    let resp = client.send_request(&req).unwrap();
-    match &resp.kind {
-        Some(KeyAgentResponseKind::Ok(bytes)) => {
-            let decoded = PayX402Response::decode(bytes.as_slice()).unwrap();
-            // No policy configured → the policy engine denies with policy_missing.
-            assert_eq!(
-                decoded.status,
-                oc_keyagent::proto::PaymentStatus::Deny as i32,
-                "without a policy, PayX402 must deny"
-            );
-            assert!(
-                decoded.deny_reason.contains("policy"),
-                "deny_reason should mention policy, got {:?}",
-                decoded.deny_reason
-            );
-        }
-        other => panic!("expected Ok(PayX402Response), got {other:?}"),
-    }
-
-    stop.store(true, Ordering::Relaxed);
-    let _ = FrameClient::new(&sock_str)
-        .send_request(&KeyAgentRequest { kind: Some(KeyAgentRequestKind::ListWallets(Empty {})) });
-    let _ = server.join();
-}
-
-// -----------------------------------------------------------------------
 // B2. Intent full lifecycle via CLI with the built-in MockRpcClient
 //      (no --rpc-url → mock, no network, no signing key needed).
 // -----------------------------------------------------------------------
@@ -2212,8 +1999,6 @@ fn test_intent_submit_simulate_execute_lifecycle_mock() {
         "eip155:8453",
         "--session-key",
         "sk-mock",
-        "--sponsor",
-        "native",
     ]);
 
     // SignMessage intent (default utf8)
@@ -2244,7 +2029,7 @@ fn test_intent_submit_simulate_execute_lifecycle_mock() {
 }
 
 // -----------------------------------------------------------------------
-// B2b. Intent bad JSON / bad sponsor mode / missing type are rejected
+// B2b. Intent bad JSON / missing type are rejected
 // -----------------------------------------------------------------------
 
 #[test]
@@ -2263,22 +2048,6 @@ fn test_intent_invalid_inputs_rejected() {
     ]);
     assert!(res.is_err());
 
-    // bad sponsor
-    let res = run_cli(&[
-        "onecipher",
-        "intent",
-        "execute",
-        "--json",
-        r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabc"}"#,
-        "--chain",
-        "eip155:8453",
-        "--session-key",
-        "sk",
-        "--sponsor",
-        "bogus",
-    ]);
-    assert!(res.is_err());
-
     // invalid JSON
     let res = run_cli(&[
         "onecipher",
@@ -2292,131 +2061,6 @@ fn test_intent_invalid_inputs_rejected() {
         "sk",
     ]);
     assert!(res.is_err());
-}
-
-// -----------------------------------------------------------------------
-// B3a. pay request → non-402 path against a mock HTTP server (no payment).
-//      The URL is passed verbatim, so a mock server URL works directly.
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_pay_request_non_402_mock_server() {
-    let (port, handle) = spawn_mock_http(vec![(200, r#"{"ok":true}"#)]);
-    let url = format!("http://127.0.0.1:{port}/api/data");
-    let res = run_cli(&[
-        "onecipher",
-        "pay",
-        "request",
-        &url,
-        "--wallet",
-        "nonexistent-wallet", // non-402 path does not touch the wallet
-        "--no-passphrase",
-    ]);
-    assert!(res.is_ok(), "non-402 pay must succeed against mock: {res:?}");
-    handle.join().unwrap();
-}
-
-// -----------------------------------------------------------------------
-// B3b. pay request → 402 path requires a signed EIP-3009 payment. Use a real
-//      wallet (created in isolated HOME) + mock server that first returns 402
-//      with a payment-required header, then 200.
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_pay_request_x402_flow_mock_server() {
-    use std::io::{Read, Write};
-
-    use base64::Engine as _;
-
-    let _home = HomeGuard::new();
-    // Create a wallet (empty passphrase) so the EIP-3009 typed-data signing works.
-    run_ok(&["onecipher", "wallet", "create", "--name", "paywallet", "--words", "12"]);
-
-    // Mock server: request 1 → 402 with a payment-required header; request 2 → 200.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = std::thread::spawn(move || {
-        let responses: [(u16, Option<&str>, &str); 2] = [
-            (
-                402,
-                Some("payment-required"),
-                r#"{"x402Version":2,"accepts":[{"scheme":"exact","network":"eip155:1","amount":"1000000","asset":"0xusdc","payTo":"0xpayee","maxTimeoutSeconds":300}],"resource":null}"#,
-            ),
-            (200, None, r#"{"paid":true}"#),
-        ];
-        for (status, header, body) in responses {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0u8; 8192];
-            let _ = stream.read(&mut buf);
-            let header_str = match header {
-                Some(h) => format!(
-                    "{h}: {}\r\n",
-                    base64::engine::general_purpose::STANDARD.encode(body.as_bytes())
-                ),
-                None => String::new(),
-            };
-            let resp = format!(
-                "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\n{header_str}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            );
-            let _ = stream.write_all(resp.as_bytes());
-        }
-    });
-
-    let url = format!("http://127.0.0.1:{port}/pay");
-    let res =
-        run_cli(&["onecipher", "pay", "request", &url, "--wallet", "paywallet", "--no-passphrase"]);
-    assert!(res.is_ok(), "x402 flow must complete against mock: {res:?}");
-    server.join().unwrap();
-}
-
-// -----------------------------------------------------------------------
-// B3c. pay discover against mock server (OC_X402_DISCOVERY_URL override).
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_pay_discover_mock_server() {
-    let (port, handle) = spawn_mock_http(vec![(
-        200,
-        r#"{"items":[{"resource":"https://api.example.com/data","accepts":[{"scheme":"exact","network":"eip155:8453","amount":"1000000","asset":"0xusdc","payTo":"0xpayee","maxTimeoutSeconds":300}],"metadata":{"description":"mock weather api"}}],"pagination":{"limit":100,"offset":0,"total":1}}"#,
-    )]);
-    set_env("OC_X402_DISCOVERY_URL", &format!("http://127.0.0.1:{port}"));
-    let res = run_cli(&["onecipher", "pay", "discover"]);
-    remove_env("OC_X402_DISCOVERY_URL");
-    assert!(res.is_ok(), "discover must work against mock: {res:?}");
-    handle.join().unwrap();
-}
-
-// -----------------------------------------------------------------------
-// B3d. fund deposit / balance against mock MoonPay API (OC_MOONPAY_API).
-// -----------------------------------------------------------------------
-
-#[test]
-fn test_fund_deposit_and_balance_mock_server() {
-    let _home = HomeGuard::new();
-    run_ok(&["onecipher", "wallet", "create", "--name", "fwallet", "--words", "12"]);
-
-    let (port, handle) = spawn_mock_http(vec![
-        (
-            200,
-            r#"{"id":"dep-1","destinationWallet":"0xabc","destinationChain":"base","customerToken":"tok","depositUrl":"https://moonpay.com/buy","wallets":[{"address":"0xabc","chain":"base","qrCode":"https://qr"}],"instructions":"Send crypto to 0xabc"}"#,
-        ),
-        (
-            200,
-            r#"{"items":[{"address":"0xabc","name":"USDC","symbol":"USDC","chain":"base","decimals":6,"balance":{"amount":1.5,"value":1.5,"price":1.0}}]}"#,
-        ),
-    ]);
-    set_env("OC_MOONPAY_API", &format!("http://127.0.0.1:{port}"));
-
-    let res = run_cli(&["onecipher", "fund", "deposit", "--wallet", "fwallet", "--chain", "base"]);
-    assert!(res.is_ok(), "fund deposit must work against mock: {res:?}");
-
-    let res = run_cli(&["onecipher", "fund", "balance", "--wallet", "fwallet", "--chain", "base"]);
-    assert!(res.is_ok(), "fund balance must work against mock: {res:?}");
-
-    remove_env("OC_MOONPAY_API");
-    handle.join().unwrap();
 }
 
 // -----------------------------------------------------------------------

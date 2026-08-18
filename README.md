@@ -2,6 +2,52 @@
 
 [Project Home](https://onecipher.longcipher.com/) | [Documentation](https://book.longcipher.com/onecipher/)
 
+## Target Architecture
+
+OneCipher is the **wallet** in a two-project sibling architecture with
+[LedgerFlow](https://github.com/longcipher/ledgerflow). The two projects are
+decoupled by responsibility and communicate only through standard protocols:
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  LedgerFlow  (payment protocol + authz layer, sibling repo)  │
+│                                                              │
+│  x402 / MPP wire protocols  ·  Warrant authz + delegation    │
+│  PoP  ·  approval gates  ·  revocation  ·  Facilitator rails  │
+│                                                              │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  WalletSigner (ledgerflow-wallet) — a WalletSigner     │  │
+│  │  consumer via loopback JSON-RPC 2.0 (127.0.0.1:18080)  │  │
+│  └──────────────────────────┬─────────────────────────────┘  │
+└─────────────────────────────┼────────────────────────────────┘
+                              │ ledgerflow_sign / ledgerflow_keys
+                              │ ledgerflow_sign_payment (base64, JSON-RPC 2.0)
+┌─────────────────────────────┼────────────────────────────────┐
+│  OneCipher  (this repo) — the WALLET, a WalletSigner         │
+│                                                        provider │
+│  Key custody · hardened memory · local signing · policy ·     │
+│  audit · WebUI approvals                                      │
+│  wallet-rpc server: 127.0.0.1:18080 (loopback-only)           │
+└──────────────────────────────────────────────────────────────┘
+```
+
+**Design split (keep this project simple & effective):**
+
+- **OneCipher owns wallet concerns only**: key custody, hardened local
+  signing, the policy engine, audit, and human approval flows. It does **not**
+  implement payment-protocol logic.
+- **LedgerFlow owns payments & authorization**: the x402/MPP wire protocols,
+  warrant/delegation/PoP/approval/revocation authz, and settlement routing.
+- **Decoupling contract**: OneCipher exposes the LedgerFlow `WalletSigner`
+  interface over loopback JSON-RPC 2.0 (`ledgerflow_sign`,
+  `ledgerflow_keys`, `ledgerflow_sign_payment`) via `onecipher wallet-rpc
+  serve`. LedgerFlow calls it as a plain `WalletSigner` consumer. There is no
+  compile-time dependency between the two repositories.
+- The former `oc-pay` payment-protocol crate was removed; payment protocol
+  work now lives entirely in LedgerFlow.
+
+[Project Home](https://onecipher.longcipher.com/) | [Documentation](https://book.longcipher.com/onecipher/)
+
 Policy-gated, local-key-custody signing stack and **unified sensitive data
 vault** for AI agents — fully designed and implemented in accordance with the
 [WalletConnect v2 Specification](https://specs.walletconnect.com/) and [Open Wallet Standard](https://openwallet.sh) and hardened for production
@@ -66,7 +112,6 @@ so a TOTP read and a signing operation are governed by one consistent ruleset.
 │   ├── oc-crypto/          # Memory hardening (mlock, zeroize, page guards)
 │   ├── oc-keyagent/        # Key-Agent lib (sync std, NO tokio — R56)
 │   ├── oc-netagent/        # Network-Agent lib (tokio + WC v2 + intent layer)
-│   ├── oc-pay/             # Payment primitives (x402 + MPP settlers)
 │   ├── oc-policy/          # Policy Engine v2/v3 (11-step evaluation)
 │   ├── oc-secret/          # Secret vault (age-encrypted secrets + TOTP)
 │   ├── oc-session-key/     # Multi-chain SessionKeyProvider (EVM/Solana)

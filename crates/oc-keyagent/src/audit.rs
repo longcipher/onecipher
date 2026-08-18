@@ -56,13 +56,14 @@ pub struct AuditEntry {
 }
 
 /// Audit event types per R39 (17 variants) + secret-vault events (6 variants).
+///
+/// The payment/MPP variants (`PayX402`, `PayMpp`, `MppChannelOpen`,
+/// `MppChannelClose`) were removed with the retired x402/payment protocol.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
     CreateSessionKey,
     RevokeSessionKey,
-    PayX402,
-    PayMpp,
     SignUserOp,
     PasskeyForged,
     PasskeyMissing,
@@ -73,8 +74,6 @@ pub enum EventType {
     BudgetReclaim,
     BackupAttemptFailed,
     BackupLocked,
-    MppChannelOpen,
-    MppChannelClose,
     AuthFailed,
     // Secret-vault events (Phase 1 unified secret vault).
     SecretRead,
@@ -546,11 +545,6 @@ mod tests {
             serde_json::to_string(&EventType::CreateSessionKey).unwrap(),
             "\"create_session_key\""
         );
-        assert_eq!(serde_json::to_string(&EventType::PayX402).unwrap(), "\"pay_x402\"");
-        assert_eq!(
-            serde_json::to_string(&EventType::MppChannelOpen).unwrap(),
-            "\"mpp_channel_open\""
-        );
         assert_eq!(
             serde_json::to_string(&EventType::BackupAttemptFailed).unwrap(),
             "\"backup_attempt_failed\""
@@ -563,8 +557,6 @@ mod tests {
         let all = [
             EventType::CreateSessionKey,
             EventType::RevokeSessionKey,
-            EventType::PayX402,
-            EventType::PayMpp,
             EventType::SignUserOp,
             EventType::PasskeyForged,
             EventType::PasskeyMissing,
@@ -575,8 +567,6 @@ mod tests {
             EventType::BudgetReclaim,
             EventType::BackupAttemptFailed,
             EventType::BackupLocked,
-            EventType::MppChannelOpen,
-            EventType::MppChannelClose,
             EventType::AuthFailed,
             EventType::SecretRead,
             EventType::SecretWritten,
@@ -585,7 +575,7 @@ mod tests {
             EventType::AgeRecipientAdded,
             EventType::AgeReencrypted,
         ];
-        assert_eq!(all.len(), 23, "17 base + 6 secret-vault variants");
+        assert_eq!(all.len(), 19, "13 base + 6 secret-vault variants");
         for e in all {
             let s = serde_json::to_string(&e).unwrap();
             let back: EventType = serde_json::from_str(&s).unwrap();

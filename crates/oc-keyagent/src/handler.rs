@@ -6,7 +6,6 @@
 
 use std::{
     collections::HashMap,
-    io::BufRead,
     sync::{Arc, Mutex, OnceLock},
 };
 
@@ -209,22 +208,6 @@ fn verify_passkey(
     Ok(stored)
 }
 
-/// Convert a `DenyReason` to a lowercase snake_case string.
-fn deny_reason_string(reason: &oc_policy::v2::DenyReason) -> String {
-    match reason {
-        oc_policy::v2::DenyReason::RateLimitMinute => "rate_limit_minute",
-        oc_policy::v2::DenyReason::RateLimitHour => "rate_limit_hour",
-        oc_policy::v2::DenyReason::BudgetExceeded => "budget_exceeded",
-        oc_policy::v2::DenyReason::Whitelist => "whitelist",
-        oc_policy::v2::DenyReason::Expired => "expired",
-        oc_policy::v2::DenyReason::PasskeyForged => "passkey_forged",
-        oc_policy::v2::DenyReason::PolicyMissing => "policy_missing",
-        oc_policy::v2::DenyReason::Cooldown => "cooldown",
-        oc_policy::v2::DenyReason::Unknown => "unknown",
-    }
-    .to_string()
-}
-
 // ---------------------------------------------------------------------------
 // Dispatch
 // ---------------------------------------------------------------------------
@@ -247,8 +230,6 @@ pub fn dispatch(req: &KeyAgentRequest) -> Result<KeyAgentResponse, KeyAgentError
         Some(KeyAgentRequestKind::SignUserOp(req)) => handle_sign_user_op(req),
         Some(KeyAgentRequestKind::CreateSessionKey(req)) => handle_create_session_key(req),
         Some(KeyAgentRequestKind::RevokeSessionKey(req)) => handle_revoke_session_key(req),
-        Some(KeyAgentRequestKind::PayX402(req)) => handle_pay_x402(req),
-        Some(KeyAgentRequestKind::GetPaymentHistory(req)) => handle_get_payment_history(req),
         Some(KeyAgentRequestKind::GetBalance(_)) => {
             // R56: Key-Agent cannot do network I/O. Net-Agent handles balance queries.
             Ok(KeyAgentResponse::not_implemented(
@@ -654,149 +635,6 @@ fn handle_revoke_session_key(
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
-fn handle_pay_x402(req: &crate::proto::PayX402Request) -> Result<KeyAgentResponse, KeyAgentError> {
-    // T16: Build PayRequest and evaluate via PolicyIntegration.
-    // ponytail: amount/asset/chain/recipient come from x402 protocol response;
-    // we use placeholders for now. PolicyIntegration is created per-request.
-    let pay_request = oc_policy::PayRequest {
-        session_key_id: req.session_key_id.clone(),
-        device_id: "keyagent".to_string(),
-        amount_usd: req.amount_usd,
-        asset: req.asset.clone(),
-        chain_id: req.chain_id.clone(),
-        recipient: if req.recipient.is_empty() { None } else { Some(req.recipient.clone()) },
-    };
-
-    let audit_log = match global_audit_log() {
-        Ok(log) => log,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("audit log init: {e}"))),
-    };
-    // L3 fix: HOME must be set — refuse to fall back to /tmp.
-    let state_path = oc_core::paths::state_path("policy_state.json")
-        .map_err(|e| KeyAgentError::Internal(e.to_string()))?;
-
-    let mut policy_integration = match crate::PolicyIntegration::open(
-        &state_path,
-        &req.session_key_id,
-        None, // ponytail: load policy from store later
-        audit_log,
-        Box::new(oc_policy::v2::LogAlertSink),
-    ) {
-        Ok(pi) => pi,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("policy init failed: {e}"))),
-    };
-
-    let decision = policy_integration.evaluate(&pay_request, &req.session_key_id);
-
-    match decision {
-        oc_policy::v2::Decision::Allow | oc_policy::v2::Decision::Warn(_) => {
-            let resp = crate::proto::PayX402Response {
-                status: crate::proto::PaymentStatus::Ok as i32,
-                receipt: vec![],
-                retry_authorization: String::new(),
-                deny_reason: String::new(),
-                error: String::new(),
-            };
-            Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
-        }
-        oc_policy::v2::Decision::Deny(reason) => {
-            let deny_str = deny_reason_string(&reason);
-            let resp = crate::proto::PayX402Response {
-                status: crate::proto::PaymentStatus::Deny as i32,
-                receipt: vec![],
-                retry_authorization: String::new(),
-                deny_reason: deny_str,
-                error: String::new(),
-            };
-            Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
-        }
-    }
-}
-
-fn handle_get_payment_history(
-    req: &crate::proto::GetPaymentHistoryRequest,
-) -> Result<KeyAgentResponse, KeyAgentError> {
-    // L3 fix: HOME must be set — refuse to read/write the audit trail under /tmp.
-    let log_path = oc_core::paths::state_path("logs/audit.jsonl")
-        .map_err(|e| KeyAgentError::Internal(e.to_string()))?;
-
-    let file = match std::fs::File::open(&log_path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let resp = crate::proto::PaymentHistoryResponse { records: vec![] };
-            return Ok(KeyAgentResponse::ok(resp.encode_to_vec()));
-        }
-        Err(e) => return Ok(KeyAgentResponse::error(format!("audit log read failed: {e}"))),
-    };
-
-    let reader = std::io::BufReader::new(file);
-    let mut records = Vec::new();
-    let limit = if req.limit == 0 { usize::MAX } else { req.limit as usize };
-
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(_) => continue,
-        };
-        if line.trim().is_empty() {
-            continue;
-        }
-        let entry: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
-        let event_type = entry.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
-        if event_type != "pay_x402" {
-            continue;
-        }
-
-        let entry_sk = entry.get("session_key_id").and_then(|v| v.as_str()).unwrap_or("");
-        if !req.session_key_id.is_empty() && entry_sk != req.session_key_id {
-            continue;
-        }
-
-        let ts = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
-        let ts_unix = ts.parse::<jiff::Timestamp>().map_or(0, |t| t.as_second().max(0) as u64);
-        if ts_unix < req.since_unix {
-            continue;
-        }
-
-        let payload = entry.get("payload").cloned().unwrap_or(serde_json::Value::Null);
-        let status_str = payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
-        let status = if status_str == "ALLOWED" {
-            crate::proto::PaymentStatus::Ok as i32
-        } else if status_str == "DENIED" {
-            crate::proto::PaymentStatus::Deny as i32
-        } else {
-            crate::proto::PaymentStatus::Error as i32
-        };
-
-        records.push(crate::proto::PaymentRecord {
-            timestamp_unix: ts_unix,
-            session_key_id: entry_sk.to_string(),
-            amount_usd: payload.get("amount_usd").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            asset: payload.get("asset").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            chain_id: payload.get("chain_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            recipient: payload.get("recipient").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            status,
-            receipt: vec![],
-            deny_reason: payload
-                .get("deny_reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string(),
-        });
-
-        if records.len() >= limit {
-            break;
-        }
-    }
-
-    let resp = crate::proto::PaymentHistoryResponse { records };
-    Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
-}
-
 fn handle_lock_vault() -> Result<KeyAgentResponse, KeyAgentError> {
     global_key_cache().clear();
 
@@ -979,7 +817,7 @@ fn handle_drain_telemetry(
 mod tests {
     use super::*;
     use crate::{
-        proto::{Empty, PayX402Request},
+        proto::Empty,
         request::{KeyAgentRequest, KeyAgentRequestKind},
         response::KeyAgentResponseKind,
     };
@@ -1109,28 +947,6 @@ mod tests {
     }
 
     #[test]
-    fn test_get_payment_history_returns_ok() {
-        let resp = dispatch_req(KeyAgentRequestKind::GetPaymentHistory(
-            crate::proto::GetPaymentHistoryRequest {
-                session_key_id: "sk-test".to_string(),
-                since_unix: 0,
-                limit: 10,
-            },
-        ));
-        match &resp.kind {
-            Some(KeyAgentResponseKind::Ok(bytes)) => {
-                let decoded: crate::proto::PaymentHistoryResponse =
-                    prost::Message::decode(bytes.as_slice()).unwrap();
-                let _ = decoded.records.len();
-            }
-            Some(KeyAgentResponseKind::Error(_)) => {
-                // Acceptable if audit log dir doesn't exist.
-            }
-            other => panic!("unexpected response: {other:?}"),
-        }
-    }
-
-    #[test]
     fn test_lock_vault_returns_ok() {
         let resp = dispatch_req(KeyAgentRequestKind::LockVault(Empty {}));
         assert!(!resp.is_error(), "LockVault should succeed");
@@ -1164,14 +980,6 @@ mod tests {
                 session_key_id: "x".to_string(),
                 auth: None,
             }),
-            KeyAgentRequestKind::PayX402(PayX402Request {
-                session_key_id: "x".to_string(),
-                url: "x".to_string(),
-                method: "x".to_string(),
-                body: vec![],
-                headers: std::collections::HashMap::new(),
-                ..Default::default()
-            }),
             KeyAgentRequestKind::SignTransaction(crate::proto::SignTransactionRequest {
                 session_key_id: "x".to_string(),
                 wallet_id: "x".to_string(),
@@ -1202,11 +1010,6 @@ mod tests {
                 wallet_id: "x".to_string(),
                 typed_data_json: "x".to_string(),
                 auth: None,
-            }),
-            KeyAgentRequestKind::GetPaymentHistory(crate::proto::GetPaymentHistoryRequest {
-                session_key_id: "x".to_string(),
-                since_unix: 0,
-                limit: 0,
             }),
             KeyAgentRequestKind::GetBalance(crate::proto::GetBalanceRequest {
                 wallet_id: "x".to_string(),

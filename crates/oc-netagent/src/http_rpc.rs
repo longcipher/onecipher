@@ -239,7 +239,11 @@ mod tests {
     #[tokio::test]
     async fn health_endpoint_returns_ok() {
         let port = serve_in_background("127.0.0.1:0".parse().expect("addr")).await;
-        let resp = reqwest::get(format!("http://127.0.0.1:{port}/health")).await.expect("get");
+        let resp = hpx::Client::new()
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .send()
+            .await
+            .expect("get");
         assert_eq!(resp.status(), StatusCode::OK);
         let v: Value = resp.json().await.expect("json");
         assert_eq!(v["ok"], true);
@@ -249,7 +253,7 @@ mod tests {
     #[tokio::test]
     async fn oc_health_method_served_locally() {
         let port = serve_in_background("127.0.0.1:0".parse().expect("addr")).await;
-        let client = reqwest::Client::new();
+        let client = hpx::Client::new();
         let resp = client
             .post(format!("http://127.0.0.1:{port}/rpc"))
             .header("content-type", "application/json")
@@ -266,7 +270,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_method_returns_jsonrpc_error() {
         let port = serve_in_background("127.0.0.1:0".parse().expect("addr")).await;
-        let client = reqwest::Client::new();
+        let client = hpx::Client::new();
         let resp = client
             .post(format!("http://127.0.0.1:{port}/rpc"))
             .header("content-type", "application/json")
@@ -282,7 +286,7 @@ mod tests {
     #[tokio::test]
     async fn missing_method_returns_invalid_request() {
         let port = serve_in_background("127.0.0.1:0".parse().expect("addr")).await;
-        let client = reqwest::Client::new();
+        let client = hpx::Client::new();
         let resp = client
             .post(format!("http://127.0.0.1:{port}/rpc"))
             .header("content-type", "application/json")
@@ -297,7 +301,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_body_returns_parse_error() {
         let port = serve_in_background("127.0.0.1:0".parse().expect("addr")).await;
-        let client = reqwest::Client::new();
+        let client = hpx::Client::new();
         let resp = client
             .post(format!("http://127.0.0.1:{port}/rpc"))
             .header("content-type", "application/json")
@@ -314,7 +318,7 @@ mod tests {
         // onecipher_listWallets forwards to a non-existent Key-Agent socket; it
         // must surface a JSON-RPC internal error, not panic the server.
         let port = serve_in_background("127.0.0.1:0".parse().expect("addr")).await;
-        let client = reqwest::Client::new();
+        let client = hpx::Client::new();
         let resp = client
             .post(format!("http://127.0.0.1:{port}/rpc"))
             .header("content-type", "application/json")

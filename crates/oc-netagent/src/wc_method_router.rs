@@ -18,8 +18,8 @@ use oc_keyagent::{
     KeyAgentRequest, KeyAgentRequestKind, KeyAgentResponse, KeyAgentResponseKind,
     proto::{
         GenerateChallengeRequest, GetBalanceRequest, ListWalletsResponse, PasskeyAuthorization,
-        PayX402Request, SignAuthRequest, SignAuthResponse, SignMessageRequest,
-        SignTransactionRequest, SignTypedDataRequest, SignUserOpRequest,
+        SignAuthRequest, SignAuthResponse, SignMessageRequest, SignTransactionRequest,
+        SignTypedDataRequest, SignUserOpRequest,
     },
 };
 use oc_walletconnect::{
@@ -898,47 +898,6 @@ impl WalletMethodHandler for WcMethodRouter {
                             .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
                     Ok(
                         json!({"wallet_id": resp.wallet_id, "chain_id": resp.chain_id, "balance": resp.balance, "decimals": resp.decimals, "symbol": resp.symbol}),
-                    )
-                }
-
-                "onecipher_payX402" => {
-                    let session_key_id = params
-                        .get("session_key_id")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| {
-                            (JsonRpcErrorCode::UnsupportedMethod, "missing session_key_id".into())
-                        })?
-                        .to_string();
-                    let url = params
-                        .get("url")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| (JsonRpcErrorCode::UnsupportedMethod, "missing url".into()))?
-                        .to_string();
-                    let method =
-                        params.get("method").and_then(Value::as_str).unwrap_or("GET").to_string();
-                    let body = params
-                        .get("body")
-                        .and_then(Value::as_str)
-                        .map(|b| b.as_bytes().to_vec())
-                        .unwrap_or_default();
-                    let headers = params
-                        .get("headers")
-                        .and_then(|v| serde_json::from_value(v.clone()).ok())
-                        .unwrap_or_default();
-                    let req = PayX402Request {
-                        session_key_id,
-                        url,
-                        method,
-                        body,
-                        headers,
-                        ..Default::default()
-                    };
-                    let bytes = self.forward(KeyAgentRequestKind::PayX402(req)).await?;
-                    let resp: oc_keyagent::proto::PayX402Response =
-                        Message::decode(bytes.as_slice())
-                            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
-                    Ok(
-                        json!({"status": resp.status, "receipt": resp.receipt, "retry_authorization": resp.retry_authorization, "deny_reason": resp.deny_reason, "error": resp.error}),
                     )
                 }
 

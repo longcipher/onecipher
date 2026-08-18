@@ -10,8 +10,8 @@ use std::os::unix::net::UnixStream;
 use oc_keyagent::{
     frame::FrameClient,
     proto::{
-        CreateSessionKeyRequest, CreateSessionKeyResponse, ListSessionKeysResponse, PayX402Request,
-        PayX402Response, RevokeSessionKeyRequest, RevokeSessionKeyResponse,
+        CreateSessionKeyRequest, CreateSessionKeyResponse, ListSessionKeysResponse,
+        RevokeSessionKeyRequest, RevokeSessionKeyResponse,
     },
     request::{KeyAgentRequest, KeyAgentRequestKind},
     response::{KeyAgentResponse, KeyAgentResponseKind},
@@ -43,9 +43,6 @@ pub(crate) trait NetAgentClient: Send + Sync {
 
     /// RPC: `ListSessionKeys(Empty) → ListSessionKeysResponse`
     fn list_session_keys(&self) -> Result<ListSessionKeysResponse, CliError>;
-
-    /// RPC: `PayX402(PayX402Request) → PayX402Response`
-    fn pay_x402(&self, req: PayX402Request) -> Result<PayX402Response, CliError>;
 }
 
 /// Production stub — returns `CliError::NetAgentUnavailable` for all RPCs.
@@ -70,10 +67,6 @@ impl NetAgentClient for UnimplementedClient {
     }
 
     fn list_session_keys(&self) -> Result<ListSessionKeysResponse, CliError> {
-        Err(CliError::NetAgentUnavailable)
-    }
-
-    fn pay_x402(&self, _req: PayX402Request) -> Result<PayX402Response, CliError> {
         Err(CliError::NetAgentUnavailable)
     }
 }
@@ -253,12 +246,6 @@ impl NetAgentClient for UdsKeyAgentClient {
         Err(CliError::InvalidArgs(
             "ListSessionKeys not supported by Key-Agent (T18 pending)".to_string(),
         ))
-    }
-
-    fn pay_x402(&self, req: PayX402Request) -> Result<PayX402Response, CliError> {
-        let req = KeyAgentRequest { kind: Some(KeyAgentRequestKind::PayX402(req)) };
-        let resp = self.send(&req)?;
-        decode_ok(resp)
     }
 }
 

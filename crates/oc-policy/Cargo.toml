@@ -18,7 +18,7 @@ experimental-v3 = []
 # `oc-core` and pulls only `jiff-core` + `serde_core`, so declaring it directly
 # adds zero packages while removing a hand-rolled parser that accepted invalid
 # calendar dates. R56-clean: no tokio/reqwest/hyper in its subtree.
-jiff = { workspace = true }
+jiff = { workspace = true, features = ["serde", "std"] }
 oc-core = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

@@ -164,7 +164,7 @@ mod tests {
     use super::*;
     use crate::{
         frame::{read_frame, write_frame},
-        proto::{Empty, PayX402Request},
+        proto::Empty,
         request::{KeyAgentRequest, KeyAgentRequestKind},
         response::{KeyAgentResponse, KeyAgentResponseKind},
     };
@@ -189,16 +189,7 @@ mod tests {
         let (client, server) = UnixStream::pair().unwrap();
         let handle = thread::spawn(move || handle_conn(server));
 
-        let req = KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::PayX402(PayX402Request {
-                session_key_id: "sk-round-trip".to_string(),
-                url: "https://example.com".to_string(),
-                method: "GET".to_string(),
-                body: vec![],
-                headers: std::collections::HashMap::new(),
-                ..Default::default()
-            })),
-        };
+        let req = KeyAgentRequest { kind: Some(KeyAgentRequestKind::LockVault(Empty {})) };
         let mut client_w = client.try_clone().unwrap();
         write_frame(&mut client_w, &req.encode_to_vec()).unwrap();
 

@@ -82,16 +82,6 @@ pub(crate) enum Commands {
         #[arg(long, default_value = "evm")]
         chain: String,
     },
-    /// Fund a wallet with USDC via MoonPay
-    Fund {
-        #[command(subcommand)]
-        subcommand: FundCommands,
-    },
-    /// Pay for x402-enabled API calls
-    Pay {
-        #[command(subcommand)]
-        subcommand: PayCommands,
-    },
     /// Manage policies for API key access control
     Policy {
         #[command(subcommand)]
@@ -129,13 +119,6 @@ pub(crate) enum Commands {
     SessionKey {
         #[command(subcommand)]
         subcommand: SessionKeyCommands,
-    },
-    /// OneCipher x402 payment (R7, R33; RPC: PayX402). Named `ocpay` because
-    /// the legacy `pay` variant already occupies `Commands::Pay`.
-    #[command(name = "ocpay")]
-    OcPay {
-        #[command(subcommand)]
-        subcommand: OcPayCommands,
     },
     /// Show Key-Agent / Network-Agent status (LOCAL — no RPC)
     Status,
@@ -296,6 +279,11 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: GitCommands,
     },
+    /// Expose a loopback JSON-RPC 2.0 server (WalletSigner for ledgerflow)
+    WalletRpc {
+        #[command(subcommand)]
+        subcommand: WalletRpcCommands,
+    },
 }
 
 // ===========================================================================
@@ -363,24 +351,6 @@ pub(crate) enum SessionKeyCommands {
     },
     /// List all session keys (RPC: ListSessionKeys)
     List,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum OcPayCommands {
-    /// Pay for an x402-enabled API call (RPC: PayX402)
-    X402 {
-        /// URL to request
-        url: String,
-        /// Session key ID to pay with
-        #[arg(long)]
-        session_key: String,
-        /// HTTP method (default: GET)
-        #[arg(long, default_value = "GET")]
-        method: String,
-        /// Request body (JSON)
-        #[arg(long)]
-        body: Option<String>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -561,9 +531,6 @@ pub(crate) enum IntentCommands {
         /// Session key ID to use for signing
         #[arg(long)]
         session_key: String,
-        /// Sponsor mode: native (default), sponsored, payin-usdc
-        #[arg(long, default_value = "native")]
-        sponsor: String,
         /// Skip confirmation prompt (auto-confirm)
         #[arg(long)]
         yes: bool,
@@ -597,9 +564,6 @@ pub(crate) enum IntentCommands {
         /// Session key ID
         #[arg(long)]
         session_key: String,
-        /// Sponsor mode: native (default), sponsored, payin-usdc
-        #[arg(long, default_value = "native")]
-        sponsor: String,
         /// Override RPC URL (currently unused; mock RPC is used)
         #[arg(long)]
         rpc_url: Option<String>,
@@ -971,6 +935,22 @@ pub(crate) enum WalletCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub(crate) enum WalletRpcCommands {
+    /// Start the loopback JSON-RPC 2.0 server (WalletSigner for ledgerflow)
+    Serve {
+        /// Bind address (default: 127.0.0.1:18080)
+        #[arg(long, default_value = "127.0.0.1:18080")]
+        listen: String,
+        /// Wallet name or ID to sign with (default: "default")
+        #[arg(long, default_value = "default")]
+        wallet: String,
+        /// Account index for HD derivation (default: 0)
+        #[arg(long, default_value = "0")]
+        index: u32,
+    },
+}
+
 #[derive(Clone, clap::ValueEnum)]
 pub(crate) enum SignVia {
     /// Local signing with stored key
@@ -1103,65 +1083,6 @@ pub(crate) enum MnemonicCommands {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum FundCommands {
-    /// Create a MoonPay deposit — generates multi-chain deposit addresses that auto-convert to
-    /// USDC
-    Deposit {
-        /// Wallet name or ID
-        #[arg(long, env = "ONECIPHER_WALLET")]
-        wallet: String,
-        /// Target chain (default: base)
-        #[arg(long, default_value = "base")]
-        chain: String,
-        /// Token to receive (default: USDC)
-        #[arg(long, default_value = "USDC")]
-        token: String,
-    },
-    /// Check token balances for a wallet
-    Balance {
-        /// Wallet name or ID
-        #[arg(long, env = "ONECIPHER_WALLET")]
-        wallet: String,
-        /// Chain to check (default: base)
-        #[arg(long, default_value = "base")]
-        chain: String,
-    },
-}
-
-#[derive(Subcommand)]
-pub(crate) enum PayCommands {
-    /// Make a paid request to an x402-enabled API endpoint
-    Request {
-        /// The URL to request
-        url: String,
-        /// Wallet name or ID
-        #[arg(long, env = "ONECIPHER_WALLET")]
-        wallet: String,
-        /// HTTP method
-        #[arg(long, default_value = "GET")]
-        method: String,
-        /// Request body (JSON)
-        #[arg(long)]
-        body: Option<String>,
-        /// Skip passphrase prompt (use empty passphrase)
-        #[arg(long)]
-        no_passphrase: bool,
-    },
-    /// Discover x402-enabled services from the Bazaar directory
-    Discover {
-        /// Search query (filters by URL and description)
-        #[arg(long)]
-        query: Option<String>,
-        /// Max results per page (default 100)
-        #[arg(long)]
-        limit: Option<u64>,
-        /// Offset into results for pagination
-        #[arg(long)]
-        offset: Option<u64>,
-    },
-}
-
-#[derive(Subcommand)]
 pub(crate) enum PolicyCommands {
     /// Register a policy from a JSON file
     Create {
@@ -1251,8 +1172,6 @@ pub(crate) enum CliError {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Json(#[from] serde_json::Error),
-    #[error("{0}")]
-    Pay(#[from] oc_pay::http::OcPayHttpError),
     #[cfg(feature = "git")]
     #[error("git error: {0}")]
     Git(#[from] oc_secret::git::GitError),

@@ -28,12 +28,12 @@ sha3 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "io-util"] }
 tracing = { workspace = true }
-url = "2.5"
+url = { workspace = true }
 x25519-dalek = { workspace = true, features = ["static_secrets"] }
 zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-hex-literal = "0.4"
+hex-literal = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 
 [lints]

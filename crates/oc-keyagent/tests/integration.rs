@@ -14,7 +14,7 @@ use oc_keyagent::{
     KeyAgentError,
     frame::{read_frame, write_frame},
     handle_conn,
-    proto::{Empty, PayX402Request},
+    proto::Empty,
     request::{KeyAgentRequest, KeyAgentRequestKind},
     response::{KeyAgentResponse, KeyAgentResponseKind},
 };
@@ -44,16 +44,7 @@ fn test_request_response_round_trip() {
     let (client, server) = UnixStream::pair().unwrap();
     let handle = thread::spawn(move || handle_conn(server));
 
-    let req = KeyAgentRequest {
-        kind: Some(KeyAgentRequestKind::PayX402(PayX402Request {
-            session_key_id: "sk-integration".to_string(),
-            url: "https://example.com".to_string(),
-            method: "GET".to_string(),
-            body: vec![],
-            headers: std::collections::HashMap::new(),
-            ..Default::default()
-        })),
-    };
+    let req = KeyAgentRequest { kind: Some(KeyAgentRequestKind::LockVault(Empty {})) };
     let mut client_w = client.try_clone().unwrap();
     write_frame(&mut client_w, &req.encode_to_vec()).unwrap();
 
@@ -196,16 +187,6 @@ fn test_all_request_variants_dispatch() {
             )),
         },
         KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::PayX402(PayX402Request {
-                session_key_id: "x".into(),
-                url: "x".into(),
-                method: "x".into(),
-                body: vec![],
-                headers: std::collections::HashMap::new(),
-                ..Default::default()
-            })),
-        },
-        KeyAgentRequest {
             kind: Some(KeyAgentRequestKind::SignTransaction(
                 oc_keyagent::proto::SignTransactionRequest {
                     session_key_id: "x".into(),
@@ -240,15 +221,6 @@ fn test_all_request_variants_dispatch() {
                     wallet_id: "x".into(),
                     typed_data_json: "x".into(),
                     auth: None,
-                },
-            )),
-        },
-        KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::GetPaymentHistory(
-                oc_keyagent::proto::GetPaymentHistoryRequest {
-                    session_key_id: "x".into(),
-                    since_unix: 0,
-                    limit: 10,
                 },
             )),
         },
@@ -292,35 +264,7 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// 9. Fuzz: PayX402Request round-trips through encode + decode
-// ---------------------------------------------------------------------------
-
-proptest! {
-    #[test]
-    fn test_pay_x402_request_fuzz_round_trip(
-        session_key_id in "[a-z0-9-]{0,32}",
-        url in "https?://[a-z]{0,16}\\.[a-z]{0,8}",
-        method in "(GET|POST|PUT|DELETE)",
-        body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..512),
-    ) {
-        let req = KeyAgentRequest {
-            kind: Some(KeyAgentRequestKind::PayX402(PayX402Request {
-                session_key_id,
-                url,
-                method,
-                body,
-                headers: std::collections::HashMap::new(),
-                ..Default::default()
-            })),
-        };
-        let bytes = req.encode_to_vec();
-        let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();
-        prop_assert_eq!(req, decoded);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 10. Server-side handle_conn error propagation on write failure
+// 9. Server-side handle_conn error propagation on write failure
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -351,7 +295,7 @@ fn test_handle_conn_returns_err_when_client_drops_mid_write() {
 }
 
 // ---------------------------------------------------------------------------
-// 11. KeyAgentError Display formatting (smoke test)
+// 10. KeyAgentError Display formatting (smoke test)
 // ---------------------------------------------------------------------------
 
 #[test]

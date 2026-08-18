@@ -11,7 +11,6 @@ pub(crate) mod doctor;
 pub(crate) mod env_cmd;
 pub(crate) mod find;
 pub(crate) mod fsck;
-pub(crate) mod fund;
 pub(crate) mod generate;
 #[cfg(feature = "git")]
 pub(crate) mod git_cmd;
@@ -23,8 +22,6 @@ pub(crate) mod intent;
 pub(crate) mod key;
 pub(crate) mod migrate;
 pub(crate) mod password;
-pub(crate) mod pay;
-pub(crate) mod pay_x402;
 pub(crate) mod policy;
 pub(crate) mod sbom;
 pub(crate) mod secret;
@@ -41,6 +38,7 @@ pub(crate) mod update;
 pub(crate) mod vanity;
 pub(crate) mod vault;
 pub(crate) mod wallet;
+pub(crate) mod wallet_rpc;
 pub(crate) mod wc;
 pub(crate) mod webui;
 

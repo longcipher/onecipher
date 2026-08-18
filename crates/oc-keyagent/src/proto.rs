@@ -379,89 +379,6 @@ pub struct SignTypedDataResponse {
 }
 
 // ===========================================================================
-// Payments (x402)
-// ===========================================================================
-
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct PayX402Request {
-    #[prost(string, tag = "1")]
-    pub session_key_id: String,
-    #[prost(string, tag = "2")]
-    pub url: String,
-    #[prost(string, tag = "3")]
-    pub method: String,
-    #[prost(bytes, tag = "4")]
-    pub body: Vec<u8>,
-    #[prost(map = "string, string", tag = "5")]
-    pub headers: std::collections::HashMap<String, String>,
-    /// Stage 0 additions — payment requirement fields.
-    #[prost(double, tag = "6")]
-    pub amount_usd: f64,
-    /// CAIP-19 asset identifier.
-    #[prost(string, tag = "7")]
-    pub asset: String,
-    /// CAIP-2 chain identifier.
-    #[prost(string, tag = "8")]
-    pub chain_id: String,
-    /// Contract address or empty.
-    #[prost(string, tag = "9")]
-    pub recipient: String,
-}
-
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct PayX402Response {
-    #[prost(enumeration = "PaymentStatus", tag = "1")]
-    pub status: i32,
-    #[prost(bytes, tag = "2")]
-    pub receipt: Vec<u8>,
-    #[prost(string, tag = "3")]
-    pub retry_authorization: String,
-    /// Populated on DENY (RATE_LIMIT / BUDGET_EXCEEDED / WHITELIST / etc.).
-    #[prost(string, tag = "4")]
-    pub deny_reason: String,
-    #[prost(string, tag = "5")]
-    pub error: String,
-}
-
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct GetPaymentHistoryRequest {
-    #[prost(string, tag = "1")]
-    pub session_key_id: String,
-    #[prost(uint64, tag = "2")]
-    pub since_unix: u64,
-    #[prost(uint32, tag = "3")]
-    pub limit: u32,
-}
-
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct PaymentHistoryResponse {
-    #[prost(message, repeated, tag = "1")]
-    pub records: Vec<PaymentRecord>,
-}
-
-#[derive(Clone, PartialEq, prost::Message)]
-pub struct PaymentRecord {
-    #[prost(uint64, tag = "1")]
-    pub timestamp_unix: u64,
-    #[prost(string, tag = "2")]
-    pub session_key_id: String,
-    #[prost(double, tag = "3")]
-    pub amount_usd: f64,
-    #[prost(string, tag = "4")]
-    pub asset: String,
-    #[prost(string, tag = "5")]
-    pub chain_id: String,
-    #[prost(string, tag = "6")]
-    pub recipient: String,
-    #[prost(enumeration = "PaymentStatus", tag = "7")]
-    pub status: i32,
-    #[prost(bytes, tag = "8")]
-    pub receipt: Vec<u8>,
-    #[prost(string, tag = "9")]
-    pub deny_reason: String,
-}
-
-// ===========================================================================
 // Vault
 // ===========================================================================
 
@@ -584,41 +501,6 @@ pub struct DrainTelemetryResponse {
 // Enums
 // ===========================================================================
 
-/// Payment status (mirrors `oc_policy` payment outcomes).
-///
-/// `#[derive(prost::Enumeration)]` generates `is_valid`, `from_i32`,
-/// `Default`, `From<Self> for i32`, and `TryFrom<i32> for Self`.
-/// The `as_str_name` / `from_str_name` helpers below are inherent methods
-/// (prost 0.14 dropped the `Enumeration` trait — only the derive remains).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, prost::Enumeration)]
-#[repr(i32)]
-pub enum PaymentStatus {
-    Ok = 0,
-    Deny = 1,
-    Error = 2,
-}
-
-impl PaymentStatus {
-    /// Stable string name for audit logs and JSON serialization.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Ok => "PAYMENT_STATUS_OK",
-            Self::Deny => "PAYMENT_STATUS_DENY",
-            Self::Error => "PAYMENT_STATUS_ERROR",
-        }
-    }
-
-    /// Inverse of [`as_str_name`].
-    pub fn from_str_name(name: &str) -> Option<Self> {
-        match name {
-            "PAYMENT_STATUS_OK" => Some(Self::Ok),
-            "PAYMENT_STATUS_DENY" => Some(Self::Deny),
-            "PAYMENT_STATUS_ERROR" => Some(Self::Error),
-            _ => None,
-        }
-    }
-}
-
 /// Policy denial reason (mirrors `oc_policy::v2::DenyReason` — R80: exactly 9 variants).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, prost::Enumeration)]
 #[repr(i32)]
@@ -734,40 +616,6 @@ mod tests {
     }
 
     #[test]
-    fn payx402_request_roundtrip_with_headers() {
-        let mut headers = std::collections::HashMap::new();
-        headers.insert("X-Idempotency-Key".to_string(), "abc-123".to_string());
-        headers.insert("Authorization".to_string(), "Bearer token".to_string());
-        let original = PayX402Request {
-            session_key_id: "sk-7f3a".to_string(),
-            url: "https://pay.example/x402".to_string(),
-            method: "POST".to_string(),
-            body: b"{\"amount\":100}".to_vec(),
-            headers,
-            amount_usd: 1.5,
-            asset: "eip155:1/erc20:0xabc".to_string(),
-            chain_id: "eip155:1".to_string(),
-            recipient: "0xrecipient".to_string(),
-        };
-        let decoded = roundtrip(&original);
-        assert_eq!(original, decoded);
-        assert_eq!(decoded.headers.len(), 2);
-        assert_eq!(decoded.headers.get("X-Idempotency-Key"), Some(&"abc-123".to_string()));
-    }
-
-    #[test]
-    fn payx402_response_roundtrip_with_deny_reason() {
-        let original = PayX402Response {
-            status: PaymentStatus::Deny as i32,
-            receipt: vec![0xAA, 0xBB],
-            retry_authorization: "retry-after-60s".to_string(),
-            deny_reason: "RATE_LIMIT_MINUTE".to_string(),
-            error: String::new(),
-        };
-        assert_eq!(original, roundtrip(&original));
-    }
-
-    #[test]
     fn create_session_key_request_roundtrip_with_auth() {
         let auth = PasskeyAuthorization {
             challenge: vec![0x10; 32],
@@ -783,19 +631,6 @@ mod tests {
         let decoded = roundtrip(&original);
         assert_eq!(original, decoded);
         assert!(decoded.auth.is_some(), "auth must round-trip");
-    }
-
-    #[test]
-    fn payment_status_enum_values_and_names() {
-        assert_eq!(PaymentStatus::Ok as i32, 0);
-        assert_eq!(PaymentStatus::Deny as i32, 1);
-        assert_eq!(PaymentStatus::Error as i32, 2);
-        assert_eq!(PaymentStatus::default(), PaymentStatus::Ok);
-        for v in [PaymentStatus::Ok, PaymentStatus::Deny, PaymentStatus::Error] {
-            let name = v.as_str_name();
-            assert_eq!(PaymentStatus::from_str_name(name), Some(v));
-        }
-        assert_eq!(PaymentStatus::from_str_name("UNKNOWN"), None);
     }
 
     #[test]
@@ -829,12 +664,6 @@ mod tests {
             assert_eq!(recovered, v);
         }
         assert!(DenyReason::try_from(999).is_err(), "out-of-range i32 must error");
-    }
-
-    #[test]
-    fn decode_malformed_bytes_does_not_panic() {
-        let garbage: Vec<u8> = vec![0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x01, 0x02];
-        let _ = PayX402Request::decode(garbage.as_slice());
     }
 
     #[test]

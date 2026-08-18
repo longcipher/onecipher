@@ -22,7 +22,7 @@ use axum::{
         Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{header, HeaderValue},
+    http::{HeaderValue, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -76,13 +76,11 @@ async fn compat_ws_headers(mut req: Request, next: Next) -> Response {
     // `Connection` 改写为 `keep-alive`。只要请求带 WS 握手特征头
     // （sec-websocket-key / sec-websocket-version），就补全完整的升级头，
     // 使 axum 的 `WebSocketUpgrade` 接受该握手。
-    if req.headers().contains_key(header::SEC_WEBSOCKET_KEY)
-        && req.headers().contains_key(header::SEC_WEBSOCKET_VERSION)
+    if req.headers().contains_key(header::SEC_WEBSOCKET_KEY) &&
+        req.headers().contains_key(header::SEC_WEBSOCKET_VERSION)
     {
-        req.headers_mut()
-            .insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
-        req.headers_mut()
-            .insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+        req.headers_mut().insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+        req.headers_mut().insert(header::UPGRADE, HeaderValue::from_static("websocket"));
     }
     next.run(req).await
 }

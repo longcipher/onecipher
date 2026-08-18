@@ -280,7 +280,7 @@ mod tests {
             "device_id": "agent-01",
             "seq": 42,
             "timestamp": "2026-07-18T12:00:00Z",
-            "event_type": "pay_x402",
+            "event_type": "sign_user_op",
             "session_key_id": "sk-1",
             "payload": {"status": "allowed", "amount_usd": 1.50},
             "prev_hash": "",
@@ -292,7 +292,7 @@ mod tests {
         assert!(s.contains("device_id=agent-01"), "got: {s}");
         assert!(s.contains("seq=42"), "got: {s}");
         assert!(s.contains("timestamp=2026-07-18T12:00:00Z"), "got: {s}");
-        assert!(s.contains("event_type=pay_x402"), "got: {s}");
+        assert!(s.contains("event_type=sign_user_op"), "got: {s}");
         assert!(s.contains("session_key_id=sk-1"), "got: {s}");
         assert!(s.contains("status=ALLOWED"), "got: {s}");
         assert!(s.contains("amount_usd=1.50"), "got: {s}");
@@ -306,7 +306,7 @@ mod tests {
             "device_id": "agent-02",
             "seq": 7,
             "timestamp": "2026-07-18T12:00:00Z",
-            "event_type": "pay_x402",
+            "event_type": "sign_user_op",
             "session_key_id": null,
             "payload": {"status": "denied", "amount_usd": 9.99, "deny_reason": "RATE_LIMIT_MINUTE"},
             "prev_hash": "",
