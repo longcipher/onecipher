@@ -12,7 +12,7 @@
 //! POST /api/auth/webauthn/login/finish          — verify + create session
 //! POST /api/auth/logout                         — destroy session
 //! GET  /api/auth/status                         — is a session active?
-//! POST /api/auth/lock                           — expire session (auto-lock trigger)
+//! POST /api/auth/lock                           — expire session (requires session)
 //! ```
 //!
 //! ## Dual registration (ADR-2 unification)
@@ -28,8 +28,9 @@ use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{Request, State},
     http::{StatusCode, header},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
@@ -66,6 +67,51 @@ pub const SESSION_COOKIE: &str = "oc_session";
 /// Header used to carry the session id (simpler than cookie parsing in the
 /// Leptos CSR client; cookie is still set for browser-native flows).
 pub const SESSION_HEADER: &str = "x-oc-session";
+
+/// Resolve the session id from either the explicit header or the cookie.
+fn session_id_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    if let Some(token) = headers.get(SESSION_HEADER).and_then(|v| v.to_str().ok()) {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+
+    let cookie = headers.get(header::COOKIE).and_then(|v| v.to_str().ok())?;
+    for part in cookie.split(';') {
+        let mut pair = part.trim().splitn(2, '=');
+        let name = pair.next()?.trim();
+        let value = pair.next()?.trim();
+        if name == SESSION_COOKIE && !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// Validate an authenticated session from request headers.
+pub fn validate_session_headers(
+    headers: &axum::http::HeaderMap,
+    session_store: &SessionStore,
+) -> Option<crate::auth::session::AuthSession> {
+    let session_id = session_id_from_headers(headers)?;
+    session_store.validate(&session_id)
+}
+
+/// Middleware gate for protected Web UI REST routes.
+pub async fn require_session(
+    State(session_store): State<SessionStore>,
+    headers: axum::http::HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
+    if validate_session_headers(&headers, &session_store).is_some() {
+        next.run(request).await
+    } else {
+        (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "authentication required"})))
+            .into_response()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -303,6 +349,14 @@ pub async fn lock(State(state): State<AuthState>) -> Response {
     Json(serde_json::json!({"ok": true})).into_response()
 }
 
+/// `POST /api/auth/lock` — destroy every session after session auth.
+pub async fn lock_with_session(
+    State(state): State<crate::routes::approvals::AppState>,
+) -> Response {
+    state.session_store.destroy_all();
+    Json(serde_json::json!({"ok": true})).into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Dual registration helpers
 // ---------------------------------------------------------------------------
@@ -335,6 +389,9 @@ fn extract_sec1_public_key(stored: &StoredCredential) -> Option<(String, Vec<u8>
 
 #[cfg(test)]
 mod tests {
+    use axum::{Router, body::Body, http::Request, middleware::from_fn_with_state, routing::get};
+    use tower::ServiceExt;
+
     use super::*;
 
     #[test]
@@ -456,5 +513,52 @@ mod tests {
         let resp = lock(State(state.clone())).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(state.session_store.len(), 0); // lock wipes every session
+    }
+
+    #[test]
+    fn validate_session_headers_accepts_cookie() {
+        let store = SessionStore::new(1800);
+        let session = store.create_session("cred-1", None);
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            axum::http::HeaderValue::from_str(&format!("{SESSION_COOKIE}={}", session.id)).unwrap(),
+        );
+        assert!(validate_session_headers(&headers, &store).is_some());
+    }
+
+    #[tokio::test]
+    async fn require_session_rejects_missing_session() {
+        let store = SessionStore::new(1800);
+        let app = Router::new()
+            .route("/protected", get(|| async { StatusCode::OK }))
+            .layer(from_fn_with_state(store, require_session));
+
+        let resp = app
+            .oneshot(Request::builder().uri("/protected").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn require_session_accepts_header_session() {
+        let store = SessionStore::new(1800);
+        let session = store.create_session("cred-1", None);
+        let app = Router::new()
+            .route("/protected", get(|| async { StatusCode::OK }))
+            .layer(from_fn_with_state(store, require_session));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(SESSION_HEADER, session.id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

@@ -50,16 +50,22 @@ The private key never leaves the daemon; the IAM only ever sees addresses and si
 
 ### 2.2 `onecipher_signAuth` — auth-class signature (recommended for sign-in)
 
-A dedicated, **low-risk** message-signing method for authentication flows. Unlike
-`personal_sign`, it does **not** require a registered passkey — human confirmation is
-provided by the daemon's approval flow (WebUI / CLI / policy).
+A dedicated, **low-risk** message-signing method for authentication flows. Direct
+callers must provide an explicit Passkey proof; the daemon's internal
+WalletConnect path may instead inject a daemon-internal capability token.
+Human confirmation is still provided by the daemon's approval flow (WebUI / CLI / policy).
 
 ```jsonc
 // request
 {
   "chain_id": "eip155:1",      // CAIP-2
   "message":  "<EIP-4361 text>",
-  "wallet_id": "optional"      // default wallet when omitted
+  "wallet_id": "optional",     // default wallet when omitted
+  "auth": {                    // required for direct/local callers
+    "challenge_hex": "...",
+    "signature_hex": "...",
+    "credential_id": "..."
+  }
 }
 // response
 {
@@ -76,18 +82,18 @@ Behaviour:
   identical to OneCipher's existing `signMessage` path.
 - Gated by the daemon's approval flow when enabled; risk class `auth`.
 - Subject to the policy engine (chain allowlist, expiry, …).
+- When `wallet_id` is omitted, the default wallet must have an account for the
+  requested `chain_id`; OneCipher does not silently fall back to another chain's account.
 - Generic: no realm, issuer, or account-system fields are hardcoded.
 
 Implementation notes:
-- **No passkey required.** Unlike `personal_sign`, the Key-Agent does not
-  verify a `PasskeyAuthorization` for this method; authorization comes from
-  the dApp origin allowlist plus the daemon's approval flow.
-- **Device-bound wallets.** Because there is no passkey signature to derive
-  the wallet unlock token from, the Key-Agent derives it from the process
-  device key (`~/.onecipher/audit_device.key`). The signed wallet must
-  therefore be encrypted with that device-token passphrase (create/import it
-  through the daemon's own flows); a wallet protected by an arbitrary user
-  passphrase cannot be unlocked by this method.
+- **Direct/local calls are passkey-gated.** Local JSON-RPC callers must
+  present a `PasskeyAuthorization`; the Key-Agent verifies it before signing.
+- **WalletConnect daemon calls use an internal token.** `wc_authRequest` and
+  daemon-owned `onecipher_signAuth` requests do not forward a passkey proof
+  over the relay. Instead, the daemon injects a startup-minted internal token,
+  and the Key-Agent derives the device-bound unlock token from the process
+  device key (`~/.onecipher/audit_device.key`).
 - `public_key` is returned as `0x`-prefixed hex (33-byte compressed
   secp256k1 for EVM-family chains, 32-byte ed25519 otherwise).
 
@@ -144,7 +150,9 @@ onecipher config set wc.project_id 'YOUR_PROJECT_ID'
    `wc.trusted_origins` and settles the session.
 3. **IAM** issues a single-use nonce (bound to its auth session) and assembles an
    EIP-4361 message (`domain`/`uri` = its own origin).
-4. **IAM** calls `onecipher_signAuth` (or `wc_authRequest`) with `{chain_id, message}`.
+4. **IAM** calls `onecipher_signAuth` (or `wc_authRequest`) with a chain-bound message.
+   Direct/local `onecipher_signAuth` calls include `auth`; `wc_authRequest` is
+   authorized by the daemon's internal token path.
 5. **OneCipher WebUI** displays the human-readable message (parsed EIP-4361 fields:
    domain, URI, nonce, expiry, statement); the user approves; policy is evaluated;
    the signature is returned over the relay.

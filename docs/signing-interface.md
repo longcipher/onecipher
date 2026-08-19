@@ -24,13 +24,14 @@ interface SignResult {
 **Flow:**
 1. Resolve `walletId` → wallet file
 2. Resolve `chainId` → chain plugin
-3. Authenticate caller: owner (passphrase/passkey) or agent (API key)
-4. If agent: verify wallet is in API key's `walletIds` scope; evaluate API key's policies against the transaction
-5. If owner: skip policy evaluation (sudo access)
-6. If policies pass (or owner), decrypt key material
-7. Sign via chain plugin's signer
-8. Wipe key material
-9. Return the signature (and recovery ID when applicable)
+3. Authenticate caller with explicit authorization material
+4. For local HTTP surfaces: verify the request-scoped Passkey proof
+5. For daemon-owned auth flows: verify the daemon-internal capability token
+6. Evaluate policies required by the selected surface
+7. If authorization and policy checks pass, decrypt key material
+8. Sign via chain plugin's signer
+9. Wipe key material
+10. Return the signature (and recovery ID when applicable)
 
 ### `signAndSend(request: SignAndSendRequest): Promise<SignAndSendResult>`
 
@@ -165,6 +166,12 @@ Current OneCipher implementations accept **already-serialized transaction bytes 
 ## Concurrency
 
 Current implementations do not provide a per-wallet nonce manager or explicit same-wallet request serialization. Callers that need strict nonce coordination must currently handle it at a higher level.
+
+## Local Surface Rules
+
+- Loopback reachability alone is **not** authorization.
+- Protected Web UI REST routes require a valid WebAuthn-backed session (`x-oc-session` header or `oc_session` cookie).
+- Local WalletSigner / HTTP-RPC signing requests require fresh request-scoped authorization instead of relying on daemon startup state.
 
 ## References
 

@@ -1,17 +1,22 @@
 //! Loopback JSON-RPC 2.0 WalletSigner server.
 //!
 //! OneCipher acts as the signing backend ("WalletSigner") for the sister
-//! project `ledgerflow`. This server exposes three methods that
+//! project `ledgerflow`. This server exposes a challenge method plus the
+//! signing methods that
 //! [`ledgerflow`](https://github.com/longcipher/ledgerflow)'s
 //! `LocalRpcSigner` client calls over HTTP POST to `http://127.0.0.1:18080`:
 //!
+//! - `ledgerflow_generate_challenge` — mint a fresh passkey challenge for the configured wallet
+//!   binding.
 //! - `ledgerflow_keys` — list the signer's public keys.
 //! - `ledgerflow_sign` — sign an arbitrary message (base64 raw bytes).
 //! - `ledgerflow_sign_payment` — sign an EVM payment, returning a raw (RLP-encoded, signed)
 //!   transaction.
 //!
 //! The transport is a single JSON-RPC 2.0 request per POST; binary fields are
-//! base64 STANDARD encoded. The server binds to loopback only (R12c).
+//! base64 STANDARD encoded. Every stateful call must carry an `auth`
+//! object derived from `ledgerflow_generate_challenge`. The server binds to
+//! loopback only (R12c).
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -26,6 +31,7 @@ use base64::Engine;
 // Bring `ed25519_dalek::Signer` (the `sign` method) into scope.
 use ed25519_dalek::Signer as _;
 use oc_core::ChainType;
+use oc_keyagent::{passkey::PasskeyPubkeyStore, proto::PasskeyAuthorization};
 use oc_signer::{ChainSigner, chains::EvmSigner};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -74,6 +80,16 @@ impl SignerState {
             self.vault_path.as_ref().map(|p| p.as_path()),
         )
         .map_err(|e| format!("failed to decrypt signing key: {e}"))
+    }
+
+    /// Resolve the configured wallet name/id to the canonical wallet ID.
+    fn configured_wallet_id(&self) -> Result<String, String> {
+        oc_vault::load_wallet_by_name_or_id(
+            &self.wallet,
+            self.vault_path.as_ref().map(|p| p.as_path()),
+        )
+        .map(|wallet| wallet.id)
+        .map_err(|e| format!("failed to resolve configured wallet: {e}"))
     }
 
     /// Derive the compressed secp256k1 public key (33 bytes) for a secret key.
@@ -156,6 +172,11 @@ struct SignPaymentParams {
     nonce: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GenerateChallengeParams {
+    credential_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // Handler dispatch
 // ---------------------------------------------------------------------------
@@ -168,13 +189,29 @@ async fn rpc(State(state): State<SignerState>, Json(req): Json<RpcRequest>) -> R
     }
     let id = req.id;
     let result = match req.method.as_str() {
-        "ledgerflow_keys" => handle_keys(&state),
+        "ledgerflow_generate_challenge" => match validate_params(&req.params) {
+            Ok(p) => handle_generate_challenge(&p),
+            Err(e) => Err(e),
+        },
+        "ledgerflow_keys" => match validate_params(&req.params) {
+            Ok(p) => match require_authorization(&state, &p) {
+                Ok(()) => handle_keys(&state),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        },
         "ledgerflow_sign" => match validate_params(&req.params) {
-            Ok(p) => handle_sign(&state, &p),
+            Ok(p) => match require_authorization(&state, &p) {
+                Ok(()) => handle_sign(&state, &p),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         },
         "ledgerflow_sign_payment" => match validate_params(&req.params) {
-            Ok(p) => handle_sign_payment(&state, &p),
+            Ok(p) => match require_authorization(&state, &p) {
+                Ok(()) => handle_sign_payment(&state, &p),
+                Err(e) => Err(e),
+            },
             Err(e) => Err(e),
         },
         other => Err(RpcError::new(-32601, format!("method not found: {other}"))),
@@ -188,6 +225,47 @@ async fn rpc(State(state): State<SignerState>, Json(req): Json<RpcRequest>) -> R
 
 fn validate_params(params: &Option<Value>) -> Result<Value, RpcError> {
     params.clone().ok_or_else(|| RpcError::new(-32602, "missing params"))
+}
+
+fn parse_auth(params: &Value) -> Result<PasskeyAuthorization, RpcError> {
+    let auth_obj = params
+        .get("auth")
+        .and_then(Value::as_object)
+        .ok_or_else(|| RpcError::new(-32602, "missing auth"))?;
+    let challenge_hex = auth_obj
+        .get("challenge_hex")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::new(-32602, "missing auth.challenge_hex"))?;
+    let signature_hex = auth_obj
+        .get("signature_hex")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::new(-32602, "missing auth.signature_hex"))?;
+    let credential_id = auth_obj
+        .get("credential_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::new(-32602, "missing auth.credential_id"))?;
+    let challenge = hex::decode(challenge_hex)
+        .map_err(|e| RpcError::new(-32602, format!("invalid auth.challenge_hex: {e}")))?;
+    let signature = hex::decode(signature_hex)
+        .map_err(|e| RpcError::new(-32602, format!("invalid auth.signature_hex: {e}")))?;
+    Ok(PasskeyAuthorization { challenge, signature, credential_id: credential_id.to_string() })
+}
+
+fn require_authorization(state: &SignerState, params: &Value) -> Result<(), RpcError> {
+    let auth = parse_auth(params)?;
+    oc_keyagent::handler::authorize_passkey(&auth)
+        .map_err(|e| RpcError::new(-32602, format!("passkey authorization failed: {e}")))?;
+    let configured_wallet_id =
+        state.configured_wallet_id().map_err(|e| RpcError::new(-32603, e))?;
+    let store = PasskeyPubkeyStore::open_default()
+        .map_err(|e| RpcError::new(-32603, format!("passkey store: {e}")))?;
+    let stored = store
+        .get(&auth.credential_id)
+        .ok_or_else(|| RpcError::new(-32602, "passkey not registered"))?;
+    if stored.wallet_id != configured_wallet_id {
+        return Err(RpcError::new(-32602, "passkey is not bound to configured wallet"));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -214,6 +292,15 @@ fn handle_keys(state: &SignerState) -> Result<Value, RpcError> {
         Err(e) => return Err(RpcError::new(-32603, e)),
     }
     serde_json::to_value(keys).map_err(|e| RpcError::new(-32603, e.to_string()))
+}
+
+/// `ledgerflow_generate_challenge` → `{"challenge_hex":"..."}`.
+fn handle_generate_challenge(params: &Value) -> Result<Value, RpcError> {
+    let request = serde_json::from_value::<GenerateChallengeParams>(params.clone())
+        .map_err(|e| RpcError::new(-32602, format!("invalid challenge params: {e}")))?;
+    let challenge = oc_keyagent::handler::generate_passkey_challenge(&request.credential_id)
+        .map_err(|e| RpcError::new(-32603, e))?;
+    Ok(json!({ "challenge_hex": hex::encode(challenge) }))
 }
 
 /// `ledgerflow_sign` — sign a base64 message with the selected key.
@@ -372,13 +459,12 @@ fn error_response(id: &Value, err: RpcError) -> Response {
 
 /// Daemon-resident WalletSigner server settings.
 ///
-/// Defaults to listening on `127.0.0.1:18080` for wallet `default`, index 0 —
-/// the address LedgerFlow's `LocalRpcSigner` connects to by default. Override
-/// with `OC_WALLET_RPC_LISTEN` / `OC_WALLET_RPC_WALLET` / `OC_WALLET_RPC_INDEX`.
-/// Set `OC_WALLET_RPC_LISTEN=off` (or empty) to keep the daemon from starting
-/// the WalletSigner server.
+/// Disabled by default. When `OC_WALLET_RPC_LISTEN` is set to a loopback
+/// address, the daemon exposes the WalletSigner server there for wallet
+/// `default`, index 0 unless overridden with `OC_WALLET_RPC_WALLET` /
+/// `OC_WALLET_RPC_INDEX`.
 pub(crate) fn daemon_config() -> (String, String, u32) {
-    let listen = std::env::var("OC_WALLET_RPC_LISTEN").unwrap_or_else(|_| "127.0.0.1:18080".into());
+    let listen = std::env::var("OC_WALLET_RPC_LISTEN").unwrap_or_else(|_| "off".into());
     let wallet = std::env::var("OC_WALLET_RPC_WALLET").unwrap_or_else(|_| "default".to_string());
     let index = std::env::var("OC_WALLET_RPC_INDEX").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     (listen, wallet, index)
@@ -440,9 +526,46 @@ pub(crate) async fn serve_async(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::MutexGuard;
+
+    use oc_keyagent::passkey::{PasskeyPubkeyStore, StoredPasskeyPubkey};
+
     use super::*;
 
     const TEST_PASSPHRASE: &str = "test-passphrase";
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct HomeGuard {
+        _lock: MutexGuard<'static, ()>,
+        _dir: tempfile::TempDir,
+        old_home: Option<String>,
+    }
+
+    impl HomeGuard {
+        fn new() -> Self {
+            let lock = HOME_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let dir = tempfile::tempdir().expect("tempdir");
+            let old_home = std::env::var("HOME").ok();
+            // SAFETY: tests in this module are serialized by HOME_LOCK.
+            unsafe { std::env::set_var("HOME", dir.path()) };
+            Self { _lock: lock, _dir: dir, old_home }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(old) => {
+                    // SAFETY: tests in this module are serialized by HOME_LOCK.
+                    unsafe { std::env::set_var("HOME", old) };
+                }
+                None => {
+                    // SAFETY: tests in this module are serialized by HOME_LOCK.
+                    unsafe { std::env::remove_var("HOME") };
+                }
+            }
+        }
+    }
 
     /// Create a fresh wallet in a temporary vault and return a `SignerState`
     /// pointed at it, so the wire handlers run against real key material.
@@ -546,5 +669,55 @@ mod tests {
         assert_eq!(rlp_u128(1), oc_signer::rlp::encode_bytes(&[1]));
         // 0x010203
         assert_eq!(rlp_u128(0x010203), oc_signer::rlp::encode_bytes(&[1, 2, 3]));
+    }
+
+    fn auth_params_for_wallet(binding_wallet_id: &str, credential_id: &str) -> Value {
+        let mut store = PasskeyPubkeyStore::open_default().expect("open passkey store");
+        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rng());
+        let public_key = signing_key.verifying_key().to_bytes().to_vec();
+        store
+            .register(
+                credential_id,
+                StoredPasskeyPubkey {
+                    algorithm: "ed25519".to_string(),
+                    public_key,
+                    wallet_id: binding_wallet_id.to_string(),
+                    registered_at: 0,
+                },
+            )
+            .expect("register passkey");
+
+        let challenge = oc_keyagent::handler::generate_passkey_challenge(credential_id)
+            .expect("generate challenge");
+        let mut message = challenge.clone();
+        message.extend_from_slice(credential_id.as_bytes());
+        let signature: ed25519_dalek::Signature = signing_key.sign(&message);
+        json!({
+            "auth": {
+                "challenge_hex": hex::encode(challenge),
+                "signature_hex": hex::encode(signature.to_bytes()),
+                "credential_id": credential_id,
+            }
+        })
+    }
+
+    #[test]
+    fn authorization_accepts_passkey_bound_to_configured_wallet() {
+        let _home = HomeGuard::new();
+        let state = test_state();
+        let wallet_id = state.configured_wallet_id().expect("resolve wallet id");
+        let params = auth_params_for_wallet(&wallet_id, "cred-wallet-rpc-ok");
+        require_authorization(&state, &params).expect("bound passkey must authorize");
+    }
+
+    #[test]
+    fn authorization_rejects_passkey_bound_to_different_wallet() {
+        let _home = HomeGuard::new();
+        let state = test_state();
+        let params = auth_params_for_wallet("other-wallet-id", "cred-wallet-rpc-mismatch");
+        let err =
+            require_authorization(&state, &params).expect_err("foreign wallet binding must fail");
+        assert_eq!(err.code, -32602);
+        assert!(err.message.contains("configured wallet"));
     }
 }

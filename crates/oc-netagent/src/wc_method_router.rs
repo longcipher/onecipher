@@ -36,6 +36,12 @@ use crate::{
     key_agent_client::KeyAgentClient,
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SignAuthMode {
+    RequirePasskey,
+    InternalToken(Vec<u8>),
+}
+
 /// Common parameters extracted from WC method params.
 #[allow(clippy::struct_field_names)]
 struct CommonParams {
@@ -60,6 +66,8 @@ pub struct WcMethodRouter {
     /// the dApp name/origin for the approval gate when the wallet server did
     /// not attach them (e.g. pairing-topic requests).
     sessions: Option<Arc<tokio::sync::Mutex<oc_walletconnect::WcSessionTable>>>,
+    /// How auth-class signing requests are authorized.
+    sign_auth_mode: SignAuthMode,
 }
 
 impl WcMethodRouter {
@@ -72,6 +80,7 @@ impl WcMethodRouter {
             approval_log: None,
             policy: None,
             sessions: None,
+            sign_auth_mode: SignAuthMode::RequirePasskey,
         }
     }
 
@@ -91,6 +100,7 @@ impl WcMethodRouter {
             approval_log,
             policy: None,
             sessions: None,
+            sign_auth_mode: SignAuthMode::RequirePasskey,
         }
     }
 
@@ -108,6 +118,16 @@ impl WcMethodRouter {
     ) -> Self {
         self.sessions = Some(sessions);
         self
+    }
+
+    pub fn with_sign_auth_mode(mut self, mode: SignAuthMode) -> Self {
+        self.sign_auth_mode = mode;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_approval_channel(&self) -> bool {
+        self.approval.is_some()
     }
 
     /// Resolve the dApp name/origin for an approval decision.
@@ -143,13 +163,19 @@ impl WcMethodRouter {
     /// Resolve the default (first) wallet and its chain address.
     ///
     /// Used by `onecipher_signAuth` (when `wallet_id` is omitted) and by
-    /// `wc_authRequest` (which never carries a wallet id). Prefers an account
-    /// matching `chain_id`; falls back to the wallet's first account when the
-    /// chain has no dedicated account (e.g. universal wallets).
+    /// `wc_authRequest` (which never carries a wallet id). The default wallet
+    /// must expose an account for the requested chain; mismatches fail closed
+    /// instead of silently signing with some other account.
     async fn default_wallet_for_chain(
         &self,
         chain_id: &str,
     ) -> Result<(String, String), (JsonRpcErrorCode, String)> {
+        if chain_id.is_empty() {
+            return Err((
+                JsonRpcErrorCode::UnsupportedMethod,
+                "chain_id is required when resolving a default wallet".into(),
+            ));
+        }
         let bytes =
             self.forward(KeyAgentRequestKind::ListWallets(oc_keyagent::proto::Empty {})).await?;
         let resp: ListWalletsResponse = Message::decode(bytes.as_slice())
@@ -160,13 +186,12 @@ impl WcMethodRouter {
         let address = wallet
             .accounts
             .iter()
-            .find(|a| !chain_id.is_empty() && a.chain_id == chain_id)
-            .or_else(|| wallet.accounts.first())
+            .find(|a| a.chain_id == chain_id)
             .map(|a| a.address.clone())
             .ok_or_else(|| {
                 (
-                    JsonRpcErrorCode::Internal,
-                    "default wallet has no account for the requested chain".into(),
+                    JsonRpcErrorCode::UnsupportedMethod,
+                    format!("default wallet has no account for requested chain {chain_id}"),
                 )
             })?;
         Ok((wallet.id.clone(), address))
@@ -626,19 +651,13 @@ impl WalletMethodHandler for WcMethodRouter {
 
                 // Auth-class message signing (`onecipher_signAuth`).
                 //
-                // Unlike `personal_sign`, this method does NOT require a
-                // Passkey: authorization is provided by the dApp origin
-                // allowlist (`wc.trusted_origins`) plus the daemon's approval
-                // flow (Web UI / CLI / policy). The Key-Agent signs the raw
-                // `message` bytes with the chain's message-signing convention
-                // (EVM: EIP-191; Solana: raw ed25519; …) and returns the
-                // signature, the derived account address and the public key.
+                // Local/direct callers must provide a Passkey proof; the
+                // WalletConnect daemon path injects a daemon-internal token
+                // instead. The Key-Agent signs the raw `message` bytes with
+                // the chain's message-signing convention (EVM: EIP-191;
+                // Solana: raw ed25519; …) and returns the signature, the
+                // derived account address and the public key.
                 "onecipher_signAuth" => {
-                    // wallet_id is optional — default to the first wallet.
-                    let wallet_id = match params.get("wallet_id").and_then(Value::as_str) {
-                        Some(w) => w.to_string(),
-                        None => self.default_wallet_for_chain("").await?.0,
-                    };
                     let chain_id = params
                         .get("chain_id")
                         .and_then(Value::as_str)
@@ -646,6 +665,12 @@ impl WalletMethodHandler for WcMethodRouter {
                             (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
                         })?
                         .to_string();
+                    // wallet_id is optional, but the default wallet must have
+                    // an account for the requested chain.
+                    let wallet_id = match params.get("wallet_id").and_then(Value::as_str) {
+                        Some(w) => w.to_string(),
+                        None => self.default_wallet_for_chain(&chain_id).await?.0,
+                    };
                     let message = params
                         .get("message")
                         .and_then(Value::as_str)
@@ -653,6 +678,17 @@ impl WalletMethodHandler for WcMethodRouter {
                         .ok_or_else(|| {
                             (JsonRpcErrorCode::UnsupportedMethod, "missing message".into())
                         })?;
+                    let auth = match &self.sign_auth_mode {
+                        SignAuthMode::RequirePasskey => {
+                            Some(Self::extract_passkey_auth(&params)?.ok_or_else(|| {
+                                (
+                                    JsonRpcErrorCode::Unauthorized,
+                                    "missing auth for onecipher_signAuth".into(),
+                                )
+                            })?)
+                        }
+                        SignAuthMode::InternalToken(_) => None,
+                    };
 
                     // W2.1: Pre-signing policy evaluation (chain whitelist etc.)
                     let (risk, risk_reasons) =
@@ -671,7 +707,22 @@ impl WalletMethodHandler for WcMethodRouter {
                     )
                     .await?;
 
-                    let req = SignAuthRequest { wallet_id, chain_id: chain_id.clone(), message };
+                    let req = match &self.sign_auth_mode {
+                        SignAuthMode::RequirePasskey => SignAuthRequest {
+                            wallet_id,
+                            chain_id: chain_id.clone(),
+                            message,
+                            auth,
+                            agent_token: Vec::new(),
+                        },
+                        SignAuthMode::InternalToken(token) => SignAuthRequest {
+                            wallet_id,
+                            chain_id: chain_id.clone(),
+                            message,
+                            auth: None,
+                            agent_token: token.clone(),
+                        },
+                    };
                     let bytes = self.forward(KeyAgentRequestKind::SignAuth(req)).await?;
                     let resp: SignAuthResponse = Message::decode(bytes.as_slice())
                         .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
@@ -759,10 +810,21 @@ impl WalletMethodHandler for WcMethodRouter {
                     )
                     .await?;
 
-                    let req = SignAuthRequest {
-                        wallet_id,
-                        chain_id: auth_params.chain_id.clone(),
-                        message,
+                    let req = match &self.sign_auth_mode {
+                        SignAuthMode::RequirePasskey => {
+                            return Err((
+                                JsonRpcErrorCode::Unauthorized,
+                                "wc_authRequest requires WalletConnect daemon internal authorization"
+                                    .into(),
+                            ));
+                        }
+                        SignAuthMode::InternalToken(token) => SignAuthRequest {
+                            wallet_id,
+                            chain_id: auth_params.chain_id.clone(),
+                            message,
+                            auth: None,
+                            agent_token: token.clone(),
+                        },
                     };
                     let bytes = self.forward(KeyAgentRequestKind::SignAuth(req)).await?;
                     let resp: SignAuthResponse = Message::decode(bytes.as_slice())
@@ -1075,7 +1137,8 @@ mod tests {
     #[test]
     fn policy_evaluate_allow_when_no_policy() {
         let key_agent = KeyAgentClient::new("/tmp/nonexistent.sock");
-        let router = WcMethodRouter::new(key_agent);
+        let router = WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(SignAuthMode::InternalToken(vec![7; 32]));
         let (risk, reasons) =
             router.policy_evaluate_signing("personal_sign", &json!({}), "eip155:1").unwrap();
         assert_eq!(risk, RiskLevel::Safe);
@@ -1314,7 +1377,8 @@ mod tests {
     #[test]
     fn resolve_dapp_metadata_prefers_attached_values() {
         let key_agent = KeyAgentClient::new("/tmp/nonexistent.sock");
-        let router = WcMethodRouter::new(key_agent);
+        let router = WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(SignAuthMode::InternalToken(vec![7; 32]));
         let (name, origin) =
             router.resolve_dapp_metadata("topic-1", "Uniswap", "https://uniswap.org");
         assert_eq!(name, "Uniswap");
@@ -1431,7 +1495,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sign_auth_does_not_require_passkey_and_returns_expected_shape() {
+    async fn sign_auth_internal_token_mode_returns_expected_shape() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("ka.sock").to_string_lossy().to_string();
         let canned = sample_sign_auth_response().encode_to_vec();
@@ -1439,16 +1503,17 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let key_agent = KeyAgentClient::new(&sock);
-        let router = WcMethodRouter::new(key_agent);
+        let router = WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(SignAuthMode::InternalToken(vec![7; 32]));
         // Approval mode is off by default → the gate passes through.
         let params = json!({
             "wallet_id": "w1",
             "chain_id": "eip155:1",
             "message": "Sign in to example service"
-            // NOTE: no `auth` (passkey) field — must NOT be required.
+            // NOTE: daemon-internal mode injects an agent token instead of requiring auth.
         });
         let result = router.handle("onecipher_signAuth", params, "topic-1", None, None).await;
-        let value = result.expect("signAuth must succeed without passkey auth");
+        let value = result.expect("signAuth must succeed in internal token mode");
         assert_eq!(value["address"], "0x9858EfFD232B4033E47d90003D41EC34EcaEda94");
         assert_eq!(value["chain_id"], "eip155:1");
         assert_eq!(value["signature"], format!("0x{}", hex::encode(vec![0xAA; 65])));
@@ -1464,7 +1529,8 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let key_agent = KeyAgentClient::new(&sock);
-        let router = WcMethodRouter::new(key_agent);
+        let router = WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(SignAuthMode::InternalToken(vec![7; 32]));
         // wallet_id omitted → resolved via ListWallets (first wallet).
         let params = json!({
             "chain_id": "eip155:1",
@@ -1473,6 +1539,28 @@ mod tests {
         let result = router.handle("onecipher_signAuth", params, "topic-2", None, None).await;
         assert!(result.is_ok(), "signAuth without wallet_id must succeed: {:?}", result.err());
         assert_eq!(result.unwrap()["address"], "0x9858EfFD232B4033E47d90003D41EC34EcaEda94");
+    }
+
+    #[tokio::test]
+    async fn sign_auth_default_wallet_rejects_chain_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ka-mismatch.sock").to_string_lossy().to_string();
+        let canned = sample_sign_auth_response().encode_to_vec();
+        let _mock = spawn_mock_keyagent(sock.clone(), sample_list_wallets(), canned).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let key_agent = KeyAgentClient::new(&sock);
+        let router = WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(SignAuthMode::InternalToken(vec![7; 32]));
+        let params = json!({
+            "chain_id": "solana:mainnet",
+            "message": "hello"
+        });
+        let result =
+            router.handle("onecipher_signAuth", params, "topic-mismatch", None, None).await;
+        let (code, msg) = result.expect_err("chain mismatch must fail closed");
+        assert_eq!(code, JsonRpcErrorCode::UnsupportedMethod);
+        assert!(msg.contains("requested chain"));
     }
 
     #[tokio::test]
@@ -1500,7 +1588,8 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let key_agent = KeyAgentClient::new(&sock);
-        let router = WcMethodRouter::new(key_agent);
+        let router = WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(SignAuthMode::InternalToken(vec![7; 32]));
         let params = json!({
             "type": "eip4361",
             "chainId": "eip155:1",
@@ -1532,7 +1621,8 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
         let key_agent = KeyAgentClient::new(&sock);
-        let router = WcMethodRouter::new(key_agent);
+        let router = WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(SignAuthMode::InternalToken(vec![7; 32]));
         let params = json!({
             "type": "eip191",
             "chainId": "eip155:1",

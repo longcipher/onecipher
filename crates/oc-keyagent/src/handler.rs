@@ -74,6 +74,14 @@ fn global_passkey_verifiers() -> Arc<Mutex<HashMap<String, PasskeyVerifier>>> {
     GLOBAL_PASSKEY_VERIFIERS.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
 }
 
+/// Daemon-internal capability token used to authorize WalletConnect-originated
+/// auth-class signing after origin/approval checks have already completed.
+static SIGN_AUTH_INTERNAL_TOKEN: OnceLock<Arc<Mutex<Option<Vec<u8>>>>> = OnceLock::new();
+
+fn sign_auth_internal_token() -> Arc<Mutex<Option<Vec<u8>>>> {
+    SIGN_AUTH_INTERNAL_TOKEN.get_or_init(|| Arc::new(Mutex::new(None))).clone()
+}
+
 /// Default vault path (`None` = use `~/.onecipher`).
 fn vault_path() -> Option<&'static std::path::Path> {
     None
@@ -196,6 +204,43 @@ fn verify_passkey(
         return Err(KeyAgentResponse::deny(crate::proto::DenyReason::PasskeyForged));
     }
     Ok(stored)
+}
+
+/// Issue a fresh passkey challenge for `credential_id` using the process-wide
+/// verifier table.
+pub fn generate_passkey_challenge(credential_id: &str) -> Result<Vec<u8>, String> {
+    let req = crate::proto::GenerateChallengeRequest { credential_id: credential_id.to_string() };
+    let resp = handle_generate_challenge(&req).map_err(|e| e.to_string())?;
+    let bytes = match resp.kind {
+        Some(crate::response::KeyAgentResponseKind::Ok(bytes)) => bytes,
+        Some(crate::response::KeyAgentResponseKind::Error(message)) => return Err(message),
+        Some(crate::response::KeyAgentResponseKind::Deny(reason)) => {
+            return Err(format!("denied: {reason:?}"));
+        }
+        None => return Err("missing challenge response".to_string()),
+    };
+    let decoded = crate::proto::GenerateChallengeResponse::decode(bytes.as_slice())
+        .map_err(|e| format!("decode generate challenge: {e}"))?;
+    Ok(decoded.challenge)
+}
+
+/// Verify a passkey proof against the process-wide verifier table.
+pub fn authorize_passkey(auth: &crate::proto::PasskeyAuthorization) -> Result<(), String> {
+    verify_passkey(auth).map(|_| ()).map_err(|resp| match resp.kind {
+        Some(crate::response::KeyAgentResponseKind::Error(message)) => message,
+        Some(crate::response::KeyAgentResponseKind::Deny(reason)) => format!("denied: {reason:?}"),
+        Some(crate::response::KeyAgentResponseKind::Ok(_)) => {
+            "unexpected success payload".to_string()
+        }
+        None => "missing authorization response".to_string(),
+    })
+}
+
+/// Install or clear the daemon-internal capability token used by SignAuth.
+pub fn set_sign_auth_internal_token(token: Option<Vec<u8>>) {
+    if let Ok(mut slot) = sign_auth_internal_token().lock() {
+        *slot = token;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -426,14 +471,7 @@ fn derive_public_key(curve: oc_signer::Curve, private_key: &[u8]) -> Option<Vec<
     }
 }
 
-/// Handle `SignAuth` — auth-class message signing without a passkey gate.
-///
-/// Authorization happens at the **network** layer (dApp origin allowlist +
-/// daemon approval flow), so unlike [`handle_sign_message`] this handler does
-/// NOT verify a `PasskeyAuthorization`. Instead the wallet unlock token is
-/// derived from the process device key (`~/.onecipher/audit_device.key`),
-/// making the signed wallet device-bound: any local process that can reach
-/// the Key-Agent UDS may request auth-class signatures.
+/// Handle `SignAuth` — auth-class message signing with explicit authorization.
 fn handle_sign_auth(
     req: &crate::proto::SignAuthRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
@@ -444,17 +482,52 @@ fn handle_sign_auth(
         return Ok(KeyAgentResponse::error("missing chain_id"));
     }
 
-    // Device-bound unlock: derive the token from the process device key.
-    let store = DeviceKeyStore::open_default()
-        .map_err(|e| KeyAgentError::Internal(format!("device key store: {e}")))?;
-    let device_key = store
-        .load_or_generate()
-        .map_err(|e| KeyAgentError::Internal(format!("device key: {e}")))?;
-    let unlock_token =
-        match oc_core::UnlockToken::new(req.wallet_id.clone(), &device_key.to_bytes()) {
-            Ok(t) => t,
-            Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
+    let unlock_token = if let Some(auth) = &req.auth {
+        if !req.agent_token.is_empty() {
+            return Ok(KeyAgentResponse::error(
+                "sign_auth request must carry either auth or agent_token, not both",
+            ));
+        }
+        let stored = match verify_passkey(auth) {
+            Ok(stored) => stored,
+            Err(resp) => return Ok(resp),
         };
+        if !stored.wallet_id.is_empty() && stored.wallet_id != req.wallet_id {
+            return Ok(KeyAgentResponse::error("passkey is not registered for this wallet"));
+        }
+        match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
+            Ok(token) => token,
+            Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
+        }
+    } else {
+        let configured = match sign_auth_internal_token().lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return Ok(KeyAgentResponse::error("sign_auth internal token mutex poisoned")),
+        };
+        let Some(expected) = configured else {
+            return Ok(KeyAgentResponse::error("sign_auth internal token not configured"));
+        };
+        if req.agent_token.is_empty() {
+            return Ok(KeyAgentResponse::deny(crate::proto::DenyReason::PasskeyForged));
+        }
+        if req.agent_token != expected {
+            audit(
+                EventType::PasskeyForged,
+                None,
+                serde_json::json!({"action": "sign_auth_internal_token_mismatch", "wallet_id": req.wallet_id}),
+            );
+            return Ok(KeyAgentResponse::deny(crate::proto::DenyReason::PasskeyForged));
+        }
+        let store = DeviceKeyStore::open_default()
+            .map_err(|e| KeyAgentError::Internal(format!("device key store: {e}")))?;
+        let device_key = store
+            .load_or_generate()
+            .map_err(|e| KeyAgentError::Internal(format!("device key: {e}")))?;
+        match oc_core::UnlockToken::new(req.wallet_id.clone(), &device_key.to_bytes()) {
+            Ok(token) => token,
+            Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
+        }
+    };
 
     let (signature, address, public_key) =
         match sign_message_core(&req.wallet_id, &req.chain_id, &unlock_token, &req.message) {
@@ -465,7 +538,12 @@ fn handle_sign_auth(
     audit(
         EventType::SignUserOp, // closest existing variant — auth-class signing
         None,
-        serde_json::json!({"action": "sign_auth", "chain_id": req.chain_id, "wallet_id": req.wallet_id}),
+        serde_json::json!({
+            "action": "sign_auth",
+            "chain_id": req.chain_id,
+            "wallet_id": req.wallet_id,
+            "mode": if req.auth.is_some() { "passkey" } else { "internal_token" }
+        }),
     );
 
     let resp = crate::proto::SignAuthResponse {
@@ -875,6 +953,8 @@ mod tests {
             wallet_id: String::new(),
             chain_id: "eip155:1".to_string(),
             message: b"sign in".to_vec(),
+            auth: None,
+            agent_token: Vec::new(),
         }));
         assert!(resp.is_error(), "expected error for missing wallet_id");
         match &resp.kind {
@@ -1000,6 +1080,8 @@ mod tests {
                 wallet_id: "x".to_string(),
                 chain_id: "x".to_string(),
                 message: vec![],
+                auth: None,
+                agent_token: Vec::new(),
             }),
             KeyAgentRequestKind::SignTypedData(crate::proto::SignTypedDataRequest {
                 session_key_id: "x".to_string(),

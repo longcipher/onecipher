@@ -40,6 +40,23 @@ mutants.out/
 # OS
 .DS_Store
 
+# Environment
+.env
+.env.*
+.envrc
+
+# Credentials, keys, and secrets
+*.pem
+*.key
+*.crt
+id_rsa
+id_rsa.*
+secrets.yaml
+secrets.yml
+secrets.toml
+*.sops.yaml
+*.sops.yml
+
 bugs/
 
 docs/policy-engine-implementation.md

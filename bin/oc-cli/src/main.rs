@@ -552,6 +552,8 @@ fn run_daemon() -> Result<(), CliError> {
     let key_agent_sock = oc_keyagent::server::default_socket_path();
     eprintln!("key-agent socket: {}", key_agent_sock);
     let ka_sock_clone = key_agent_sock.clone();
+    let sign_auth_internal_token = rand::random::<[u8; 32]>().to_vec();
+    oc_keyagent::handler::set_sign_auth_internal_token(Some(sign_auth_internal_token.clone()));
 
     // Channel: Key-Agent thread → tokio select! loop (lifecycle monitoring).
     // The thread sends a message only on error; if it exits without sending,
@@ -627,6 +629,7 @@ fn run_daemon() -> Result<(), CliError> {
         // enabled, the approval channel is wired into the router so signing
         // requests are gated by the browser approval flow.
         let wc_cancel_task = wc_cancel.clone();
+        let approval_tx_for_wc = approval_tx.clone();
         let wc_task = tokio::spawn(async move {
             // dApp origin allowlist for wc_sessionPropose (deny-all by default).
             let trusted_origins = oc_core::Config::load_or_default().wc.trusted_origins;
@@ -637,7 +640,8 @@ fn run_daemon() -> Result<(), CliError> {
                 &state_dir_str,
                 trusted_origins,
                 pairing_rx,
-                Some(approval_tx),
+                Some(sign_auth_internal_token.clone()),
+                Some(approval_tx_for_wc),
                 None,
                 Some(wc_cancel_task),
             )
@@ -649,6 +653,7 @@ fn run_daemon() -> Result<(), CliError> {
                 &state_dir_str,
                 trusted_origins,
                 pairing_rx,
+                Some(sign_auth_internal_token.clone()),
                 None,
                 None,
                 Some(wc_cancel_task),
@@ -750,13 +755,32 @@ fn run_daemon() -> Result<(), CliError> {
             match std::env::var("OC_RPC_LISTEN") {
                 Ok(listen) => match listen.parse::<std::net::SocketAddr>() {
                     Ok(addr) => {
+                        let mut rpc_approval = None;
+                        let mut rpc_approval_mode = false;
+                        #[cfg(feature = "webui")]
+                        {
+                            let config = oc_core::Config::load_or_default();
+                            if config.webui.enabled {
+                                let (channel, mut rx) = oc_netagent::ApprovalChannel::new(64);
+                                let tx = approval_tx.clone();
+                                tokio::spawn(async move {
+                                    while let Some((approval, resp_tx)) = rx.recv().await {
+                                        if tx.send((approval, resp_tx)).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                });
+                                rpc_approval = Some(channel);
+                                rpc_approval_mode = true;
+                            }
+                        }
                         let server =
                             oc_netagent::LocalRpcServer::new(oc_netagent::LocalRpcServerConfig {
                                 listen: addr,
                                 key_agent_sock: ka_sock_for_rpc,
-                                approval: None,
+                                approval: rpc_approval,
                                 approval_mode: std::sync::Arc::new(
-                                    std::sync::atomic::AtomicBool::new(false),
+                                    std::sync::atomic::AtomicBool::new(rpc_approval_mode),
                                 ),
                                 approval_timeout: std::time::Duration::from_secs(300),
                                 approval_log: None,
@@ -782,9 +806,8 @@ fn run_daemon() -> Result<(), CliError> {
         };
 
         // --- WalletSigner JSON-RPC server (LedgerFlow WalletSigner, daemon-resident) ---
-        // Runs by default on loopback 127.0.0.1:18080 so a LedgerFlow
-        // LocalRpcSigner can reach the wallet without a separate one-shot
-        // `wallet-rpc serve`. Disable with OC_WALLET_RPC_LISTEN=off.
+        // Disabled by default. When enabled via OC_WALLET_RPC_LISTEN, bind a
+        // loopback-only WalletSigner endpoint for a local LedgerFlow signer.
         let (wallet_rpc_listen, wallet_rpc_wallet, wallet_rpc_index) =
             commands::wallet_rpc::daemon_config();
         let wallet_rpc_handle: Option<tokio::task::JoinHandle<()>> = {

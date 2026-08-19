@@ -6,14 +6,15 @@
 
 ```
 1. OneCipher receives a sign request
-2. If the credential is an API token, evaluate attached policies before decryption
-3. Read the encrypted wallet or API-key-backed secret from disk
-4. Derive the decryption key (Argon2id for passphrases, HKDF for API tokens)
-5. Decrypt key material (mnemonic or private key) into hardened memory
-6. Derive the chain-specific signing key if needed
-7. Sign the payload
-8. Immediately zero out decrypted mnemonic/private key bytes, derived signing key bytes, and KDF-derived key bytes
-9. Return only the signature or signed payload
+2. Authenticate the caller with explicit request-scoped authorization
+3. Evaluate attached policies before decryption when the surface requires them
+4. Read the encrypted wallet or API-key-backed secret from disk
+5. Derive the decryption key (Passkey/device-bound token/passphrase path, depending on the surface)
+6. Decrypt key material (mnemonic or private key) into hardened memory
+7. Derive the chain-specific signing key if needed
+8. Sign the payload
+9. Immediately zero out decrypted mnemonic/private key bytes, derived signing key bytes, and KDF-derived key bytes
+10. Return only the signature or signed payload
 ```
 
 Immediate zeroization is critical. In the Rust implementation this is handled with `HardenedBytes` — page-locked (`mlock`), DONT_DUMP-marked (`MADV_DONTDUMP`), and zeroized on drop.
@@ -31,24 +32,34 @@ All sensitive material (mnemonics, private keys, passphrases) flows through `Har
 
 The `oc-crypto` crate has zero I/O and zero network dependencies (R51/R52). It is the security foundation of the entire stack.
 
-## Passphrase Handling
+## Authorization Handling
 
 ### 1. Interactive prompt (CLI mode)
-The CLI prompts for the passphrase when needed.
+The CLI prompts for the passphrase when an owner-driven flow needs it.
 
-### 2. Environment variable (CLI mode)
+### 2. Passkey per request (local HTTP surfaces)
+Local signing-sensitive JSON-RPC and WalletSigner requests carry a fresh
+`PasskeyAuthorization` proof. Read-only helper methods such as health checks,
+wallet listing, challenge minting, and balance reads remain unauthenticated,
+but any auth-class signing or wallet-rpc operation verifies the
+challenge/signature pair before it proceeds.
+
+### 3. Daemon-internal capability token
+WalletConnect-owned auth flows (`wc_authRequest`, daemon-controlled
+`onecipher_signAuth`) do not forward a passkey proof over the relay. Instead,
+the daemon injects a startup-minted internal token that the Key-Agent validates
+before deriving the device-bound unlock token.
+
+### 4. Environment variable (CLI mode)
 The CLI reads `ONECIPHER_PASSPHRASE` and clears it immediately after reading.
 
-### 3. Function parameter (library API)
-Library consumers pass the credential as a function parameter. That credential may be either the owner's passphrase or an `ows_key_...` API token.
-
-> **Warning:** Environment variables remain the weakest supported delivery mechanism. They can leak via process inspection, crash dumps, or child-process inheritance if not cleared promptly.
+> **Warning:** Environment variables remain the weakest supported owner credential delivery mechanism. They can leak via process inspection, crash dumps, or child-process inheritance if not cleared promptly.
 
 ## Threat Model
 
 | Threat | Mitigation |
 |---|---|
-| Agent/LLM misuses a wallet via automation | API tokens scope access and trigger policy checks before decryption |
+| Agent/LLM misuses a wallet via automation | Local automation must present a fresh Passkey proof; daemon-internal flows require a startup-minted token and can still be approval-gated |
 | Key leaked to logs | OneCipher does not log key material; audit logging records operations only |
 | Core dump contains keys | Process hardening disables core dumps / attach where supported |
 | Swap file contains keys | Hardened secret buffers use `mlock()` where available |
@@ -75,19 +86,24 @@ Decrypting key material via Argon2id adds latency. The implementation maintains 
 
 ## Current Model vs Future Enclave
 
-### Current: in-process hardening + code-path policy enforcement
+### Current: in-process hardening + explicit request authorization
 
 ```
-Agent → sign_transaction(wallet, chain, tx, "ows_key_...")
+Caller → sign_transaction / sign_message / signAuth(...)
           │
           └─► onecipher-lib (same process)
-                ├── token lookup + policy evaluation
-                ├── HKDF decrypt wallet secret (mlock'd, zeroized on drop)
+                ├── passkey or daemon-token authorization
+                ├── policy evaluation where applicable
+                ├── decrypt wallet secret (mlock'd, zeroized on drop)
                 ├── sign
                 └── return signature
 ```
 
-Policy enforcement is handled by the code path — the `ows_key_` credential triggers policy evaluation before decryption. The agent and signer share an address space. In-process hardening (mlock, zeroize, anti-ptrace, anti-coredump) reduces the window for key extraction.
+Policy enforcement is handled by the code path, but transport locality alone is
+not treated as authorization. The caller and signer share an address space; the
+current model therefore relies on explicit authorization material plus
+in-process hardening (mlock, zeroize, anti-ptrace, anti-coredump) to reduce
+the window for key extraction.
 
 ### Future: per-request subprocess enclave
 

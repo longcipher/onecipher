@@ -108,11 +108,12 @@ pub enum KeyAgentRequestKind {
     /// outside the allowlist is redacted before it ever reaches the buffer).
     #[prost(message, tag = "18")]
     DrainTelemetry(DrainTelemetryRequest),
-    /// `AgentService.SignAuth` — auth-class message signing, NO passkey gate.
+    /// `AgentService.SignAuth` — auth-class message signing with explicit
+    /// authorization.
     ///
-    /// Authorized at the network layer (dApp origin allowlist + daemon
-    /// approval flow). The Key-Agent derives the wallet unlock token from the
-    /// process device key instead of a Passkey signature.
+    /// The request must carry either a user-provided Passkey proof (`auth`) or
+    /// a daemon-internal capability token (`agent_token`) minted at daemon
+    /// startup and injected only into trusted in-process callers.
     #[prost(message, tag = "19")]
     SignAuth(SignAuthRequest),
 }
@@ -176,6 +177,8 @@ mod tests {
                 wallet_id: "w1".to_string(),
                 chain_id: "eip155:1".to_string(),
                 message: b"sign in to example".to_vec(),
+                auth: None,
+                agent_token: Vec::new(),
             })),
         };
         let bytes = req.encode_to_vec();

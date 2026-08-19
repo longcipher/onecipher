@@ -8,7 +8,7 @@
 
 use std::{io, net::SocketAddr, path::PathBuf};
 
-use axum::response::IntoResponse;
+use axum::{middleware::from_fn_with_state, response::IntoResponse};
 use oc_core::{
     WebuiConfig,
     approval::{ApprovalDecision, PendingApproval},
@@ -123,7 +123,7 @@ pub async fn run_webui_server(
         }
     }
 
-    let state = AppState { queue, state_dir, session_store, pairing_tx };
+    let state = AppState { queue, state_dir, session_store: session_store.clone(), pairing_tx };
 
     // Auth routes carry their own state (WebAuthn manager + bootstrap token).
     let auth_router = axum::Router::new()
@@ -134,12 +134,10 @@ pub async fn run_webui_server(
         .route("/webauthn/login/finish", axum::routing::post(routes::auth::login_finish))
         .route("/logout", axum::routing::post(routes::auth::logout))
         .route("/status", axum::routing::get(routes::auth::status))
-        .route("/lock", axum::routing::post(routes::auth::lock))
         .with_state(auth_state);
 
-    let app = axum::Router::new()
-        .nest("/api/auth", auth_router)
-        .route("/api/health", axum::routing::get(health_handler))
+    let protected_api = axum::Router::new()
+        .route("/api/auth/lock", axum::routing::post(routes::auth::lock_with_session))
         // Approvals
         .route("/api/approvals", axum::routing::get(routes::approvals::list_approvals))
         .route("/api/approvals/history", axum::routing::get(routes::approvals::approval_history))
@@ -235,6 +233,12 @@ pub async fn run_webui_server(
             "/api/settings/secrets/{id}",
             axum::routing::delete(routes::settings::secrets::delete_secret),
         )
+        .layer(from_fn_with_state(session_store.clone(), routes::auth::require_session));
+
+    let app = axum::Router::new()
+        .nest("/api/auth", auth_router)
+        .route("/api/health", axum::routing::get(health_handler))
+        .merge(protected_api)
         // WebSocket
         .route("/ws", axum::routing::get(routes::ws::ws_handler))
         .with_state(state)

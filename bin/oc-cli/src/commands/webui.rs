@@ -83,8 +83,9 @@ fn ensure_webui_enabled(home: &std::path::Path) -> Result<(), CliError> {
 //
 // These subcommands talk to the daemon's loopback HTTP API over
 // `http://127.0.0.1:<port>` where `<port>` is read from `~/.onecipher/webui.port`
-// (persisted by the daemon at startup). The approval and auth-status endpoints
-// are unauthenticated localhost routes, so no session token is required.
+// (persisted by the daemon at startup). Protected REST routes now require an
+// authenticated Web UI session (`x-oc-session` header or `oc_session` cookie);
+// only `/api/auth/*` and `/api/health` remain reachable without one.
 // ---------------------------------------------------------------------------
 
 /// Read the daemon's Web UI port from `~/.onecipher/webui.port`.

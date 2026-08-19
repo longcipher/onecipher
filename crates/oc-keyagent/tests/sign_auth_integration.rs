@@ -70,11 +70,15 @@ fn create_device_bound_wallet(wallet_id: &str) -> Vec<u8> {
 
 /// Dispatch a `SignAuth` request and decode the response payload.
 fn dispatch_sign_auth(wallet_id: &str, message: &[u8]) -> SignAuthResponse {
+    let agent_token = vec![0xAB; 32];
+    oc_keyagent::handler::set_sign_auth_internal_token(Some(agent_token.clone()));
     let req = KeyAgentRequest {
         kind: Some(KeyAgentRequestKind::SignAuth(SignAuthRequest {
             wallet_id: wallet_id.to_string(),
             chain_id: "eip155:1".to_string(),
             message: message.to_vec(),
+            auth: None,
+            agent_token,
         })),
     };
     let resp = oc_keyagent::handler::dispatch(&req).expect("dispatch must not fail");
@@ -120,13 +124,13 @@ fn sign_auth_eip191_signature_recovers_the_derived_address() {
 }
 
 #[test]
-fn sign_auth_does_not_require_a_passkey() {
+fn sign_auth_accepts_daemon_internal_token_without_passkey() {
     let _home = HomeGuard::new();
     let wallet_id = "w-auth-nopasskey";
     create_device_bound_wallet(wallet_id);
 
-    // The request carries NO `auth` (PasskeyAuthorization) field — unlike the
-    // passkey-gated SignMessage path, this must still succeed.
+    // WalletConnect-originated auth signing uses a daemon-internal capability
+    // token instead of a user-provided PasskeyAuthorization.
     let out = dispatch_sign_auth(wallet_id, b"no passkey needed");
     assert_eq!(out.address, "0x9858EfFD232B4033E47d90003D41EC34EcaEda94");
     assert_eq!(out.signature.len(), 65);
@@ -140,6 +144,8 @@ fn sign_auth_missing_wallet_id_returns_error() {
             wallet_id: String::new(),
             chain_id: "eip155:1".to_string(),
             message: b"x".to_vec(),
+            auth: None,
+            agent_token: vec![0xAB; 32],
         })),
     };
     let resp = oc_keyagent::handler::dispatch(&req).expect("dispatch must not fail");
@@ -154,6 +160,8 @@ fn sign_auth_unknown_wallet_returns_error() {
             wallet_id: "does-not-exist".to_string(),
             chain_id: "eip155:1".to_string(),
             message: b"x".to_vec(),
+            auth: None,
+            agent_token: vec![0xAB; 32],
         })),
     };
     let resp = oc_keyagent::handler::dispatch(&req).expect("dispatch must not fail");

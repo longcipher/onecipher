@@ -318,15 +318,15 @@ pub struct SignMessageResponse {
     pub signature: Vec<u8>,
 }
 
-/// `SignAuth` request — auth-class message signing WITHOUT a passkey gate.
+/// `SignAuth` request — auth-class message signing.
 ///
-/// Unlike [`SignMessageRequest`] (which requires a
-/// [`PasskeyAuthorization`]), this method is authorized at the **network**
-/// layer: the dApp origin allowlist (`wc.trusted_origins`) plus the daemon's
-/// approval flow (Web UI / CLI / policy). The Key-Agent therefore derives the
-/// wallet unlock token from the process **device key** instead of a passkey
-/// signature — the wallet must be device-bound (encrypted with the
-/// device-token passphrase) for decryption to succeed.
+/// The request must carry one of:
+/// - `auth` — an explicit [`PasskeyAuthorization`] for local high-privilege callers (HTTP-RPC,
+///   wallet-rpc), or
+/// - `agent_token` — a daemon-internal capability token minted at startup and injected only into
+///   trusted in-process paths such as WalletConnect after origin / approval checks have succeeded.
+///
+/// Raw UDS reachability alone is never sufficient authorization.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct SignAuthRequest {
     /// Wallet ID to sign with.
@@ -339,6 +339,13 @@ pub struct SignAuthRequest {
     /// (EVM: EIP-191 personal_sign; Solana: raw bytes ed25519; …).
     #[prost(bytes, tag = "3")]
     pub message: Vec<u8>,
+    /// Optional explicit Passkey proof for local callers.
+    #[prost(message, optional, tag = "4")]
+    pub auth: Option<PasskeyAuthorization>,
+    /// Optional daemon-internal capability token for WalletConnect-originated
+    /// requests that were already gated by origin allowlists and approval flow.
+    #[prost(bytes, tag = "5")]
+    pub agent_token: Vec<u8>,
 }
 
 /// `SignAuth` response — signature plus the derived account identity.
@@ -691,6 +698,8 @@ mod tests {
             wallet_id: "w-auth".to_string(),
             chain_id: "eip155:1".to_string(),
             message: b"sign in with your wallet".to_vec(),
+            auth: None,
+            agent_token: Vec::new(),
         };
         assert_eq!(req, roundtrip(&req));
 

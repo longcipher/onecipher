@@ -33,7 +33,9 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 > **Note:** The payment protocol layer (`oc-pay`, x402/MPP) was removed from this
 > workspace; it is owned by the sister project `ledgerflow`. OneCipher now acts
 > as a pure wallet and exposes a loopback JSON-RPC 2.0 WalletSigner server
-> (`onecipher wallet-rpc`) for ledgerflow.
+> (`onecipher wallet-rpc`) for ledgerflow. The daemon keeps this endpoint
+> disabled by default unless `OC_WALLET_RPC_LISTEN` is set, and signing methods
+> on that surface require per-request Passkey authorization.
 
 ### Storage Boundary (authoritative)
 

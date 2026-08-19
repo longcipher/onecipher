@@ -44,7 +44,7 @@ pub use telemetry_drain::{
     DEFAULT_BATCH_SIZE as TELEMETRY_BATCH_SIZE, DEFAULT_DRAIN_INTERVAL, DrainStats, MemorySink,
     StdoutSink, TelemetrySink, drain_once, drain_until_empty, run_drain_loop,
 };
-pub use wc_method_router::WcMethodRouter;
+pub use wc_method_router::{SignAuthMode, WcMethodRouter};
 pub use wc_pairing::{PairingError, generate_pairing_uri};
 pub use wc_session_store::{SessionStore, SessionStoreError};
 
@@ -129,6 +129,7 @@ pub async fn run_server_controlled(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -153,6 +154,7 @@ pub async fn run_server_controlled_with_approvals(
     state_dir: &str,
     trusted_origins: Vec<String>,
     mut pairing_rx: tokio::sync::mpsc::Receiver<oc_walletconnect::PairingUri>,
+    sign_auth_internal_token: Option<Vec<u8>>,
     approvals: Option<
         tokio::sync::mpsc::Sender<(
             oc_core::approval::PendingApproval,
@@ -167,6 +169,8 @@ pub async fn run_server_controlled_with_approvals(
     // approval gate can resolve dApp name/origin) and the wallet server.
     let sessions: std::sync::Arc<tokio::sync::Mutex<oc_walletconnect::WcSessionTable>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(oc_walletconnect::WcSessionTable::new()));
+    let sign_auth_mode =
+        sign_auth_internal_token.map_or(SignAuthMode::RequirePasskey, SignAuthMode::InternalToken);
     let router = match approvals {
         Some(tx) => {
             let (channel, mut rx) = ApprovalChannel::new(64);
@@ -186,9 +190,12 @@ pub async fn run_server_controlled_with_approvals(
                 std::time::Duration::from_secs(300),
                 approval_log,
             )
+            .with_sign_auth_mode(sign_auth_mode.clone())
             .with_sessions(std::sync::Arc::clone(&sessions))
         }
-        None => WcMethodRouter::new(key_agent).with_sessions(std::sync::Arc::clone(&sessions)),
+        None => WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(sign_auth_mode)
+            .with_sessions(std::sync::Arc::clone(&sessions)),
     };
     let store = SessionStore::open(state_dir)?;
 

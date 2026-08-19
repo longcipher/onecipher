@@ -23,7 +23,10 @@
 
 use std::{
     net::SocketAddr,
-    sync::{Arc, atomic::AtomicBool},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -72,11 +75,21 @@ impl LocalRpcServer {
     /// Build a new server from the given configuration.
     ///
     /// When `config.approval` is `Some`, the router is constructed with the
-    /// approval wiring via [`WcMethodRouter::with_approval`]; otherwise it is a
-    /// plain [`WcMethodRouter::new`].
+    /// approval wiring via [`WcMethodRouter::with_approval`]. If approval mode
+    /// is active but no channel was wired, the server fails closed by
+    /// installing a sender with no receiver, so gated requests time out
+    /// instead of silently bypassing approval.
     pub fn new(config: LocalRpcServerConfig) -> Self {
         let key_agent = KeyAgentClient::new(&config.key_agent_sock);
-        let router = match config.approval {
+        let approval_channel = match config.approval {
+            Some(channel) => Some(channel),
+            None if config.approval_mode.load(Ordering::Relaxed) => {
+                let (channel, _rx) = crate::approval::ApprovalChannel::new(1);
+                Some(channel)
+            }
+            None => None,
+        };
+        let router = match approval_channel {
             Some(channel) => WcMethodRouter::with_approval(
                 key_agent,
                 channel,
@@ -328,5 +341,18 @@ mod tests {
             .expect("post");
         let v: Value = resp.json().await.expect("json");
         assert_eq!(v["error"]["code"], 5000); // Internal
+    }
+
+    #[test]
+    fn approval_mode_without_channel_fails_closed() {
+        let server = LocalRpcServer::new(LocalRpcServerConfig {
+            listen: "127.0.0.1:0".parse().expect("addr"),
+            key_agent_sock: "/tmp/onecipher-rpc-test-nonexistent.sock".to_string(),
+            approval: None,
+            approval_mode: Arc::new(AtomicBool::new(true)),
+            approval_timeout: Duration::from_secs(5),
+            approval_log: None,
+        });
+        assert!(server.router.has_approval_channel());
     }
 }

@@ -17,7 +17,7 @@ decoupled by responsibility and communicate only through standard protocols:
 │                                                              │
 │  ┌────────────────────────────────────────────────────────┐  │
 │  │  WalletSigner (ledgerflow-wallet) — a WalletSigner     │  │
-│  │  consumer via loopback JSON-RPC 2.0 (127.0.0.1:18080)  │  │
+│  │  consumer via explicit loopback JSON-RPC 2.0 binding   │  │
 │  └──────────────────────────┬─────────────────────────────┘  │
 └─────────────────────────────┼────────────────────────────────┘
                               │ ledgerflow_sign / ledgerflow_keys
@@ -27,7 +27,7 @@ decoupled by responsibility and communicate only through standard protocols:
 │                                                        provider │
 │  Key custody · hardened memory · local signing · policy ·     │
 │  audit · WebUI approvals                                      │
-│  wallet-rpc server: 127.0.0.1:18080 (loopback-only)           │
+│  wallet-rpc server: loopback-only, opt-in via env             │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -39,10 +39,15 @@ decoupled by responsibility and communicate only through standard protocols:
 - **LedgerFlow owns payments & authorization**: the x402/MPP wire protocols,
   warrant/delegation/PoP/approval/revocation authz, and settlement routing.
 - **Decoupling contract**: OneCipher exposes the LedgerFlow `WalletSigner`
-  interface over loopback JSON-RPC 2.0 (`ledgerflow_sign`,
-  `ledgerflow_keys`, `ledgerflow_sign_payment`) via `onecipher wallet-rpc
-  serve`. LedgerFlow calls it as a plain `WalletSigner` consumer. There is no
-  compile-time dependency between the two repositories.
+  interface over loopback JSON-RPC 2.0. Clients first call
+  `ledgerflow_generate_challenge`, then submit the resulting
+  `PasskeyAuthorization` alongside `ledgerflow_keys`, `ledgerflow_sign`, or
+  `ledgerflow_sign_payment` via `onecipher wallet-rpc serve`. LedgerFlow calls
+  it as a plain `WalletSigner` consumer. There is no compile-time dependency
+  between the two repositories.
+- **Fail-closed local signer**: the daemon no longer auto-exposes `wallet-rpc`.
+  Enable it explicitly with `OC_WALLET_RPC_LISTEN=127.0.0.1:18080`, and each
+  signing request must carry a fresh Passkey authorization payload.
 - The former `oc-pay` payment-protocol crate was removed; payment protocol
   work now lives entirely in LedgerFlow.
 
@@ -313,10 +318,10 @@ onecipher password generate --length 24 --symbols
 
 ```bash
 # Add a TOTP secret via otpauth URI (from QR code or manual setup)
-onecipher totp add discord --otpauth "otpauth://totp/Discord:alice?secret=JBSWY3DPEHPK3PXP&issuer=Discord"
+onecipher totp add discord --otpauth "otpauth://totp/Discord:alice?secret=AAAAAAAAAAAAAAAA&issuer=Discord"
 
 # Add a TOTP secret via base32 secret + issuer/account
-onecipher totp add github-2fa --secret JBSWY3DPEHPK3PXP --issuer GitHub --username alice
+onecipher totp add github-2fa --secret AAAAAAAAAAAAAAAA --issuer GitHub --username alice
 
 # Generate current TOTP code
 onecipher totp generate discord

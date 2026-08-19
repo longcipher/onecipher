@@ -9,21 +9,25 @@ sign_transaction(wallet, chain, tx, credential)
                                        │
                           ┌────────────┴────────────┐
                           │                          │
-                     passphrase                 ows_key_...
+                passphrase / passkey          internal token / API scope
                           │                          │
-                     owner mode                 agent mode
-                     no policy                  policies enforced
-                     argon2id decrypt             HKDF decrypt
+                  explicit auth                 explicit auth
+                  policy as configured          policies enforced
+                  decrypt allowed               decrypt allowed
 ```
 
 | Caller | Authentication | Policy Evaluation |
 |---|---|---|
-| **Owner** | Passphrase | **None.** Full access to all wallets. |
-| **Agent** | `ows_key_...` token | **All policies attached to the API key** are evaluated. Every policy must allow (AND semantics). |
+| **Owner / local caller** | Passphrase or per-request Passkey proof | Depends on the selected surface; loopback reachability alone never bypasses policy |
+| **Daemon-owned flow** | Startup-minted internal token | Policies configured for the flow are evaluated before signing |
 
-The credential itself determines the access tier. No bypass flags. The owner uses the passphrase; agents use tokens. Different agents get different tokens with different policies.
+The presented authorization material determines whether evaluation may proceed,
+but signing still fails closed if the selected surface expects policy checks or
+human approval and those controls are unavailable.
 
-If the owner wants policy-constrained access for themselves, they create an API key and use the token instead of the passphrase.
+If an owner wants policy-constrained access for themselves, they should use the
+same explicit local surface that their automation would use, rather than
+special-casing transport locality.
 
 ## API Key Cryptography
 
