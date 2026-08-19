@@ -161,13 +161,28 @@ fn parse_intent_kind(json_str: &str) -> Result<IntentKind, CliError> {
 // Confirmation prompt
 // ---------------------------------------------------------------------------
 
+/// Returns `true` if stdin is an interactive terminal AND no explicit
+/// non-interactive override is set via the `OC_NONINTERACTIVE` env var.
+///
+/// Under `#[cfg(test)]`, stdin is ALWAYS treated as non-interactive so unit
+/// tests do not block on `read_line()` waiting for TTY input.
+fn is_interactive_stdin() -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    if std::env::var("OC_NONINTERACTIVE").is_ok() {
+        return false;
+    }
+    io::stdin().is_terminal()
+}
+
 /// Prompt the user with a y/N confirmation. Returns `true` if they answer `y`.
 ///
-/// Non-interactive stdin (pipe) defaults to `false` to prevent accidental
-/// execution in scripts — the caller must pass `--yes` to skip the prompt.
+/// Non-interactive stdin (pipe, `OC_NONINTERACTIVE` env) defaults to `false`
+/// to prevent accidental execution in scripts — the caller must pass `--yes`
+/// to skip the prompt.
 fn prompt_yes_no(prompt: &str) -> bool {
-    let stdin = io::stdin();
-    if !stdin.is_terminal() {
+    if !is_interactive_stdin() {
         // Non-interactive: refuse by default.
         eprintln!("{prompt} [y/N] (non-interactive; pass --yes to confirm)");
         return false;
@@ -175,7 +190,7 @@ fn prompt_yes_no(prompt: &str) -> bool {
     eprint!("{prompt} [y/N] ");
     io::stderr().flush().ok();
     let mut line = String::new();
-    if stdin.lock().read_line(&mut line).is_err() {
+    if io::stdin().lock().read_line(&mut line).is_err() {
         return false;
     }
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")

@@ -18,6 +18,7 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify};
+use tracing::{debug, warn};
 
 #[cfg(any(test, feature = "test-utils"))]
 use crate::mock_relay::MockRelay;
@@ -170,7 +171,13 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                     let (_sender, pt) = WcCipher::open_type1(key, &payload)?;
                     pt
                 }
-                _ => unreachable!(),
+                other => {
+                    // Defensive: the `encrypted` guard above only admits
+                    // type-0/type-1, but never panic on an unexpected tag.
+                    return Err(WcError::Crypto(format!(
+                        "unexpected envelope type {other} in encrypted payload"
+                    )));
+                }
             };
             (serde_json::from_slice(&plaintext)?, true)
         } else {
@@ -242,9 +249,9 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                     return Ok(());
                 }
                 if !s.is_method_allowed(&req.method) {
-                    eprintln!(
-                        "[wsdbg] method {} NOT allowed on topic {} methods={:?} state={:?}",
-                        req.method, topic, s.methods, s.state
+                    debug!(
+                        method = %req.method, topic = %topic, methods = ?s.methods, state = ?s.state,
+                        "method not allowed on topic",
                     );
                     let resp = JsonRpcResponse::error(
                         req.id,
@@ -349,7 +356,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         let resp = match result {
             Ok(v) => JsonRpcResponse::success(req.id, v),
             Err((code, msg)) => {
-                eprintln!("[wsdbg] method {} error code={code:?} msg={msg}", req.method);
+                debug!(method = %req.method, code = ?code, msg = %msg, "method handler error");
                 JsonRpcResponse::error(req.id, JsonRpcError::new(code, msg))
             }
         };
@@ -485,7 +492,14 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
     /// Main run loop — connects to the real relay, subscribes to all known
     /// topics, and processes inbound messages. Reconnects on disconnect
     /// with exponential backoff.
-    pub async fn run(&mut self) -> WcResult<()> {
+    ///
+    /// `cancel` is polled cooperatively alongside the relay receive: when it
+    /// is set (`Ordering::Relaxed` == `true`) the loop returns
+    /// `Ok(())` after a best-effort graceful close of the relay socket (M3
+    /// fix — previously the loop could only exit via an error or by being
+    /// dropped). Pass `Some(flag)` to enable cooperative cancellation, or
+    /// `None` to retain the old error-only-exit behaviour.
+    pub async fn run(&mut self, cancel: Option<&std::sync::atomic::AtomicBool>) -> WcResult<()> {
         // Append projectId from the environment if the configured relay URL
         // does not already carry one (required by relay.walletconnect.com).
         let project_id = std::env::var("OC_WC_PROJECT_ID").ok();
@@ -534,18 +548,36 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             // Without the wakeup, a new pairing topic is only subscribed after
             // some other message arrives, and the first message published on it
             // (e.g. the dApp's `wc_sessionPropose`) is never delivered.
+            // A bounded recv timeout (M2) and a cooperative cancel flag (M3)
+            // ensure the loop can never hang on a silent relay and can be
+            // stopped without dropping the task.
             let recv = tokio::select! {
                 () = self.wakeup.notified() => {
                     // Just re-run the subscription check at the top of the loop.
                     continue;
                 }
-                m = relay.recv() => m,
+                true = async {
+                    cancel.map_or(false, |f| f.load(std::sync::atomic::Ordering::Relaxed))
+                } => {
+                    // Graceful shutdown requested: close the relay socket and
+                    // exit the loop with success.
+                    relay.close().await;
+                    tracing::info!("WC server run loop cancelled; shutting down");
+                    return Ok(());
+                }
+                m = relay.recv_timeout(std::time::Duration::from_secs(30)) => m,
             };
 
             let raw = match recv {
                 Ok(m) => m,
+                Err(WcError::RelayTimeout(_)) => {
+                    // No message within the window — re-check cancellation and
+                    // subscription state, then loop. This is NOT a reconnect
+                    // condition (the socket is still healthy).
+                    continue;
+                }
                 Err(e) => {
-                    eprintln!("wallet_server: relay recv error: {e}, reconnecting");
+                    warn!(error = %e, "relay recv error; reconnecting");
                     relay.reconnect().await?;
                     let topics: Vec<String> = {
                         let t = self.sessions.lock().await;
@@ -680,9 +712,9 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         sym_key: &WcSymKey,
         req_id: &mut i64,
     ) -> WcResult<()> {
-        eprintln!(
-            "[wsdbg] dispatch topic={} method={} methods={:?}",
-            topic, req.method, session.methods
+        debug!(
+            topic = %topic, method = %req.method, methods = ?session.methods,
+            "dispatch session request",
         );
         let resp = match req.method.as_str() {
             method::SESSION_DELETE => {
@@ -783,7 +815,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         let _ = sym_key;
 
         let resp_bytes = serde_json::to_vec(&resp)?;
-        eprintln!("[wsdbg] SEND-RESP {}", String::from_utf8_lossy(&resp_bytes));
+        debug!(resp_len = resp_bytes.len(), "sending session response");
         let envelope = WcCipher::seal_type0(sym_key, &resp_bytes)?;
 
         *req_id += 1;
@@ -943,7 +975,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                 )
                 .await?;
         } else {
-            eprintln!("[wsdbg] OC_SKIP_SETTLE set; skipping session settle");
+            debug!("OC_SKIP_SETTLE set; skipping session settle");
         }
 
         Ok(())

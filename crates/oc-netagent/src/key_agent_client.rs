@@ -14,8 +14,6 @@
 //! high-concurrency. If the pooled connection is closed by the peer (EOF) or
 //! errors, it is transparently re-established on the next [`send`].
 
-use std::sync::Mutex;
-
 use oc_keyagent::{
     KeyAgentRequest, KeyAgentResponse,
     frame::{Frame, FrameError},
@@ -23,6 +21,7 @@ use oc_keyagent::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::UnixStream,
+    sync::Mutex,
 };
 
 use crate::error::NetAgentError;
@@ -56,13 +55,30 @@ impl KeyAgentClient {
         &self.sock_path
     }
 
+    /// Take the pooled connection out of the shared slot, if one is present.
+    ///
+    /// The `Mutex` is held only for the duration of this check-and-take: the
+    /// `tokio::sync::Mutex` guard is **not** retained across any `.await`
+    /// point (doing so would block the worker thread). Actual I/O happens
+    /// after the guard is dropped. If no pooled connection exists, a fresh
+    /// one is established.
+    async fn take_pooled(&self) -> Option<UnixStream> {
+        self.pooled.lock().await.take()
+    }
+
+    /// Return a live connection to the pool for reuse by a later `send`.
+    ///
+    /// Held under the lock only for the `Option::replace`; no I/O runs while
+    /// the guard is alive.
+    async fn return_pooled(&self, stream: UnixStream) {
+        *self.pooled.lock().await = Some(stream);
+    }
+
     /// Obtain a live connection, reusing the pool or reconnecting as needed.
     async fn connection(&self) -> Result<UnixStream, NetAgentError> {
-        // Fast path: a pooled connection we believe is still open.
-        if let Some(stream) = self.pooled.lock().unwrap().take() {
-            // Probe liveness cheaply: a peer-closed socket will fail on write.
-            // We rely on the write/read error in `send` to reconnect, but
-            // discarding here and reconnecting is simpler and correct.
+        if let Some(stream) = self.take_pooled().await {
+            // We rely on the write/read error in `send` to reconnect if the
+            // peer has since closed the socket; reusing is simpler and correct.
             return Ok(stream);
         }
         let stream = UnixStream::connect(&self.sock_path).await?;
@@ -73,7 +89,9 @@ impl KeyAgentClient {
     /// `KeyAgentResponse` frame.
     ///
     /// Reuses the pooled connection when available; transparently reconnects
-    /// if the peer closed it.
+    /// if the peer closed it. The connection pool `Mutex` is released before
+    /// any async I/O so the tokio worker thread is never blocked on a held
+    /// lock (H1 fix).
     pub async fn send(&self, req: &KeyAgentRequest) -> Result<KeyAgentResponse, NetAgentError> {
         let mut stream = self.connection().await?;
 
@@ -104,9 +122,11 @@ impl KeyAgentClient {
         let len = u32::from_be_bytes(len_buf);
         if len == 0 {
             // Empty payload — decode as a default (kind=None) response.
+            self.return_pooled(stream).await;
             return Ok(KeyAgentResponse::default());
         }
         if len > MAX_FRAME_SIZE {
+            self.return_pooled(stream).await;
             return Err(NetAgentError::KeyAgentWire(format!(
                 "response too large: {len} bytes (max {MAX_FRAME_SIZE})"
             )));
@@ -125,7 +145,7 @@ impl KeyAgentClient {
             })?;
 
         // Return the connection to the pool for reuse.
-        *self.pooled.lock().unwrap() = Some(stream);
+        self.return_pooled(stream).await;
         Ok(resp)
     }
 }

@@ -63,7 +63,7 @@ pub fn sign_and_send(
             index,
             vault_path,
         )?;
-        return sign_encode_and_broadcast(key.expose(), chain, &tx_bytes, rpc_url);
+        return sign_encode_and_broadcast_secret(key, chain, &tx_bytes, rpc_url);
     }
 
     // Owner mode
@@ -76,7 +76,7 @@ pub fn sign_and_send(
         vault_path,
     )?;
 
-    sign_encode_and_broadcast(key.expose(), chain, &tx_bytes, rpc_url)
+    sign_encode_and_broadcast_secret(key, chain, &tx_bytes, rpc_url)
 }
 
 /// Sign, encode, and broadcast a transaction using an already-resolved private key.
@@ -100,6 +100,43 @@ pub fn sign_encode_and_broadcast(
 
     // 2. Sign
     let output = signer.sign_transaction(private_key, signable)?;
+
+    // 3. Encode the full signed transaction
+    let signed_tx = signer.encode_signed_transaction(tx_bytes, &output)?;
+
+    // 4. Resolve RPC URL using exact chain_id
+    let rpc = resolve_rpc_url(chain.chain_id, chain.chain_type, rpc_url)?;
+
+    // 5. Broadcast the full signed transaction
+    let tx_hash = broadcast(chain.chain_type, &rpc, &signed_tx)?;
+
+    Ok(SendResult { tx_hash })
+}
+
+/// Sign, encode, and broadcast using a `SecretBytes` (hardened) key.
+///
+/// This is the key-custody-safe variant of [`sign_encode_and_broadcast`]: it
+/// keeps the `SecretBytes` (mlock + zeroize-on-drop) alive for the whole
+/// sign → encode → broadcast pipeline and only calls `expose()` at the single
+/// instant `sign_transaction` needs the raw bytes. The public
+/// `&[u8]`-taking [`sign_encode_and_broadcast`] remains for callers that
+/// resolve keys outside the vault (e.g. the CLI from env/stdin), where the
+/// zeroization responsibility stays with the caller (M4 fix).
+#[cfg(feature = "rpc")]
+fn sign_encode_and_broadcast_secret(
+    key: oc_signer::SecretBytes,
+    chain: &str,
+    tx_bytes: &[u8],
+    rpc_url: Option<&str>,
+) -> Result<SendResult, OcWalletError> {
+    let chain = parse_chain(chain)?;
+    let signer = signer_for_chain(chain.chain_type);
+
+    // 1. Extract signable portion (strips signature-slot headers for Solana; no-op for others)
+    let signable = signer.extract_signable_bytes(tx_bytes)?;
+
+    // 2. Sign — expose the hardened key only for the duration of this call.
+    let output = signer.sign_transaction(key.expose(), signable)?;
 
     // 3. Encode the full signed transaction
     let signed_tx = signer.encode_signed_transaction(tx_bytes, &output)?;

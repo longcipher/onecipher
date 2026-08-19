@@ -29,7 +29,7 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 │  │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐   │    │
 │  │  │ Policy v3   │  │ Vault Decrypt │  │ Multi-chain Signer │   │    │
 │  │  │ (oc-policy) │  │ (oc-vault)   │  │ (oc-signer)        │   │    │
-│  │  │  Cedar DSL) │  │  unlock)      │  │  Cosmos/...)       │   │    │
+│  │  │  rule tree) │  │  unlock)      │  │  Cosmos/...)       │   │    │
 │  │  └─────────────┘  └──────────────┘  └────────────────────┘   │    │
 │  │  ┌─────────────────────────────────────────────────────────┐ │    │
 │  │  │ HardenedBytes (mlock + MADV_DONTDUMP + zeroize)         │ │    │
@@ -74,7 +74,7 @@ onecipher/
 │   ├── oc-crypto/              # Memory hardening (mlock, zeroize, page guards)
 │   ├── oc-keyagent/            # Key-Agent handler logic (sync)
 │   ├── oc-netagent/            # Network-Agent (WC v2 + intent layer)
-│   ├── oc-policy/              # Policy Engine v2/v3 (11-step + Cedar DSL)
+│   ├── oc-policy/              # Policy Engine v2/v3 (11-step + Cedar-like rule tree)
 │   ├── oc-secret/              # Secret vault (age-encrypted secrets + TOTP)
 │   ├── oc-session-key/         # Multi-chain SessionKeyProvider (EVM/Solana)
 │   ├── oc-signer/              # Multi-chain signing
@@ -100,12 +100,15 @@ These are non-negotiable invariants enforced by CI:
 ## Crate Dependency Tree
 
 ```
-oc-signing crates (R56 leaf — zero async/network deps)
+oc-signing core crates (R56 leaf — zero async/network deps)
 ├── oc-policy      (declarative + executable policy evaluation)
 ├── oc-crypto      (HardenedBytes, KeyCache, page guards)
 ├── oc-signer      (multi-chain signing, HD derivation)
 ├── oc-vault       (encrypted wallet storage, filesystem perms)
-└── oc-wallet      (wallet CRUD, policy store, migration)
+└── oc-session-key (SessionKeyProvider — native async fn, runtime-agnostic)
+
+oc-wallet (operation layer — MAY carry tokio via the `rpc`/`sui-grpc` features)
+└── wallet CRUD, key store, policy store, migration, broadcast
 
 oc-netagent (async — tokio runtime)
 ├── oc-walletconnect  (WC v2 protocol)
@@ -116,6 +119,13 @@ bin/oc-cli (single binary)
 ├── oc-keyagent (sync std::thread signing engine, R55)
 └── clap (CLI: wallet · intent · pay · x402 · secret · ...)
 ```
+
+> **R56 scope clarification (M6):** the R56 hard gate (no tokio/reqwest/
+> tungstenite/hyper/async-std/smol) applies to the **signing core** crates
+> `oc-crypto`, `oc-policy`, `oc-keyagent`, `oc-session-key` — and, per
+> `ci/check_deps.sh`, `oc-signer`/`oc-vault` are also kept clean. `oc-wallet`
+> is the **operation layer** and is explicitly allowed to carry tokio/hpx via
+> its `rpc`/`sui-grpc` features (default on). It is NOT an R56 leaf.
 
 ## Design Principles
 
@@ -142,6 +152,23 @@ bin/oc-cli (single binary)
 10. Zeroize all key material
 11. Return signature
 ```
+
+> **Known integration gaps (honest status, C1/C2/H4):**
+>
+> - **Policy engine is NOT wired into the Key-Agent.** `oc-keyagent` does not
+>   depend on `oc-policy`; the 11-step / v3 evaluation is a standalone library
+>   with no runtime consumer in the signing core. The "evaluate all attached
+>   policies" step above is aspirational — today the Key-Agent signs without
+>   a policy gate. Wiring it in is tracked (T16) and must be done behind an
+>   explicit opt-in so existing dApp clients (which carry no policy context)
+>   are not broken.
+> - **Policy v3 is a hand-rolled Cedar-*like* rule tree, not the `cedar-policy`
+>   crate**, and is gated behind the `experimental-v3` feature (off by default).
+> - **The Intent Layer (`oc-netagent::intent`) is not on the production
+>   signing path.** `simulate_intent`/`execute_intent` are exercised only by
+>   unit tests; the WC router signs directly via `KeyAgentRequest`. The intent
+>   layer is currently a CLI-adjacent library, not the core execution path
+>   described in `design.md` §6.1.
 
 ## Testing Strategy
 

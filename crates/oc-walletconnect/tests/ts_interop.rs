@@ -115,7 +115,7 @@ async fn ts_sign_client_full_pairing_and_request() {
         EchoHandler,
     );
     let handle = server.session_handle();
-    let server_task = tokio::spawn(async move { server.run().await });
+    let server_task = tokio::spawn(async move { server.run(None).await });
 
     // Give the server time to connect.
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;

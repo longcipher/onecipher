@@ -431,10 +431,8 @@ fn test_trait_object_box_dyn() {
 #[test]
 fn test_merkle_root_deterministic() {
     let policy = test_policy("sk-deterministic", 1_800_000_000);
-    let root1 = EvmSessionKeyProvider::compute_merkle_root(&policy)
-        .expect("compute_merkle_root should succeed");
-    let root2 = EvmSessionKeyProvider::compute_merkle_root(&policy)
-        .expect("compute_merkle_root should succeed");
+    let root1 = crate::compute_merkle_root(&policy).expect("compute_merkle_root should succeed");
+    let root2 = crate::compute_merkle_root(&policy).expect("compute_merkle_root should succeed");
     assert_eq!(root1, root2, "same policy must produce the same merkle root (deterministic)");
 }
 
@@ -442,9 +440,9 @@ fn test_merkle_root_deterministic() {
 fn test_merkle_root_differs_for_different_policies() {
     let policy_a = test_policy("sk-a", 1_800_000_000);
     let policy_b = test_policy("sk-b", 1_800_000_000);
-    let root_a = EvmSessionKeyProvider::compute_merkle_root(&policy_a)
+    let root_a = crate::compute_merkle_root(&policy_a)
         .expect("compute_merkle_root should succeed for policy A");
-    let root_b = EvmSessionKeyProvider::compute_merkle_root(&policy_b)
+    let root_b = crate::compute_merkle_root(&policy_b)
         .expect("compute_merkle_root should succeed for policy B");
     assert_ne!(root_a, root_b, "different policies must produce different merkle roots");
 }
@@ -683,10 +681,8 @@ fn test_real_evm_sign_with_message_returns_signature() {
 #[test]
 fn test_real_evm_merkle_root_deterministic() {
     let policy = test_policy("sk-real-merkle", 1_800_000_000);
-    let root1 = RealEvmSessionKeyProvider::compute_merkle_root(&policy)
-        .expect("compute_merkle_root should succeed");
-    let root2 = RealEvmSessionKeyProvider::compute_merkle_root(&policy)
-        .expect("compute_merkle_root should succeed");
+    let root1 = crate::compute_merkle_root(&policy).expect("compute_merkle_root should succeed");
+    let root2 = crate::compute_merkle_root(&policy).expect("compute_merkle_root should succeed");
     assert_eq!(root1, root2, "same policy must produce the same merkle root");
 }
 

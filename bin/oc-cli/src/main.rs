@@ -603,6 +603,10 @@ fn run_daemon() -> Result<(), CliError> {
     ) = tokio::sync::mpsc::channel(64);
 
     rt.block_on(async {
+        // Shared cancellation flag for the WC server run loop (H3 fix): set on
+        // Ctrl-C so the WC server stops gracefully instead of being dropped.
+        let wc_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
         // Bind control socket (tokio UDS, mode 0600)
         let _ = std::fs::remove_file(&ctrl_sock_path);
         if let Some(parent) = std::path::Path::new(&ctrl_sock_path).parent() {
@@ -622,6 +626,7 @@ fn run_daemon() -> Result<(), CliError> {
         // Spawn WC v2 server (consumes pairing_rx). When the Web UI is
         // enabled, the approval channel is wired into the router so signing
         // requests are gated by the browser approval flow.
+        let wc_cancel_task = wc_cancel.clone();
         let wc_task = tokio::spawn(async move {
             // dApp origin allowlist for wc_sessionPropose (deny-all by default).
             let trusted_origins = oc_core::Config::load_or_default().wc.trusted_origins;
@@ -634,15 +639,19 @@ fn run_daemon() -> Result<(), CliError> {
                 pairing_rx,
                 Some(approval_tx),
                 None,
+                Some(wc_cancel_task),
             )
             .await;
             #[cfg(not(feature = "webui"))]
-            let result = oc_netagent::run_server_controlled(
+            let result = oc_netagent::run_server_controlled_with_approvals(
                 &ka_sock_for_wc,
                 &relay_url,
                 &state_dir_str,
                 trusted_origins,
                 pairing_rx,
+                None,
+                None,
+                Some(wc_cancel_task),
             )
             .await;
             if let Err(e) = result {
@@ -820,6 +829,14 @@ fn run_daemon() -> Result<(), CliError> {
                 // Signal the Key-Agent thread to stop accepting and clean up
                 // its UDS socket (cooperative graceful shutdown, R55).
                 ka_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Request a graceful stop of the WC server run loop (H3 fix)
+                // instead of letting it be dropped mid-connection.
+                wc_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                // The remaining background tasks (webui / rpc / wallet-rpc)
+                // are aborted when the tokio runtime is dropped at the end of
+                // this block; their port files are cleaned up below. We do not
+                // abort them here because the select! branches below move the
+                // handles into their own futures.
                 Ok(())
             }
             _ = ctrl_task => {
@@ -880,8 +897,10 @@ fn run_daemon() -> Result<(), CliError> {
             task.abort();
         }
 
-        // Cleanup control socket
+        // Cleanup control socket and stale port file (H3 fix: a leftover
+        // `webui.port` would point at a dead process on the next start).
         let _ = std::fs::remove_file(&ctrl_sock_path);
+        let _ = std::fs::remove_file(state_dir.join("webui.port"));
         result
     })
 }

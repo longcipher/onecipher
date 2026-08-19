@@ -25,6 +25,12 @@ pub fn lock(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
     }
     #[cfg(unix)]
     {
+        // SAFETY: `addr` is derived from a live `Box<[u8]>` (or other
+        // Rust-owned allocation) so the `[addr, addr+len)` range is valid for
+        // reads/writes and stays mapped for the lifetime of the lock. `len != 0`
+        // is guaranteed by the early-return above, and `len` never exceeds the
+        // allocation. `mlock` does not touch the pointed-to bytes beyond
+        // pinning them; it cannot invalidate any Rust invariants.
         let ret = unsafe { libc::mlock(addr.cast::<libc::c_void>(), len) };
         if ret != 0 {
             return Err(MemGuardError::MlockFailed(std::io::Error::last_os_error()));
@@ -33,6 +39,9 @@ pub fn lock(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
     }
     #[cfg(windows)]
     {
+        // SAFETY: same validity/lifetime reasoning as the Unix branch.
+        // `VirtualLock` pins the pages in `[addr, addr+len)`; the memory
+        // remains owned by Rust and is never dereferenced by the syscall.
         let ret = unsafe { windows_sys::Win32::System::Memory::VirtualLock(addr as *const _, len) };
         if ret == 0 {
             return Err(MemGuardError::VirtualLockFailed(std::io::Error::last_os_error()));
@@ -68,11 +77,21 @@ pub fn dont_dump(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
         // and extend the length to the end of the original range — the
         // kernel rounds down internally anyway, so this is semantically
         // identical on kernels that accept unaligned addresses.
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        let page_size = unsafe {
+            // SAFETY: `sysconf(_SC_PAGESIZE)` takes no pointer arguments and
+            // always succeeds on Linux; the cast to `usize` is lossless.
+            libc::sysconf(libc::_SC_PAGESIZE)
+        } as usize;
         let page_mask = page_size - 1;
         let base = (addr as usize) & !page_mask;
         let end = (addr as usize).saturating_add(len);
         let aligned_len = end.saturating_sub(base);
+        // SAFETY: `base` is page-aligned by construction. The range
+        // `[base, base+aligned_len)` is a superset of the originally-locked
+        // `[addr, addr+len)` region; the surrounding bytes belong to the same
+        // Rust-owned allocation (a `Box<[u8]>` backed by a single heap chunk),
+        // so the kernel-owned pages are valid and mapped. `MADV_DONTDUMP` only
+        // changes core-dump behaviour and does not dereference the memory.
         let ret =
             unsafe { libc::madvise(base as *mut libc::c_void, aligned_len, libc::MADV_DONTDUMP) };
         if ret != 0 {
@@ -99,12 +118,17 @@ pub fn unlock(addr: *const u8, len: usize) {
     }
     #[cfg(unix)]
     {
-        // Best-effort — ignore the return code.
+        // SAFETY (best-effort): `addr`/`len` describe a region previously
+        // passed to `lock`. If `lock` failed (or this is the fallback path for
+        // a `Clone` that could not re-mlock), `munlock` on an unlocked address
+        // returns EPERM/EINVAL, which we deliberately ignore. `addr` remains
+        // Rust-owned memory and is never dereferenced by the syscall.
         let _ = unsafe { libc::munlock(addr.cast::<libc::c_void>(), len) };
     }
     #[cfg(windows)]
     {
-        // Best-effort — ignore the return code.
+        // SAFETY (best-effort): same reasoning as the Unix branch; `VirtualUnlock`
+        // is a no-op alarm on an address that was never `VirtualLock`ed.
         let _ = unsafe { windows_sys::Win32::System::Memory::VirtualUnlock(addr as *const _, len) };
     }
     #[cfg(not(any(unix, windows)))]

@@ -33,4 +33,9 @@ pub enum NetAgentError {
     /// WalletConnect v2 protocol error.
     #[error("walletconnect error: {0}")]
     Wc(#[from] oc_walletconnect::WcError),
+    /// Intent-layer error (simulate / execute). Added so intent failures can
+    /// propagate uniformly through the Network-Agent instead of being flattened
+    /// into `Internal` (L6 fix).
+    #[error("intent error: {0}")]
+    Intent(#[from] crate::intent::IntentError),
 }

@@ -119,6 +119,27 @@ impl RelayClient {
         }
     }
 
+    /// Like [`recv`](Self::recv) but bounds the wait with `timeout`. On timeout
+    /// it returns [`WcError::RelayTimeout`] instead of blocking forever, so the
+    /// caller's event loop can re-check cancellation / subscription state
+    /// (M2 fix — the previous unbounded `recv` could hang indefinitely if the
+    /// relay went silent).
+    pub async fn recv_timeout(&mut self, timeout: Duration) -> WcResult<String> {
+        match tokio::time::timeout(timeout, self.recv()).await {
+            Ok(res) => res,
+            Err(_) => Err(WcError::RelayTimeout(format!("no relay message within {timeout:?}"))),
+        }
+    }
+
+    /// Gracefully close the underlying WebSocket by sending a Close frame.
+    ///
+    /// Best-effort: any error is swallowed because the connection is being
+    /// torn down anyway. Without this, a dropped `RelayClient` simply drops
+    /// the socket, leaving the peer to time out the half-open connection.
+    pub async fn close(&mut self) {
+        let _ = self.ws.send(Frame::close(hpx_yawc::close::CloseCode::Normal, b"shutdown")).await;
+    }
+
     /// Reconnect with exponential backoff (capped at `reconnect_max_ms`),
     /// jitter enabled to avoid thundering-herd on shared relay outages.
     pub async fn reconnect(&mut self) -> WcResult<()> {

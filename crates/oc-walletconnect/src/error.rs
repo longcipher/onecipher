@@ -32,6 +32,9 @@ pub enum WcError {
     #[error("relay error: {0}")]
     Relay(String),
 
+    #[error("relay recv timed out: {0}")]
+    RelayTimeout(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

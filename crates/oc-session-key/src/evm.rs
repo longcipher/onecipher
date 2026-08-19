@@ -9,7 +9,6 @@ use std::{future::Future, pin::Pin};
 
 use oc_policy::PolicyV2;
 use oc_signer::{chains::EvmSigner, traits::ChainSigner};
-use sha2::{Digest, Sha256};
 
 use crate::{
     SessionKeyProvider,
@@ -36,20 +35,6 @@ impl EvmSessionKeyProvider {
         rpc: Box<dyn RpcClient>,
     ) -> Self {
         Self { chain_id: chain_id.into(), sca_address: sca_address.into(), rpc }
-    }
-
-    /// Compute the ERC-7715 Merkle root from a `PolicyV2`.
-    ///
-    /// **Deviation note (R74 YAGNI):** Phase 1 uses SHA-256 of the serialized
-    /// `PolicyV2` as a stand-in for the Merkle root. Real EVM uses keccak256 +
-    /// a Merkle tree of individual permissions; that is a Phase 2 concern. The
-    /// root is deterministic for a given policy, which is sufficient for the
-    /// Phase 1 mock path.
-    pub(crate) fn compute_merkle_root(policy: &PolicyV2) -> Result<String, SessionKeyError> {
-        let json = serde_json::to_string(policy)
-            .map_err(|e| SessionKeyError::MerkleFailed(e.to_string()))?;
-        let hash = Sha256::digest(json.as_bytes());
-        Ok(format!("0x{}", hex::encode(hash)))
     }
 
     /// Encode the ERC-7715 `grantPermission` calldata.
@@ -95,7 +80,7 @@ impl SessionKeyProvider for EvmSessionKeyProvider {
             let (expected, actual) = (self.chain_id.clone(), owner_key.chain_id.clone());
             return Box::pin(async { Err(SessionKeyError::ChainMismatch { expected, actual }) });
         }
-        let merkle_root = match Self::compute_merkle_root(policy) {
+        let merkle_root = match crate::compute_merkle_root(policy) {
             Ok(r) => r,
             Err(e) => return Box::pin(async { Err(e) }),
         };

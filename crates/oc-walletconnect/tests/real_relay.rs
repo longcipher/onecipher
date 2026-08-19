@@ -134,7 +134,7 @@ async fn real_relay_encrypted_session_request_roundtrip() {
     server.insert_session(session).await;
 
     // Run the server loop in the background (it subscribes to the session topic).
-    let server_task = tokio::spawn(async move { server.run().await });
+    let server_task = tokio::spawn(async move { server.run(None).await });
 
     // Give the server time to connect + subscribe.
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;

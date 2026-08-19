@@ -40,7 +40,7 @@ pub(crate) fn run(
                     CliError::InvalidArgs(format!("decryption failed for '{name}': {e}"))
                 })?;
                 let env_key = to_env_key(name, keep_case);
-                env_pairs.push((env_key, Zeroizing::new(payload.secret)));
+                env_pairs.push((env_key, Zeroizing::new(payload.secret.clone())));
             }
             Err(oc_secret::SecretStoreError::NotFound(_)) => {
                 // Treat as a directory prefix — list all entries under `name/`.
@@ -70,7 +70,7 @@ pub(crate) fn run(
                     // Use the suffix after the directory prefix as the env var key.
                     let suffix = &idx_entry.name[prefix.len()..];
                     let env_key = to_env_key(suffix, keep_case);
-                    env_pairs.push((env_key, Zeroizing::new(payload.secret)));
+                    env_pairs.push((env_key, Zeroizing::new(payload.secret.clone())));
                 }
             }
             Err(e) => {

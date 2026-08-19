@@ -121,11 +121,14 @@ pub(crate) fn hotp(name: &str, counter: u64, increment: bool) -> Result<(), CliE
 
     if increment {
         let mut extra =
-            payload.extra.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+            payload.extra.clone().unwrap_or_else(|| serde_json::Value::Object(Default::default()));
         extra["hotp_counter"] = serde_json::json!(counter + 1);
 
-        let updated_payload =
-            SecretPayload { secret: payload.secret, notes: payload.notes, extra: Some(extra) };
+        let updated_payload = SecretPayload {
+            secret: payload.secret.clone(),
+            notes: payload.notes.clone(),
+            extra: Some(extra),
+        };
 
         let recipients = super::load_recipients()?;
         if recipients.is_empty() {

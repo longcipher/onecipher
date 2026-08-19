@@ -89,7 +89,7 @@ pub async fn run_server(
     }
 
     tracing::info!(relay_url, "starting WC v2 wallet server");
-    server.run().await.map_err(NetAgentError::Wc)?;
+    server.run(None).await.map_err(NetAgentError::Wc)?;
     Ok(())
 }
 
@@ -128,6 +128,7 @@ pub async fn run_server_controlled(
         pairing_rx,
         None,
         None,
+        None,
     )
     .await
 }
@@ -140,6 +141,11 @@ pub async fn run_server_controlled(
 /// `approval_log` (if provided) persists pending/resolved approvals for
 /// daemon-restart recovery. The plain [`run_server_controlled`] is a thin
 /// wrapper passing `None` for both.
+///
+/// `cancel`, when `Some`, is a shared flag the caller sets to request a
+/// graceful shutdown of the server run loop (M3 fix). The daemon wires its
+/// Ctrl-C handler to it so the WC server stops cleanly instead of being
+/// dropped.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_server_controlled_with_approvals(
     key_agent_sock: &str,
@@ -154,6 +160,7 @@ pub async fn run_server_controlled_with_approvals(
         )>,
     >,
     approval_log: Option<std::sync::Arc<oc_core::approval_log::ApprovalLog>>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<(), NetAgentError> {
     let key_agent = KeyAgentClient::new(key_agent_sock);
     // Shared WC session table: handed to BOTH the method router (so the
@@ -198,7 +205,10 @@ pub async fn run_server_controlled_with_approvals(
     tracing::info!(relay_url, "starting WC v2 wallet server (controlled)");
 
     // Spawn the server run loop in a background task.
-    let server_task = tokio::spawn(async move { server.run().await });
+    let server_task = tokio::spawn(async move {
+        let cancel_ref = cancel.as_deref();
+        server.run(cancel_ref).await
+    });
 
     // Process pairing injection requests from the control channel.
     while let Some(uri) = pairing_rx.recv().await {

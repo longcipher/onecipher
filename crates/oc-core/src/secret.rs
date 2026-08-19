@@ -4,6 +4,7 @@
 //! (Mnemonic/PrivateKey) is a subset — wallets are just one kind of secret.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// Top-level entry type discriminator.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -72,6 +73,17 @@ pub struct SecretMetadata {
 }
 
 /// Decrypted payload of a secret entry.
+///
+/// # Memory hardening (C3 fix)
+///
+/// The plaintext `secret`/`notes` are held as `String` for serde/CLI
+/// compatibility (the `--json` output must remain a plain string), but a
+/// custom [`Drop`] zeroizes their backing buffers on drop. This is a
+/// best-effort mitigation: it does not `mlock` the pages (that would require
+/// `HardenedBytes`), but it prevents the plaintext from lingering in freed
+/// heap memory after the payload is dropped. Callers that need page-locking
+/// should route the secret through `oc_crypto::HardenedBytes` at the point of
+/// use.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SecretPayload {
     /// The primary secret (password, mnemonic, TOTP seed, etc.).
@@ -82,6 +94,15 @@ pub struct SecretPayload {
     /// Type-specific extra fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
+}
+
+impl Drop for SecretPayload {
+    fn drop(&mut self) {
+        self.secret.zeroize();
+        if let Some(notes) = self.notes.as_mut() {
+            notes.zeroize();
+        }
+    }
 }
 
 /// A secret entry index record (plaintext, stored in `index.jsonl`).
@@ -175,7 +196,7 @@ mod tests {
         let back: SecretPayload = serde_json::from_str(&json).unwrap();
         assert_eq!(back.secret, "hunter2");
         assert_eq!(back.notes.as_deref(), Some("note text"));
-        assert_eq!(back.extra.unwrap()["k"], "v");
+        assert_eq!(back.extra.as_ref().unwrap()["k"], "v");
     }
 
     #[test]

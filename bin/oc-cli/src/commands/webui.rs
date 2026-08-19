@@ -179,7 +179,10 @@ pub(crate) fn approval_decision(
     reason: Option<&str>,
     yes: bool,
 ) -> Result<(), CliError> {
-    if !yes && std::io::stdin().is_terminal() {
+    let is_interactive = !cfg!(test) &&
+        std::env::var("OC_NONINTERACTIVE").is_err() &&
+        std::io::stdin().is_terminal();
+    if !yes && is_interactive {
         eprint!("Really {decision} approval {id}? [y/N] ");
         std::io::stderr().flush().ok();
         let mut line = String::new();

@@ -22,6 +22,8 @@
 
 use std::{future::Future, pin::Pin};
 
+use sha2::Digest;
+
 pub mod abi;
 pub mod error;
 pub mod evm;
@@ -43,6 +45,21 @@ pub use types::{
     GrantReceipt, KeyScheme, OwnerKey, PublicKey, SessionPrivateKey, SignPayload, Signature,
     SolanaInstruction,
 };
+
+/// Compute the ERC-7715 permission Merkle root from a `PolicyV2`.
+///
+/// **Deviation note (R74 YAGNI):** Phase 1 uses SHA-256 of the serialized
+/// `PolicyV2` as a stand-in for the Merkle root. Real EVM uses keccak256 + a
+/// Merkle tree of individual permissions; that is a Phase 2 concern. The root
+/// is deterministic for a given policy, which is sufficient for the Phase 1
+/// mock path. Shared by the EVM and mock providers to avoid duplicated
+/// implementations (M7 fix).
+pub(crate) fn compute_merkle_root(policy: &PolicyV2) -> Result<String, SessionKeyError> {
+    let json =
+        serde_json::to_string(policy).map_err(|e| SessionKeyError::MerkleFailed(e.to_string()))?;
+    let hash = sha2::Sha256::digest(json.as_bytes());
+    Ok(format!("0x{}", hex::encode(hash)))
+}
 
 /// The multi-chain `SessionKeyProvider` trait (R21).
 ///

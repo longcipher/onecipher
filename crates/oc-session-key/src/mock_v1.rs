@@ -213,17 +213,6 @@ impl EvmSessionKeyProvider {
             .map_err(|e| SessionKeyError::InvalidPayload(e.to_string()))
     }
 
-    /// Compute the ERC-7715 permission Merkle root from a `PolicyV2`.
-    ///
-    /// **Deviation note:** SHA-256 of the serialized policy, parity with
-    /// Phase 1. Real keccak256 + Merkle tree lives in `oc-netagent`.
-    pub(crate) fn compute_merkle_root(policy: &PolicyV2) -> Result<String, SessionKeyError> {
-        let json = serde_json::to_string(policy)
-            .map_err(|e| SessionKeyError::MerkleFailed(e.to_string()))?;
-        let hash = Sha256::digest(json.as_bytes());
-        Ok(format!("0x{}", hex::encode(hash)))
-    }
-
     /// Encode the ERC-7579 `installSessionKey(bytes32,bytes32,uint64)` calldata.
     ///
     /// **Deviation note:** mock 4-byte selector. Real selector derivation
@@ -289,7 +278,7 @@ impl SessionKeyProvider for EvmSessionKeyProvider {
             Ok(s) => s,
             Err(e) => return Box::pin(async { Err(e) }),
         };
-        let merkle_root = match Self::compute_merkle_root(policy) {
+        let merkle_root = match crate::compute_merkle_root(policy) {
             Ok(r) => r,
             Err(e) => return Box::pin(async { Err(e) }),
         };

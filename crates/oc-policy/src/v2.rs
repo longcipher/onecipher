@@ -626,6 +626,12 @@ fn step_11_deny(
 /// Explicit control flow, no combinators (Readability Priorities). Each step is a
 /// named function. The caller persists counters via `state.persist(path)` after
 /// this returns.
+///
+/// **Naming note (L5):** the flow is historically called "11-step" but actually
+/// performs **12 checks** — `step_8` (per-tx budget) is followed by `step_8a`
+/// (daily cumulative) and `step_8b` (monthly cumulative). The step numbers are
+/// deliberately non-contiguous to preserve the "11-step" label; the count is
+/// 12 decision points.
 pub fn evaluate_11_step(
     req: &PayRequest,
     session_key_id: &str,

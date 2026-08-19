@@ -1,4 +1,4 @@
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, Write};
 
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::SigningKey as K256SigningKey;
@@ -44,7 +44,7 @@ pub(crate) fn change_password(
     old_pass_flag: Option<&str>,
     new_pass_flag: Option<&str>,
 ) -> Result<(), CliError> {
-    let is_tty = std::io::stdin().is_terminal();
+    let is_tty = super::is_interactive_stdin();
 
     // Non-interactive mode: both old and new passphrases must be supplied via
     // flags or env vars. Interactive mode: prompt for both.
@@ -130,7 +130,7 @@ pub(crate) fn export_public_key(
     // Non-interactive support: with ONECIPHER_PASSPHRASE set (or an empty
     // passphrase wallet) no terminal is required.
     let has_env_passphrase = super::peek_passphrase().is_some();
-    if !std::io::stdin().is_terminal() && !has_env_passphrase {
+    if !super::is_interactive_stdin() && !has_env_passphrase {
         return Err(CliError::InvalidArgs(
             "wallet export --public-key requires an interactive terminal, or set \
              ONECIPHER_PASSPHRASE"
@@ -201,7 +201,7 @@ pub(crate) fn export_public_key(
 }
 
 pub(crate) fn import_interactive(name: &str, chain: Option<&str>) -> Result<(), CliError> {
-    if !std::io::stdin().is_terminal() {
+    if !super::is_interactive_stdin() {
         return Err(CliError::InvalidArgs(
             "interactive import requires an interactive terminal".into(),
         ));
@@ -328,7 +328,7 @@ pub(crate) fn export(wallet_name: &str) -> Result<(), CliError> {
     // without a terminal. Otherwise an interactive terminal is required to
     // prompt for the passphrase.
     let has_env_passphrase = super::peek_passphrase().is_some();
-    if !std::io::stdin().is_terminal() && !has_env_passphrase {
+    if !super::is_interactive_stdin() && !has_env_passphrase {
         return Err(CliError::InvalidArgs(
             "wallet export requires an interactive terminal, or set ONECIPHER_PASSPHRASE \
              (do not pipe stdin without a passphrase)"

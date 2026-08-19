@@ -49,15 +49,18 @@ impl SolanaSessionKeyProvider {
         program_id: &str,
         session_pubkey: &[u8],
         policy: &PolicyV2,
-    ) -> SolanaInstruction {
+    ) -> Result<SolanaInstruction, SessionKeyError> {
         let mut data = Vec::new();
         // Instruction discriminator: CreateSessionToken = 1.
         data.push(1);
         data.extend_from_slice(session_pubkey);
-        let policy_json = serde_json::to_vec(policy).unwrap_or_default();
+        // Propagate serialization failure instead of silently writing an empty
+        // permission set on-chain (M7 fix).
+        let policy_json = serde_json::to_vec(policy)
+            .map_err(|e| SessionKeyError::InvalidPayload(format!("policy serialize: {e}")))?;
         data.extend_from_slice(&(policy_json.len() as u32).to_le_bytes());
         data.extend_from_slice(&policy_json);
-        SolanaInstruction { program_id: program_id.to_string(), accounts: vec![], data }
+        Ok(SolanaInstruction { program_id: program_id.to_string(), accounts: vec![], data })
     }
 }
 
@@ -76,8 +79,14 @@ impl SessionKeyProvider for SolanaSessionKeyProvider {
             let (expected, actual) = (self.chain_id.clone(), owner_key.chain_id.clone());
             return Box::pin(async { Err(SessionKeyError::ChainMismatch { expected, actual }) });
         }
-        let ix =
-            Self::encode_create_session_token_ix(&self.program_id, &session_pubkey.bytes, policy);
+        let ix = match Self::encode_create_session_token_ix(
+            &self.program_id,
+            &session_pubkey.bytes,
+            policy,
+        ) {
+            Ok(ix) => ix,
+            Err(e) => return Box::pin(async { Err(e) }),
+        };
         let rpc = &self.rpc;
         let program_id = self.program_id.clone();
         Box::pin(async move {

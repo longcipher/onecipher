@@ -101,28 +101,18 @@ fn load_chain_key(
     let pp = unlock_token.to_passphrase().map_err(|e| format!("passphrase derivation: {e}"))?;
     let pp_bytes: &[u8] = pp.as_bytes();
 
-    let key = match oc_wallet::ops::decrypt_signing_key(
+    let key = oc_wallet::ops::decrypt_signing_key(
         wallet_id,
         chain.chain_type,
         pp_bytes,
         None,
         vault_path(),
-    ) {
-        Ok(key) => key,
-        Err(_) => {
-            // Legacy wallets created before device-bound unlock was enforced
-            // are encrypted with an empty passphrase. Fall back to that so
-            // older vaults remain usable.
-            oc_wallet::ops::decrypt_signing_key(
-                wallet_id,
-                chain.chain_type,
-                b"",
-                None,
-                vault_path(),
-            )
-            .map_err(|e| format!("wallet decrypt failed: {e}"))?
-        }
-    };
+    )
+    .map_err(|e| format!("wallet decrypt failed: {e}"))?;
+    // NOTE: the legacy "empty-passphrase" fallback was intentionally removed
+    // (C1 fix). Pre-device-bound vaults must be migrated with
+    // `onecipher wallet migrate` before they can be unlocked; silently
+    // retrying with `b""` reintroduced a signing-without-passphrase path.
     let signer = oc_signer::signer_for_chain(chain.chain_type);
     Ok((key, signer))
 }
@@ -637,6 +627,12 @@ fn handle_revoke_session_key(
 
 fn handle_lock_vault() -> Result<KeyAgentResponse, KeyAgentError> {
     global_key_cache().clear();
+    // Also drop any in-flight Passkey challenge state so a lock cannot be
+    // followed by a replay of a previously-issued challenge (L1 fix).
+    global_passkey_verifiers()
+        .lock()
+        .map_err(|_| KeyAgentError::Internal("passkey verifiers mutex poisoned".into()))?
+        .clear();
 
     audit(
         EventType::BudgetReclaim, // ponytail: closest existing variant; add LOCK_VAULT if needed

@@ -50,6 +50,22 @@ use zeroize::Zeroizing;
 
 use crate::CliError;
 
+/// Returns `true` if stdin is a usable interactive terminal.
+///
+/// Always returns `false` under `#[cfg(test)]` (tests must provide input via
+/// env vars or flags — blocking on `read_line()` would hang the harness).
+/// Also returns `false` if the `OC_NONINTERACTIVE` env var is set, giving
+/// scripts an explicit escape hatch.
+pub(crate) fn is_interactive_stdin() -> bool {
+    if cfg!(test) {
+        return false;
+    }
+    if std::env::var("OC_NONINTERACTIVE").is_ok() {
+        return false;
+    }
+    io::stdin().is_terminal()
+}
+
 /// Read mnemonic from ONECIPHER_MNEMONIC env var (or OWS_MNEMONIC/LWS_MNEMONIC fallback) or stdin.
 pub(crate) fn read_mnemonic() -> Result<Zeroizing<String>, CliError> {
     if let Some(value) = clear_env_var("ONECIPHER_MNEMONIC")
@@ -63,9 +79,13 @@ pub(crate) fn read_mnemonic() -> Result<Zeroizing<String>, CliError> {
     }
 
     let stdin = io::stdin();
-    if stdin.is_terminal() {
+    if is_interactive_stdin() {
         eprint!("Enter mnemonic: ");
         io::stderr().flush().ok();
+    } else {
+        return Err(CliError::InvalidArgs(
+            "no mnemonic provided (set ONECIPHER_MNEMONIC or pipe via stdin)".into(),
+        ));
     }
 
     let mut line = String::new();
@@ -95,9 +115,13 @@ pub(crate) fn read_private_key() -> Result<Zeroizing<String>, CliError> {
     }
 
     let stdin = io::stdin();
-    if stdin.is_terminal() {
+    if is_interactive_stdin() {
         eprint!("Enter private key (hex): ");
         io::stderr().flush().ok();
+    } else {
+        return Err(CliError::InvalidArgs(
+            "no private key provided (set ONECIPHER_PRIVATE_KEY or pipe via stdin)".into(),
+        ));
     }
 
     let mut line = String::new();
@@ -122,12 +146,11 @@ pub(crate) fn read_passphrase() -> Zeroizing<String> {
     {
         return Zeroizing::new(value);
     }
-    let stdin = io::stdin();
-    if stdin.is_terminal() {
+    if is_interactive_stdin() {
         eprint!("Passphrase (empty for none): ");
         io::stderr().flush().ok();
         let mut line = String::new();
-        stdin.lock().read_line(&mut line).unwrap_or(0);
+        io::stdin().lock().read_line(&mut line).unwrap_or(0);
         Zeroizing::new(line.trim().to_string())
     } else {
         Zeroizing::new(String::new())
@@ -342,9 +365,13 @@ pub(crate) fn read_secret_from_env_or_prompt() -> Result<String, CliError> {
     }
 
     let stdin = std::io::stdin();
-    if stdin.is_terminal() {
+    if is_interactive_stdin() {
         eprint!("Enter secret: ");
         io::stderr().flush().ok();
+    } else {
+        return Err(CliError::InvalidArgs(
+            "no secret provided (set ONECIPHER_SECRET or enter via stdin)".into(),
+        ));
     }
 
     let mut line = String::new();

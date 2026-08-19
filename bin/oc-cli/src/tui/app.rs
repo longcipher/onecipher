@@ -714,7 +714,7 @@ impl App {
                         } else {
                             Some(form.notes.clone())
                         },
-                        extra: old_payload.extra,
+                        extra: old_payload.extra.clone(),
                     };
 
                     let mut new_entry = oc_secret::SecretEntry::new(

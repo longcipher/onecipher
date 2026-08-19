@@ -84,7 +84,9 @@ pub(crate) fn run(
     }
 
     // Interactive selector when stdin is a terminal.
-    if io::stdin().is_terminal() {
+    let is_interactive =
+        !cfg!(test) && std::env::var("OC_NONINTERACTIVE").is_err() && io::stdin().is_terminal();
+    if is_interactive {
         interactive_select(&entries)?;
     } else {
         // Non-interactive: print all matches.

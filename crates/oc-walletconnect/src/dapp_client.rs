@@ -182,7 +182,12 @@ impl WcDappClient {
                 let pt = match payload[0] {
                     crypto::ENVELOPE_TYPE_0 => WcCipher::open_type0(&key, &payload)?,
                     crypto::ENVELOPE_TYPE_1 => WcCipher::open_type1(&key, &payload)?.1,
-                    _ => unreachable!(),
+                    other => {
+                        // Defensive: never panic on an unexpected envelope tag.
+                        return Err(WcError::Crypto(format!(
+                            "unexpected envelope type {other} in encrypted response"
+                        )));
+                    }
                 };
                 serde_json::from_slice(&pt)?
             } else {

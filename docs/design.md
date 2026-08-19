@@ -149,6 +149,17 @@ implementations are supplied by `oc-netagent`. `execute_intent` builds
 an unsigned EIP-1559 transaction and forwards it through the RPC
 client — it does not sign directly. `MockRpcClient` backs unit tests.
 
+> **Honest status (C2):** as of this revision the Intent Layer is **not on the
+> production signing path**. The WC router signs directly via
+> `KeyAgentRequest` and returns `signed_tx_hex` for the dApp to broadcast;
+> `simulate_intent`/`execute_intent` are exercised only by unit tests. The
+> layer is currently a CLI-adjacent library, not the core execution path
+> described above. Additionally, `HpxRpcClient::native_price_usd` is a stub
+> (returns an error), so `simulate_intent` fails under a real RPC client until
+> a price feed is integrated. Wiring the intent layer into the WC router is
+> tracked and must be done behind an explicit opt-in to avoid breaking
+> existing dApp clients.
+
 ### §6.2 Session Keys (`oc-session-key`)
 Session keys enable delegated signing for AI agents without exposing
 the master key. EVM uses ERC-7715 `grantPermission` on an ERC-7579
