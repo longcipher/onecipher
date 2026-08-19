@@ -116,6 +116,17 @@ impl WcSession {
         self.state == WcSessionState::Active && now_unix() < self.expiry_unix
     }
 
+    /// Whether the session still needs an active relay subscription.
+    ///
+    /// Pairing sessions sit in `Propose` state until the dApp's
+    /// `wc_sessionPropose` settles them; they must be subscribed *before* that
+    /// message arrives, which is why a non-`Active` pairing is included here.
+    /// Expired/closed sessions no longer need the relay.
+    pub fn needs_relay(&self) -> bool {
+        now_unix() < self.expiry_unix &&
+            (self.state == WcSessionState::Propose || self.state == WcSessionState::Active)
+    }
+
     pub fn is_method_allowed(&self, method: &str) -> bool {
         self.methods.iter().any(|m| m == method)
     }

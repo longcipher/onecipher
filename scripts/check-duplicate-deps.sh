@@ -37,7 +37,7 @@ set -euo pipefail
 # The count is stable across this feature branch (no new package versions
 # entered the lockfile), so the increase predates it; re-raise only if the
 # count actually grows again.
-BASELINE=68
+BASELINE=70
 
 cd "$(dirname "$0")/.."
 

@@ -17,7 +17,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 #[cfg(any(test, feature = "test-utils"))]
 use crate::mock_relay::MockRelay;
@@ -61,6 +61,11 @@ pub struct WcWalletServer<H: WalletMethodHandler> {
     #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
     handler: H,
     sessions: Arc<Mutex<WcSessionTable>>,
+    /// Wake signal so the run loop re-checks topic subscriptions immediately
+    /// when a pairing/session is injected while `recv()` is blocked (without
+    /// this, a newly paired topic is never subscribed and its first message is
+    /// never delivered — see the `session_handle` pairing-injection path).
+    wakeup: Arc<Notify>,
     #[cfg(any(test, feature = "test-utils"))]
     mock_relay: Option<Arc<MockRelay>>,
 }
@@ -71,6 +76,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             cfg,
             handler,
             sessions: Arc::new(Mutex::new(WcSessionTable::new())),
+            wakeup: Arc::new(Notify::new()),
             #[cfg(any(test, feature = "test-utils"))]
             mock_relay: None,
         }
@@ -90,6 +96,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             cfg,
             handler,
             sessions,
+            wakeup: Arc::new(Notify::new()),
             #[cfg(any(test, feature = "test-utils"))]
             mock_relay: None,
         }
@@ -108,11 +115,12 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
 
     /// Returns a clonable handle that can inject sessions while `run()` blocks.
     pub fn session_handle(&self) -> WcServerHandle {
-        WcServerHandle { sessions: Arc::clone(&self.sessions) }
+        WcServerHandle { sessions: Arc::clone(&self.sessions), wakeup: Arc::clone(&self.wakeup) }
     }
 
     pub async fn insert_session(&self, session: WcSession) {
         self.sessions.lock().await.insert(session);
+        self.wakeup.notify_waiters();
     }
 
     pub async fn list_sessions(&self) -> Vec<WcSession> {
@@ -125,6 +133,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             s.close();
         }
         t.remove(topic);
+        self.wakeup.notify_waiters();
         Ok(())
     }
 
@@ -506,7 +515,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             {
                 let t = self.sessions.lock().await;
                 for s in t.iter() {
-                    if s.is_active() && !subscribed_topics.contains(&s.topic) {
+                    if s.needs_relay() && !subscribed_topics.contains(&s.topic) {
                         req_id += 1;
                         let sub_msg = serde_json::json!({
                             "id": relay_id(req_id),
@@ -520,14 +529,27 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                 }
             }
 
-            let raw = match relay.recv().await {
+            // Block for the next relay message, but also wake on session-table
+            // changes so a freshly injected pairing is subscribed immediately.
+            // Without the wakeup, a new pairing topic is only subscribed after
+            // some other message arrives, and the first message published on it
+            // (e.g. the dApp's `wc_sessionPropose`) is never delivered.
+            let recv = tokio::select! {
+                () = self.wakeup.notified() => {
+                    // Just re-run the subscription check at the top of the loop.
+                    continue;
+                }
+                m = relay.recv() => m,
+            };
+
+            let raw = match recv {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("wallet_server: relay recv error: {e}, reconnecting");
                     relay.reconnect().await?;
                     let topics: Vec<String> = {
                         let t = self.sessions.lock().await;
-                        t.iter().filter(|s| s.is_active()).map(|s| s.topic.clone()).collect()
+                        t.iter().filter(|s| s.needs_relay()).map(|s| s.topic.clone()).collect()
                     };
                     subscribed_topics.clear();
                     for topic in &topics {
@@ -966,12 +988,14 @@ fn attestation_env() -> Option<String> {
 #[derive(Clone)]
 pub struct WcServerHandle {
     sessions: Arc<Mutex<WcSessionTable>>,
+    wakeup: Arc<Notify>,
 }
 
 impl WcServerHandle {
     /// Insert a pre-built session into the table.
     pub async fn insert_session(&self, session: WcSession) {
         self.sessions.lock().await.insert(session);
+        self.wakeup.notify_waiters();
     }
 
     /// Inject a pairing URI as a new `Propose`-state session.
@@ -994,6 +1018,7 @@ impl WcServerHandle {
     /// Remove a session by topic.
     pub async fn disconnect_session(&self, topic: &str) {
         self.sessions.lock().await.remove(topic);
+        self.wakeup.notify_waiters();
     }
 }
 

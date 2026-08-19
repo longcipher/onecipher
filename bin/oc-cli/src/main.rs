@@ -478,6 +478,11 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
                 commands::wallet_rpc::serve(&listen, &wallet, index)
             }
         },
+        Commands::Send { chain, to, token, amount, wallet, rpc_url, index, gas_limit, json } => {
+            commands::send::run(
+                &chain, &wallet, &to, &token, &amount, &rpc_url, index, gas_limit, json,
+            )
+        }
     }
 }
 
@@ -566,8 +571,14 @@ fn run_daemon() -> Result<(), CliError> {
     // --- Shared tokio runtime for async WC server + control loop ---
     let rt = shared_runtime();
 
-    let relay_url =
-        std::env::var("OC_WC_RELAY_URL").unwrap_or_else(|_| "wss://relay.walletconnect.com".into());
+    let relay_url = std::env::var("OC_WC_RELAY_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            let cfg = oc_core::Config::load_or_default();
+            if cfg.wc.relay_url.is_empty() { None } else { Some(cfg.wc.relay_url) }
+        })
+        .unwrap_or_else(|| "wss://relay.walletconnect.com".into());
     let state_dir_str = state_dir.to_string_lossy().to_string();
     let ka_sock_for_telemetry = key_agent_sock.clone();
     let ka_sock_for_webui = key_agent_sock.clone();

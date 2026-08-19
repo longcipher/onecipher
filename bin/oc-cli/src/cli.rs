@@ -284,6 +284,36 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: WalletRpcCommands,
     },
+    /// Send an ERC-20 token transfer (cast-style: build, sign, broadcast)
+    Send {
+        /// Chain name (ethereum, base, arbitrum, ...), CAIP-2 ID (eip155:8453), or EVM chain ID
+        #[arg(long)]
+        chain: String,
+        /// Recipient address (0x...)
+        #[arg(long)]
+        to: String,
+        /// ERC-20 token address (0x...)
+        #[arg(long)]
+        token: String,
+        /// Amount in base units (integer string, e.g. "1000000" for 1.0 USDC with 6 decimals)
+        #[arg(long)]
+        amount: String,
+        /// Wallet name or ID (uses stored encrypted mnemonic)
+        #[arg(long, env = "ONECIPHER_WALLET")]
+        wallet: String,
+        /// RPC URL for the target chain
+        #[arg(long)]
+        rpc_url: String,
+        /// Account index
+        #[arg(long, default_value = "0")]
+        index: u32,
+        /// Gas limit override (otherwise estimated on-chain)
+        #[arg(long)]
+        gas_limit: Option<u64>,
+        /// Output structured JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 // ===========================================================================
