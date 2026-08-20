@@ -86,23 +86,35 @@ pub fn run(socket_path: Option<&str>, stop: Option<Arc<AtomicBool>>) -> Result<(
 
     eprintln!("oc-keyagent: listening on {path}");
 
-    for stream in listener.incoming() {
-        // Cooperative shutdown: stop accepting new connections.
+    // Cooperative shutdown. `UnixListener::accept` is blocking, so when `stop`
+    // is set we switch the listener to non-blocking and wake the accept loop
+    // with a `WouldBlock` error, which we treat purely as a poll point (rather
+    // than waiting for an unrelated incoming connection to unblock).
+    loop {
         if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
             break;
         }
-        match stream {
-            Ok(stream) => {
+
+        // Refresh non-blocking mode: off during normal operation, on once a
+        // shutdown has been requested so accept() returns immediately.
+        let want_nonblocking = stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed));
+        let _ = listener.set_nonblocking(want_nonblocking);
+
+        match listener.accept() {
+            Ok((stream, _addr)) => {
                 thread::spawn(move || {
                     if let Err(e) = handle_conn(stream) {
                         eprintln!("oc-keyagent: connection error: {e}");
                     }
                 });
             }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Non-blocking poll: yield briefly, then re-check `stop`.
+                thread::sleep(std::time::Duration::from_millis(50));
+            }
             Err(e) => {
-                // If the listener was closed (e.g. dropped), `incoming()`
-                // returns an error — treat that as shutdown, not a transient
-                // error.
+                // If the listener was closed (e.g. dropped), `accept` returns an
+                // error — treat that as shutdown, not a transient error.
                 if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
                     break;
                 }

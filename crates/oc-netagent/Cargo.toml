@@ -24,6 +24,7 @@ hpx = { workspace = true, features = ["rustls-tls", "http1", "http2", "json"] }
 oc-core = { workspace = true }
 oc-keyagent = { workspace = true }
 oc-policy = { workspace = true }
+oc-signer = { workspace = true }
 oc-walletconnect = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }

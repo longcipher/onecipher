@@ -338,9 +338,9 @@ async fn run_execution(intent: &Intent, rpc: &dyn RpcClient) -> Result<IntentRes
     // signatures) can exercise the full execute → broadcast → receipt path.
     // Real signing is deferred to integration with the Key-Agent UDS channel.
     let signer =
-        |_wallet_id: &str, tx_bytes: &[u8]| -> Result<Vec<u8>, oc_netagent::intent::IntentError> {
-            Ok(tx_bytes.to_vec())
-        };
+        |_key: &oc_netagent::intent::SigningKeyRef,
+         tx_bytes: &[u8]|
+         -> Result<Vec<u8>, oc_netagent::intent::IntentError> { Ok(tx_bytes.to_vec()) };
     execute_intent(intent, rpc, signer).await.map_err(map_intent_error)
 }
 
@@ -529,7 +529,10 @@ mod tests {
 
     #[test]
     fn run_execute_pay_intent_succeeds_with_mock_rpc() {
-        let json = r#"{"type":"Pay","amount":"10.5 USDC","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
+        // Native Pay amount must be a hex wei string (1 * 10^18 wei = 1 token).
+        // `build_unsigned_eip1559_tx` rejects human-readable amounts (e.g.
+        // "1 USDC") rather than silently encoding 0 wei.
+        let json = r#"{"type":"Pay","amount":"0x0de0b6b3a7640000","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
         let result = run_execute(json, "eip155:8453", "sk-test", None);
         assert!(result.is_ok(), "run_execute should succeed with mock RPC");
     }
@@ -544,8 +547,8 @@ mod tests {
     #[test]
     fn run_submit_with_yes_flag_skips_prompt() {
         // --yes skips the interactive prompt, so this should succeed even
-        // in non-interactive test contexts.
-        let json = r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
+        // in non-interactive test contexts. Native Pay amount is hex wei.
+        let json = r#"{"type":"Pay","amount":"0x0de0b6b3a7640000","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
         let result = run_submit(json, "eip155:8453", "sk-test", true, None);
         assert!(result.is_ok(), "run_submit --yes should succeed");
     }

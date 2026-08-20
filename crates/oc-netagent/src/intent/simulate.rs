@@ -54,8 +54,9 @@ pub async fn simulate_intent(
 fn intent_amount_usd(intent: &Intent) -> f64 {
     match &intent.kind {
         IntentKind::Pay { amount, .. } => {
-            // Parse "10.5 USDC" → 10.5
-            amount.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0)
+            // Shared with `parse_amount` so the simulation USD estimate and the
+            // executed on-chain amount can never disagree on the magnitude.
+            super::amount_numeric_prefix(amount).unwrap_or(0.0)
         }
         _ => 0.0,
     }

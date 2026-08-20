@@ -4373,6 +4373,7 @@ dependencies = [
  "oc-core",
  "oc-keyagent",
  "oc-policy",
+ "oc-signer",
  "oc-walletconnect",
  "prost",
  "rand 0.10.2",

@@ -26,7 +26,9 @@ pub mod simulate;
 pub use error::IntentError;
 pub use execute::execute_intent;
 pub use rpc::{CallData, MockRpcClient, RpcClient, RpcError};
-pub use schema::{Intent, IntentKind, IntentResult, IntentStatus, IntentSummary, MessageEncoding};
+pub use schema::{
+    Intent, IntentKind, IntentResult, IntentStatus, IntentSummary, MessageEncoding, SigningKeyRef,
+};
 use sha3::{Digest, Keccak256};
 pub use simulate::simulate_intent;
 
@@ -92,10 +94,30 @@ pub(crate) fn build_call_data(kind: &IntentKind, chain: &str) -> Result<CallData
         IntentKind::CrossChainTransfer { recipient, .. } => Ok(CallData {
             from: None,
             to: recipient.clone(),
-            value: Some("0x0".to_string()),
+            // Zero native value; the bridged asset is carried out-of-band by
+            // the bridge, not as EVM wei. `None` (rather than `"0x0"`) avoids
+            // emitting an odd-length hex literal that the tx builder would
+            // reject.
+            value: None,
             data: None,
         }),
     }
+}
+
+/// Extract the leading numeric value from an amount string (e.g. `"10.5 USDC"`
+/// → `10.5`, `"1000000"` → `1000000.0`).
+///
+/// This is the shared leading-numeric extractor used by `intent_amount_usd`
+/// to produce the human-readable USD estimate. It intentionally mirrors the
+/// acceptance rule of `parse_amount` for *decimal* amounts (the on-chain
+/// parser additionally accepts `0x`-hex), so the simulation summary and the
+/// executed transaction agree on the magnitude of a plain decimal amount.
+///
+/// Returns `None` if the leading token is not a finite decimal number
+/// (e.g. `"USDC"`, `""`, or a `0x`-hex literal — hex is parsed by
+/// `parse_amount`, not here).
+fn amount_numeric_prefix(amount: &str) -> Option<f64> {
+    amount.split_whitespace().next().and_then(|s| s.parse::<f64>().ok()).filter(|v| v.is_finite())
 }
 
 /// Parse an amount string into a minimal-unit (wei) quantity.
@@ -299,6 +321,23 @@ mod tests {
     fn parse_amount_rejects_whitespace_and_empty() {
         assert!(parse_amount("").is_err());
         assert!(parse_amount("   ").is_err());
+    }
+
+    #[test]
+    fn amount_numeric_prefix_matches_parse_amount_magnitude() {
+        // H1/M3 regression: the USD estimate (decimal) and the on-chain integer
+        // parse agree on the magnitude of a plain decimal amount, and both
+        // reject a non-numeric token — so simulate and execute cannot silently
+        // disagree on what an amount means.
+        assert_eq!(amount_numeric_prefix("10.5 USDC"), Some(10.5));
+        assert_eq!(amount_numeric_prefix("1000000"), Some(1_000_000.0));
+        // Non-numeric / empty tokens have no extractable magnitude.
+        assert_eq!(amount_numeric_prefix(""), None);
+        assert_eq!(amount_numeric_prefix("USDC"), None);
+        // parse_amount must reject the same token-suffixed string it estimates.
+        assert!(parse_amount("10.5 USDC").is_err());
+        // And both accept a plain decimal integer with the same value.
+        assert_eq!(parse_amount("1000000").unwrap(), 1_000_000);
     }
 
     #[test]

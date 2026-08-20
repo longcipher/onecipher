@@ -4,27 +4,30 @@ use super::{
     build_call_data,
     error::IntentError,
     rpc::RpcClient,
-    schema::{Intent, IntentKind, IntentResult, IntentStatus},
+    schema::{Intent, IntentKind, IntentResult, IntentStatus, SigningKeyRef},
 };
 
 /// Execute a confirmed intent.
 ///
-/// `signer` is a sync closure invoked with `(wallet_id, unsigned_tx_bytes)`
+/// `signer` is a sync closure invoked with `(key_ref, unsigned_tx_bytes)`
 /// that must return the signed RLP-encoded transaction bytes. The closure is
 /// sync because the Key-Agent UDS channel is itself sync (`std::os::unix::net`
 /// + `std::thread`, per R55) — keeping oc-intent free of `async_trait` and `tokio`-in-signature
 ///   preserves R56's isolation invariant for the signing boundary even though oc-intent's RPC
 ///   client is async.
 ///
-/// The wallet id is sourced from `intent.session_key_id` (the closest
-/// available identifier on `Intent` for selecting the signing key).
+/// The signing key reference is resolved from `intent.session_key_id` (the
+/// closest available identifier on `Intent` for selecting the signing key).
+/// `SigningKeyRef` makes the resolution boundary explicit: the CLI layer maps
+/// the session key id to a concrete wallet/HD key before invoking the signer,
+/// so this function never silently conflates the two identifiers.
 pub async fn execute_intent<F>(
     intent: &Intent,
     rpc: &dyn RpcClient,
     signer: F,
 ) -> Result<IntentResult, IntentError>
 where
-    F: Fn(&str, &[u8]) -> Result<Vec<u8>, IntentError> + Send,
+    F: Fn(&SigningKeyRef, &[u8]) -> Result<Vec<u8>, IntentError> + Send,
 {
     if intent.is_expired() {
         return Ok(IntentResult {
@@ -68,8 +71,10 @@ where
 
     // C2: sign the unsigned tx before broadcasting. The signer is injected
     // by the CLI layer (which calls the Key-Agent over UDS); oc-intent itself
-    // never touches private keys.
-    let signed_tx_bytes = signer(intent.session_key_id.as_str(), &tx_bytes)
+    // never touches private keys. The session key id is resolved to a
+    // `SigningKeyRef` so the caller's mapping is explicit.
+    let key_ref = SigningKeyRef::from(intent.session_key_id.as_str());
+    let signed_tx_bytes = signer(&key_ref, &tx_bytes)
         .map_err(|e| IntentError::Execution(format!("signing failed: {e}")))?;
 
     // C3: broadcast failure is an Err, not Ok(Failed).
@@ -110,8 +115,15 @@ fn parse_chain_id(chain_id: &str) -> Result<u64, IntentError> {
 
 // `build_call_data` is now shared in `mod.rs` — used by both simulate and execute.
 
-/// Minimal unsigned EIP-1559 transaction RLP. ponytail: manual RLP, add oc-signer dep if signing
-/// lands here.
+/// Minimal unsigned EIP-1559 transaction RLP.
+///
+/// Reuses `oc_signer::rlp` (the same encoder used by the WalletSigner surface
+/// in `wallet_rpc.rs`) so there is a single RLP implementation across the
+/// workspace instead of two hand-rolled copies.
+///
+/// A non-hex `value` (e.g. a human-readable `"10.5 USDC"` that bypassed
+/// `parse_amount`) is rejected rather than silently encoded as `0` wei — a
+/// silent zero-value transaction is a critical safety failure.
 fn build_unsigned_eip1559_tx(
     chain_id: u64,
     to: &str,
@@ -120,75 +132,36 @@ fn build_unsigned_eip1559_tx(
     gas_limit: u64,
     gas_price: u64,
 ) -> Result<Vec<u8>, IntentError> {
+    use oc_signer::rlp::{encode_bytes, encode_list, encode_u64};
+
     let to_bytes = hex::decode(to.trim_start_matches("0x"))
         .map_err(|e| IntentError::InvalidInput(format!("invalid recipient: {e}")))?;
-    let value_bytes = value
-        .as_deref()
-        .and_then(|v| hex::decode(v.trim_start_matches("0x")).ok())
-        .unwrap_or_default();
+    let value_bytes = match value.as_deref() {
+        Some(v) => hex::decode(v.trim_start_matches("0x")).map_err(|e| {
+            IntentError::InvalidInput(format!("invalid value (must be hex wei): {e}"))
+        })?,
+        None => Vec::new(),
+    };
     let data_bytes = data.unwrap_or(&[]);
     let max_fee = gas_price.saturating_mul(2);
     let max_priority = 1_000_000_000u64; // 1 gwei
 
-    let items: Vec<Vec<u8>> = vec![
-        rlp_u64(chain_id),
-        rlp_u64(0), // nonce
-        rlp_u64(max_priority),
-        rlp_u64(max_fee),
-        rlp_u64(gas_limit),
-        rlp_bytes(&to_bytes),
-        rlp_bytes(&value_bytes),
-        rlp_bytes(data_bytes),
-        rlp_list(&[]), // access list
-    ];
+    let items: Vec<u8> = [
+        encode_u64(chain_id),
+        encode_u64(0), // nonce
+        encode_u64(max_priority),
+        encode_u64(max_fee),
+        encode_u64(gas_limit),
+        encode_bytes(&to_bytes),
+        encode_bytes(&value_bytes),
+        encode_bytes(data_bytes),
+        encode_list(&[]), // access list
+    ]
+    .concat();
 
     let mut payload = vec![0x02]; // EIP-1559 tx type
-    payload.extend_from_slice(&rlp_list(&items));
+    payload.extend_from_slice(&encode_list(&items));
     Ok(payload)
-}
-
-fn rlp_u64(val: u64) -> Vec<u8> {
-    if val == 0 {
-        return vec![0x80]; // RLP empty string
-    }
-    let be = val.to_be_bytes();
-    let trimmed = &be[be.iter().position(|&b| b != 0).unwrap_or(7)..];
-    rlp_bytes(trimmed)
-}
-
-fn rlp_bytes(data: &[u8]) -> Vec<u8> {
-    match data.len() {
-        1 if data[0] < 0x80 => data.to_vec(),
-        len @ 0..=55 => {
-            let mut out = vec![0x80 + len as u8];
-            out.extend_from_slice(data);
-            out
-        }
-        len => {
-            let len_bytes = len.to_be_bytes();
-            let trimmed = &len_bytes[len_bytes.iter().position(|&b| b != 0).unwrap_or(7)..];
-            let mut out = vec![0xb7 + trimmed.len() as u8];
-            out.extend_from_slice(trimmed);
-            out.extend_from_slice(data);
-            out
-        }
-    }
-}
-
-fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
-    let body: Vec<u8> = items.iter().flat_map(|i| i.iter().copied()).collect();
-    if body.len() <= 55 {
-        let mut out = vec![0xc0 + body.len() as u8];
-        out.extend_from_slice(&body);
-        out
-    } else {
-        let len_bytes = body.len().to_be_bytes();
-        let trimmed = &len_bytes[len_bytes.iter().position(|&b| b != 0).unwrap_or(7)..];
-        let mut out = vec![0xf7 + trimmed.len() as u8];
-        out.extend_from_slice(trimmed);
-        out.extend_from_slice(&body);
-        out
-    }
 }
 
 #[cfg(test)]
@@ -204,7 +177,10 @@ mod tests {
     fn make_pay_intent() -> Intent {
         Intent::new(
             IntentKind::Pay {
-                amount: "10.5 USDC".to_string(),
+                // Native amount must be a hex wei string once it reaches the
+                // on-chain builder — `build_unsigned_eip1559_tx` rejects
+                // non-hex values rather than silently encoding 0 wei.
+                amount: "0x0de0b6b3a7640000".to_string(),
                 recipient: "0xabcabcabcabcabcabcabcabcabcabcabca".to_string(),
                 token: None,
             },
@@ -215,8 +191,8 @@ mod tests {
 
     /// Test signer that returns the unsigned bytes unchanged — sufficient for
     /// MockRpcClient which doesn't validate signatures.
-    fn identity_signer() -> impl Fn(&str, &[u8]) -> Result<Vec<u8>, IntentError> {
-        |_wallet_id: &str, tx_bytes: &[u8]| Ok(tx_bytes.to_vec())
+    fn identity_signer() -> impl Fn(&SigningKeyRef, &[u8]) -> Result<Vec<u8>, IntentError> {
+        |_key: &SigningKeyRef, tx_bytes: &[u8]| Ok(tx_bytes.to_vec())
     }
 
     #[tokio::test]
@@ -247,8 +223,9 @@ mod tests {
         // swallowed and broadcast as an unsigned transaction.
         let intent = make_pay_intent();
         let rpc = MockRpcClient::new("eip155:8453");
-        let failing_signer =
-            |_: &str, _: &[u8]| Err(IntentError::Execution("key-agent unavailable".to_string()));
+        let failing_signer = |_: &SigningKeyRef, _: &[u8]| {
+            Err(IntentError::Execution("key-agent unavailable".to_string()))
+        };
         let err = execute_intent(&intent, &rpc, failing_signer).await.expect_err("must error");
         assert!(
             err.to_string().contains("signing failed"),

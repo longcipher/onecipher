@@ -64,6 +64,38 @@ pub enum IntentKind {
     },
 }
 
+/// A resolved reference to the signing key used to execute an intent.
+///
+/// `Intent::session_key_id` carries the *session* key identifier (the closest
+/// available identifier on `Intent` for selecting a signing key). The actual
+/// wallet/HD key used for signing is resolved by the caller (the CLI, which
+/// talks to the Key-Agent over UDS). `SigningKeyRef` makes that resolution
+/// boundary explicit at the `execute_intent` signer-closure boundary so a
+/// session key id cannot be accidentally passed where a wallet key ref is
+/// expected (and vice versa). It is a newtype over `String` to preserve the
+/// wire/serialization shape while gaining type-level distinction.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SigningKeyRef(pub String);
+
+impl SigningKeyRef {
+    /// Borrow the inner key reference.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for SigningKeyRef {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl From<String> for SigningKeyRef {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 /// Message encoding format.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum MessageEncoding {

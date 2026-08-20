@@ -362,34 +362,11 @@ fn test_cli_binary_name_is_onecipher() {
 // duration of its body.
 // ===========================================================================
 
-use std::sync::MutexGuard;
-
-static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// RAII guard that redirects `HOME` to an isolated temp dir and restores the
-/// original value on drop. Serializes against all other HOME-mutating tests.
-struct HomeGuard {
-    _lock: MutexGuard<'static, ()>,
-    _dir: tempfile::TempDir,
-}
-
-impl HomeGuard {
-    /// Create an isolated HOME. The `HOME` env var points at the returned
-    /// temp dir for the guard's lifetime. Tests that create wallets, secrets,
-    /// keys, etc. must hold this guard.
-    fn new() -> Self {
-        let lock = HOME_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let dir = tempfile::tempdir().expect("create temp HOME dir");
-        let path = dir.path().to_path_buf();
-        set_env("HOME", &path.to_string_lossy());
-        Self { _lock: lock, _dir: dir }
-    }
-
-    /// The isolated home directory path.
-    fn path(&self) -> &std::path::Path {
-        self._dir.path()
-    }
-}
+// `HomeGuard` and the shared `HOME_LOCK` live in `crate::test_util` so that
+// every HOME-mutating test in the crate (this module AND `wallet_rpc`) serializes
+// through the SAME lock. Two independent locks would let tests from different
+// modules race on the process-global `HOME` env var.
+use crate::test_util::HomeGuard;
 
 /// Run a parsed CLI through the real dispatch with a mock NetAgentClient.
 /// Local commands (wallet/secret/age/...) hit the isolated `HOME`; RPC
@@ -1958,8 +1935,8 @@ fn test_keyagent_real_uds_session_key_roundtrip() {
 
 #[test]
 fn test_intent_submit_simulate_execute_lifecycle_mock() {
-    let pay_json =
-        r#"{"type":"Pay","amount":"10.5 USDC","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
+    // Native Pay amount is a hex wei string (1 * 10^18 wei).
+    let pay_json = r#"{"type":"Pay","amount":"0x0DE0B6B3A7640000","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
 
     // simulate → Ok (mock)
     run_ok(&[

@@ -465,15 +465,6 @@ const USD_EPSILON: f64 = 1e-9;
 // 11-step evaluation — each step is a named function (Readability Priorities)
 // ---------------------------------------------------------------------------
 
-/// Step 1: Parse the request. (Structural no-op — `PayRequest` arrives pre-parsed
-/// from the wire. This step exists for explicitness in the 11-step flow.)
-///
-/// **Deviation note:** the "parse" step is structurally present but a no-op since
-/// `PayRequest` arrives pre-parsed from the wire.
-const fn step_1_parse_request(req: &PayRequest) -> &PayRequest {
-    req
-}
-
 /// Step 2: Load the policy. Returns `Err(PolicyMissing)` if no policy is loaded.
 fn step_2_load_policy(state: &PolicyState) -> Result<&PolicyV2, DenyReason> {
     state.policy.as_ref().ok_or(DenyReason::PolicyMissing)
@@ -637,9 +628,6 @@ pub fn evaluate_11_step(
     session_key_id: &str,
     state: &mut PolicyState,
 ) -> Decision {
-    // Step 1: parse (no-op — PayRequest arrives pre-parsed)
-    let _ = step_1_parse_request(req);
-
     // Resolve "now" — use override for testing, else SystemTime::now()
     let now_unix = state.now_override.unwrap_or_else(current_unix);
     let now_ms = now_unix.saturating_mul(1000);
@@ -776,15 +764,6 @@ mod tests {
                 a.push(alert.clone());
             }
         }
-    }
-
-    // --- Step 1: parse ---
-
-    #[test]
-    fn test_step_1_parse_noop() {
-        let req = test_request();
-        let parsed = step_1_parse_request(&req);
-        assert!(std::ptr::eq(parsed, &raw const req));
     }
 
     // --- Step 2: load policy ---

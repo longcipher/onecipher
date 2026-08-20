@@ -3,6 +3,8 @@ mod cli;
 mod commands;
 mod netagent;
 #[cfg(test)]
+mod test_util;
+#[cfg(test)]
 mod tests;
 mod tui;
 

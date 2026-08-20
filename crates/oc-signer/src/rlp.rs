@@ -71,6 +71,26 @@ pub fn encode_list(items: &[u8]) -> Vec<u8> {
     out
 }
 
+/// RLP-encode a non-negative integer as a minimal big-endian scalar.
+///
+/// Per RLP, the integer `0` is encoded as the empty string (`0x80`), and a
+/// single byte `< 0x80` is encoded as that byte directly. This is the
+/// canonical encoding for transaction fields (chain id, nonce, gas, value…).
+pub fn encode_u64(val: u64) -> Vec<u8> {
+    encode_minimal_int(&val.to_be_bytes())
+}
+
+/// RLP-encode a `u128` integer (e.g. wei value) as a minimal big-endian scalar.
+pub fn encode_u128(val: u128) -> Vec<u8> {
+    encode_minimal_int(&val.to_be_bytes())
+}
+
+/// Encode a big-endian integer byte array as RLP, stripping leading zeros.
+fn encode_minimal_int(bytes: &[u8]) -> Vec<u8> {
+    let start = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len());
+    encode_bytes(&bytes[start..])
+}
+
 fn encode_length(len: usize, offset: u8) -> Vec<u8> {
     if len < 56 {
         vec![offset + len as u8]

@@ -1,0 +1,294 @@
+//! Loopback JSON-RPC 2.0 WalletSigner server.
+//!
+//! OneCipher acts as the signing backend ("WalletSigner") for the sister
+//! project `ledgerflow`. This server exposes a challenge method plus the
+//! signing methods that
+//! [`ledgerflow`](https://github.com/longcipher/ledgerflow)'s
+//! `LocalRpcSigner` client calls over HTTP POST to `http://127.0.0.1:18080`:
+//!
+//! - `ledgerflow_generate_challenge` — mint a fresh passkey challenge for the configured wallet
+//!   binding.
+//! - `ledgerflow_keys` — list the signer's public keys.
+//! - `ledgerflow_sign` — sign an arbitrary message (base64 raw bytes).
+//! - `ledgerflow_sign_payment` — sign an EVM payment, returning a raw (RLP-encoded, signed)
+//!   transaction.
+//!
+//! The transport is a single JSON-RPC 2.0 request per POST; binary fields are
+//! base64 STANDARD encoded. Every stateful call must carry an `auth`
+//! object derived from `ledgerflow_generate_challenge`. The server binds to
+//! loopback only (R12c).
+//!
+//! # Module layout
+//!
+//! This previously-lived in a single 640-line file. It is now split to honour
+//! the single-responsibility boundary:
+//! - [`state`] — [`SignerState`] (key material lifecycle) + JSON-RPC wire types.
+//! - [`auth`] — passkey challenge minting + per-request authorization.
+//! - [`handlers`] — the concrete `ledgerflow_*` method implementations.
+//! - this `mod` — the axum router, response helpers, and daemon/CLI entry points.
+
+mod auth;
+mod handlers;
+mod state;
+
+use std::net::SocketAddr;
+
+use axum::{
+    Json,
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+};
+use serde_json::{Value, json};
+pub(crate) use state::SignerState;
+
+use crate::CliError;
+
+/// Single entry point: POST body is a JSON-RPC 2.0 request. Dispatches to the
+/// `ledgerflow_*` methods in [`handlers`], gating the stateful ones behind
+/// [`auth::require_authorization`].
+async fn rpc(State(state): State<SignerState>, Json(req): Json<state::RpcRequest>) -> Response {
+    if req.jsonrpc() != "2.0" {
+        return error_response(req.id(), state::RpcError::new(-32600, "invalid JSON-RPC version"));
+    }
+    let id = req.id().clone();
+    let result = match req.method() {
+        "ledgerflow_generate_challenge" => match auth::validate_params(req.params()) {
+            Ok(p) => auth::handle_generate_challenge(&p),
+            Err(e) => Err(e),
+        },
+        "ledgerflow_keys" => match auth::validate_params(req.params()) {
+            Ok(p) => match auth::require_authorization(&state, &p) {
+                Ok(()) => handlers::handle_keys(&state),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        },
+        "ledgerflow_sign" => match auth::validate_params(req.params()) {
+            Ok(p) => match auth::require_authorization(&state, &p) {
+                Ok(()) => handlers::handle_sign(&state, &p),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        },
+        "ledgerflow_sign_payment" => match auth::validate_params(req.params()) {
+            Ok(p) => match auth::require_authorization(&state, &p) {
+                Ok(()) => handlers::handle_sign_payment(&state, &p),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        },
+        other => Err(state::RpcError::new(-32601, format!("method not found: {other}"))),
+    };
+
+    match result {
+        Ok(value) => success_response(&id, value),
+        Err(e) => error_response(&id, e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Response helpers
+// ---------------------------------------------------------------------------
+
+fn success_response(id: &Value, result: Value) -> Response {
+    (StatusCode::OK, Json(json!({ "jsonrpc": "2.0", "id": id, "result": result }))).into_response()
+}
+
+fn error_response(id: &Value, err: state::RpcError) -> Response {
+    (StatusCode::OK, Json(json!({ "jsonrpc": "2.0", "id": id, "error": err }))).into_response()
+}
+
+/// Daemon-resident WalletSigner server settings.
+///
+/// Disabled by default. When `OC_WALLET_RPC_LISTEN` is set to a loopback
+/// address, the daemon exposes the WalletSigner server there for wallet
+/// `default`, index 0 unless overridden with `OC_WALLET_RPC_WALLET` /
+/// `OC_WALLET_RPC_INDEX`.
+pub(crate) fn daemon_config() -> (String, String, u32) {
+    let listen = std::env::var("OC_WALLET_RPC_LISTEN").unwrap_or_else(|_| "off".into());
+    let wallet = std::env::var("OC_WALLET_RPC_WALLET").unwrap_or_else(|_| "default".to_string());
+    let index = std::env::var("OC_WALLET_RPC_INDEX").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    (listen, wallet, index)
+}
+
+/// Start the loopback WalletSigner JSON-RPC server and block until it exits.
+///
+/// CLI entry point: validates the loopback bind address, builds the signer
+/// state, then drives the serving future on the shared runtime.
+pub(crate) fn serve(listen: &str, wallet: &str, index: u32) -> Result<(), CliError> {
+    let parsed = parse_loopback(listen)?;
+    let state = SignerState::new(wallet, index);
+    crate::shared_runtime().block_on(serve_async(state, parsed))
+}
+
+/// Parse and validate a loopback-only bind address (R12c/R12e).
+pub(crate) fn parse_loopback(listen: &str) -> Result<SocketAddr, CliError> {
+    let parsed: SocketAddr = listen
+        .parse()
+        .map_err(|e| CliError::InvalidArgs(format!("invalid listen address '{listen}': {e}")))?;
+    // R12c/R12e: loopback only.
+    if !parsed.ip().is_loopback() {
+        return Err(CliError::InvalidArgs(format!(
+            "WalletSigner MUST bind to loopback (127.0.0.1) only, got {parsed}"
+        )));
+    }
+    Ok(parsed)
+}
+
+/// Serve the WalletSigner JSON-RPC 2.0 endpoint on `parsed` until cancelled.
+///
+/// This is the daemon-reusable core: it binds the loopback socket and serves
+/// the axum router without driving its own runtime, so callers (the CLI
+/// `serve` command or the daemon's async task loop) can control its lifetime.
+pub(crate) async fn serve_async(state: SignerState, parsed: SocketAddr) -> Result<(), CliError> {
+    let app = axum::Router::new().route("/", post(rpc)).with_state(state.clone());
+
+    let listener = tokio::net::TcpListener::bind(parsed).await.map_err(CliError::Io)?;
+    eprintln!(
+        "WalletSigner JSON-RPC server listening on http://{} (wallet '{}', index {})",
+        listener.local_addr().map_err(CliError::Io)?,
+        state.wallet(),
+        state.index()
+    );
+    axum::serve(listener, app).await.map_err(CliError::Io)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use base64::Engine;
+
+    use super::*;
+    use crate::commands::wallet_rpc::{
+        auth::{auth_params_for_wallet, require_authorization},
+        handlers::{handle_keys, handle_sign, handle_sign_payment},
+    };
+    // Shared `HomeGuard`/`HOME_LOCK` from `crate::test_util` — the single lock
+    // that serializes ALL HOME-mutating tests in the crate (this module AND
+    // `tests.rs`), so they cannot race on the process-global `HOME` env var.
+    use crate::test_util::HomeGuard;
+
+    const TEST_PASSPHRASE: &str = "test-passphrase";
+
+    /// Create a fresh wallet in a temporary vault and return a `SignerState`
+    /// pointed at it, so the wire handlers run against real key material.
+    fn test_state() -> SignerState {
+        let vault = tempfile::tempdir().expect("tempdir");
+        oc_wallet::create_wallet("test", Some(12), Some(TEST_PASSPHRASE), Some(vault.path()))
+            .expect("create wallet");
+        SignerState::from_parts(
+            "test".to_string(),
+            0,
+            zeroize::Zeroizing::new(TEST_PASSPHRASE.to_string()),
+            Some(std::sync::Arc::new(vault.keep())),
+        )
+    }
+
+    fn keys_json() -> Value {
+        handle_keys(&test_state()).expect("keys should succeed")
+    }
+
+    #[test]
+    fn keys_returns_both_algs() {
+        let v = keys_json();
+        let arr = v.as_array().expect("result must be an array");
+        assert_eq!(arr.len(), 2, "expected ed25519 + secp256k1 keys");
+        let algs: Vec<&str> = arr.iter().map(|k| k["alg"].as_str().unwrap_or("")).collect();
+        assert!(algs.contains(&"ed25519"));
+        assert!(algs.contains(&"secp256k1"));
+        for k in arr {
+            let pk = k["public_key"].as_str().expect("public_key must be a string");
+            let bytes = base64::engine::general_purpose::STANDARD.decode(pk).expect("valid base64");
+            assert!(!bytes.is_empty());
+        }
+    }
+
+    #[test]
+    fn sign_ed25519_returns_valid_signature() {
+        let params = json!({
+            "domain": "warrant",
+            "message": base64::engine::general_purpose::STANDARD.encode(b"hello ledgerflow"),
+        });
+        let out = handle_sign(&test_state(), &params).expect("sign should succeed");
+        assert_eq!(out["signer"]["alg"], "ed25519");
+        assert_eq!(out["signature"]["alg"], "ed25519");
+        let sig = base64::engine::general_purpose::STANDARD
+            .decode(out["signature"]["value"].as_str().unwrap())
+            .expect("valid base64 sig");
+        assert_eq!(sig.len(), 64, "ed25519 signature must be 64 bytes");
+    }
+
+    #[test]
+    fn sign_secp256k1_returns_valid_signature() {
+        let params = json!({
+            "message": base64::engine::general_purpose::STANDARD.encode(b"hello"),
+            "key": { "alg": "Secp256k1" },
+        });
+        let out = handle_sign(&test_state(), &params).expect("sign should succeed");
+        assert_eq!(out["signer"]["alg"], "secp256k1");
+        let sig = base64::engine::general_purpose::STANDARD
+            .decode(out["signature"]["value"].as_str().unwrap())
+            .expect("valid base64 sig");
+        assert_eq!(sig.len(), 65, "secp256k1 EIP-191 signature must be 65 bytes");
+    }
+
+    #[test]
+    fn sign_rejects_missing_message() {
+        let params = json!({ "domain": "proof" });
+        let err = handle_sign(&test_state(), &params).unwrap_err();
+        assert_eq!(err.code(), -32602);
+    }
+
+    #[test]
+    fn sign_payment_builds_eip1559_raw_transaction() {
+        let params = json!({
+            "chain_id": "eip155:8453",
+            "asset": "eip155:8453/slip44:60",
+            "amount": "1000000000000000",
+            "payee": "0x1111111111111111111111111111111111111111",
+            "nonce": "0",
+        });
+        let out =
+            handle_sign_payment(&test_state(), &params).expect("payment signing should succeed");
+        let raw = out["raw_transaction"].as_str().expect("raw_transaction must be a string");
+        assert!(raw.starts_with("0x02"), "must be an EIP-1559 (type 0x02) transaction, got {raw}");
+        let bytes = hex::decode(raw.strip_prefix("0x").unwrap()).expect("valid hex");
+        assert!(bytes.len() > 90, "signed tx should be non-trivial in size");
+    }
+
+    #[test]
+    fn sign_payment_rejects_bad_chain() {
+        let params = json!({
+            "chain_id": "solana:mainnet",
+            "payee": "0x1111111111111111111111111111111111111111",
+        });
+        let err = handle_sign_payment(&test_state(), &params).unwrap_err();
+        assert_eq!(err.code(), -32602);
+    }
+
+    #[test]
+    fn authorization_accepts_passkey_bound_to_configured_wallet() {
+        let _home = HomeGuard::new();
+        let state = test_state();
+        let wallet_id = state.configured_wallet_id().expect("resolve wallet id");
+        let params = auth_params_for_wallet(&wallet_id, "cred-wallet-rpc-ok");
+        require_authorization(&state, &params).expect("bound passkey must authorize");
+    }
+
+    #[test]
+    fn authorization_rejects_passkey_bound_to_different_wallet() {
+        let _home = HomeGuard::new();
+        let state = test_state();
+        let params = auth_params_for_wallet("other-wallet-id", "cred-wallet-rpc-mismatch");
+        let err =
+            require_authorization(&state, &params).expect_err("foreign wallet binding must fail");
+        assert_eq!(err.code(), -32602);
+        assert!(err.message().contains("configured wallet"));
+    }
+}
