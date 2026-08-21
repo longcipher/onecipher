@@ -20,6 +20,7 @@ pub mod request;
 pub mod response;
 pub mod sandbox;
 pub mod server;
+pub mod session_keys;
 pub mod signing_core_error;
 pub mod telemetry;
 
@@ -27,6 +28,7 @@ pub use audit::{AuditEntry, AuditError, AuditLog, EventType};
 pub use engine::{SignRequest, SignResult, SigningEngine};
 pub use error::KeyAgentError;
 pub use frame::{FrameClient, FrameClientError, FrameError, read_frame, write_frame};
+pub use handler::{AgentContext, dispatch, dispatch_with};
 pub use key_ops::{decrypt_mnemonic, derive_chain_key};
 // Re-export key types for convenience (formerly in oc-signing-core).
 pub use oc_core::{Passphrase, UnlockToken, WalletId};
@@ -36,8 +38,9 @@ pub use passkey::{PasskeyError, PasskeyPubkey, PasskeyVerifier};
 pub use proto::*;
 pub use request::{KeyAgentRequest, KeyAgentRequestKind};
 pub use response::{KeyAgentResponse, KeyAgentResponseKind};
-pub use sandbox::apply_sandbox;
+pub use sandbox::{apply_sandbox, apply_signing_thread_sandbox};
 pub use server::{handle_conn, run};
+pub use session_keys::{SessionKeyRecord, SessionKeyStatus, SessionKeyStore, SessionKeyStoreError};
 pub use signing_core_error::SigningCoreError;
 pub use telemetry::{
     RecordKind, TelemetryBatch, TelemetryBuffer, TelemetryLevel, TelemetryRecord,

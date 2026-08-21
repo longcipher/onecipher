@@ -4276,6 +4276,7 @@ dependencies = [
  "oc-core",
  "oc-keyagent",
  "oc-netagent",
+ "oc-policy",
  "oc-secret",
  "oc-signer",
  "oc-vault",
@@ -4306,6 +4307,7 @@ dependencies = [
 name = "oc-core"
 version = "0.1.0"
 dependencies = [
+ "hkdf 0.13.0",
  "jiff",
  "oc-crypto",
  "serde",
@@ -4329,6 +4331,7 @@ dependencies = [
  "proptest",
  "secrecy",
  "sha2 0.11.0",
+ "subtle",
  "thiserror 2.0.20",
  "windows-sys 0.61.2",
  "zeroize",
@@ -4379,7 +4382,6 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "sha3 0.12.0",
  "tempfile",
  "thiserror 2.0.20",

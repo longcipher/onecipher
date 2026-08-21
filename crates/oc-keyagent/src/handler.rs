@@ -19,69 +19,106 @@ use crate::{
     passkey::{PasskeyPubkeyStore, PasskeyVerifier, StoredPasskeyPubkey},
     request::{KeyAgentRequest, KeyAgentRequestKind},
     response::KeyAgentResponse,
+    session_keys::{SessionKeyRecord, SessionKeyStatus, SessionKeyStore},
 };
 
 // ---------------------------------------------------------------------------
-// Global state
+// Agent context (dependency-injected state)
 // ---------------------------------------------------------------------------
 
-/// Process-wide audit log. Initialized lazily on first use.
-/// Stage 0: device key is persisted via DeviceKeyStore (survives restarts).
-static GLOBAL_AUDIT_LOG: OnceLock<Arc<Mutex<AuditLog>>> = OnceLock::new();
+/// Stable machine-readable prefixes for `Error` responses so callers can
+/// branch programmatically instead of string-matching prose.
+///
+/// Wire compatibility: codes are prepended to the human message
+/// (`"E_DECRYPT: wallet decrypt failed: ..."`) rather than changing the proto
+/// shape.
+pub mod err_code {
+    pub const AUTH: &str = "E_AUTH";
+    pub const PARAM: &str = "E_PARAM";
+    pub const WALLET: &str = "E_WALLET";
+    pub const DECRYPT: &str = "E_DECRYPT";
+    pub const SESSION_KEY: &str = "E_SESSION_KEY";
+    pub const AUDIT: &str = "E_AUDIT";
+    pub const INTERNAL: &str = "E_INTERNAL";
+}
 
-fn global_audit_log() -> Result<Arc<Mutex<AuditLog>>, KeyAgentError> {
-    if let Some(log) = GLOBAL_AUDIT_LOG.get() {
-        return Ok(log.clone());
+/// Format a coded error message: `"E_CODE: detail"`.
+fn coded(code: &str, detail: impl std::fmt::Display) -> String {
+    format!("{code}: {detail}")
+}
+
+/// All mutable Key-Agent state, owned by a single injectable context.
+///
+/// Replaces the previous four scattered `static OnceLock` globals. The
+/// production entry points ([`dispatch`] / [`server::run`]) use the lazily
+/// initialized [`default_context`]; embedders may construct their own context
+/// and call [`dispatch_with`] for full isolation (and parallel tests).
+pub struct AgentContext {
+    audit_log: Arc<Mutex<AuditLog>>,
+    /// When true, a signing request whose audit append fails is denied
+    /// instead of allowed (fail-closed compliance posture).
+    pub audit_fail_closed: bool,
+    passkey_verifiers: Arc<Mutex<HashMap<String, PasskeyVerifier>>>,
+    sign_auth_internal_token: Arc<Mutex<Option<Vec<u8>>>>,
+    session_keys: SessionKeyStore,
+}
+
+static DEFAULT_CONTEXT: OnceLock<AgentContext> = OnceLock::new();
+
+/// Lazily initialized shared context backing the historical free-function API.
+fn default_context() -> &'static AgentContext {
+    DEFAULT_CONTEXT.get_or_init(|| match AgentContext::open_default() {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            // A missing/unreadable HOME is fatal for a signing agent; panic
+            // here mirrors the previous behavior where opening the audit log
+            // failed the whole request path. Tests never hit this because
+            // they construct isolated contexts or run under a temp HOME.
+            panic!("oc-keyagent: failed to initialize agent context: {e}");
+        }
+    })
+}
+
+impl AgentContext {
+    /// Build a context over the default on-disk stores (`~/.onecipher`).
+    pub fn open_default() -> Result<Self, KeyAgentError> {
+        let path = oc_core::paths::state_path("logs/audit.jsonl")
+            .map_err(|e| KeyAgentError::Internal(e.to_string()))?;
+        // Stage 0: persistent device key instead of per-process random key.
+        let store = DeviceKeyStore::open_default().map_err(|e| {
+            KeyAgentError::Internal(format!("failed to open device key store: {e}"))
+        })?;
+        let device_key = store.load_or_generate().map_err(|e| {
+            KeyAgentError::Internal(format!("failed to load/generate device key: {e}"))
+        })?;
+        let audit_log = AuditLog::open(&path, "keyagent", device_key)
+            .map_err(|e| KeyAgentError::Internal(format!("failed to open audit log: {e}")))?;
+        let session_keys = SessionKeyStore::open_default()
+            .map_err(|e| KeyAgentError::Internal(format!("session key store: {e}")))?;
+        Ok(Self {
+            audit_log: Arc::new(Mutex::new(audit_log)),
+            audit_fail_closed: false,
+            passkey_verifiers: Arc::new(Mutex::new(HashMap::new())),
+            sign_auth_internal_token: Arc::new(Mutex::new(None)),
+            session_keys,
+        })
     }
-    // L3 fix: HOME must be set — refuse to fall back to /tmp (world-readable,
-    // survives reboot, leaks audit trail to a shared location).
-    let path = oc_core::paths::state_path("logs/audit.jsonl")
-        .map_err(|e| KeyAgentError::Internal(e.to_string()))?;
-    let device_id = "keyagent".to_string();
-    // Stage 0: persistent device key instead of per-process random key.
-    let store = DeviceKeyStore::open_default()
-        .map_err(|e| KeyAgentError::Internal(format!("failed to open device key store: {e}")))?;
-    let device_key = store
-        .load_or_generate()
-        .map_err(|e| KeyAgentError::Internal(format!("failed to load/generate device key: {e}")))?;
-    let log = AuditLog::open(&path, &device_id, device_key)
-        .map_err(|e| KeyAgentError::Internal(format!("failed to open audit log: {e}")))?;
-    let arc = Arc::new(Mutex::new(log));
-    // set may fail on race — another thread won. Return the winner's arc.
-    match GLOBAL_AUDIT_LOG.set(arc.clone()) {
-        Ok(()) => Ok(arc),
-        Err(winner) => Ok(winner),
+
+    /// Opt into denying signing operations when their audit append fails.
+    pub fn set_audit_fail_closed(&mut self, fail_closed: bool) {
+        self.audit_fail_closed = fail_closed;
     }
 }
 
-/// P0-2: Process-wide shared Passkey verifier table, keyed by `credential_id`.
+/// Process-wide shared Passkey verifier table, keyed by `credential_id`.
 ///
-/// Per the challenge lifecycle fix: a fresh [`PasskeyVerifier`] was being
-/// created per `verify_passkey()` call, leaving `pending_challenges` always
-/// empty and causing every verify to return `Replay`. This shared map is
-/// populated lazily — [`handle_generate_challenge`] inserts a verifier on
-/// first challenge issuance for a credential_id, and [`verify_passkey`]
-/// reuses the same instance so the challenge is found in
-/// `pending_challenges`.
+/// Per the challenge lifecycle fix: challenges generated by
+/// [`handle_generate_challenge`] are visible to [`verify_passkey`] through
+/// this shared table so single-use replay protection holds across requests.
 ///
 /// Each [`PasskeyVerifier`] is bound to one credential_id (and its stored
-/// public key), so a `HashMap<credential_id, PasskeyVerifier>` is needed to
-/// support multiple registered Passkeys concurrently.
-static GLOBAL_PASSKEY_VERIFIERS: OnceLock<Arc<Mutex<HashMap<String, PasskeyVerifier>>>> =
-    OnceLock::new();
-
-fn global_passkey_verifiers() -> Arc<Mutex<HashMap<String, PasskeyVerifier>>> {
-    GLOBAL_PASSKEY_VERIFIERS.get_or_init(|| Arc::new(Mutex::new(HashMap::new()))).clone()
-}
-
-/// Daemon-internal capability token used to authorize WalletConnect-originated
-/// auth-class signing after origin/approval checks have already completed.
-static SIGN_AUTH_INTERNAL_TOKEN: OnceLock<Arc<Mutex<Option<Vec<u8>>>>> = OnceLock::new();
-
-fn sign_auth_internal_token() -> Arc<Mutex<Option<Vec<u8>>>> {
-    SIGN_AUTH_INTERNAL_TOKEN.get_or_init(|| Arc::new(Mutex::new(None))).clone()
-}
-
+/// public key), supporting multiple registered Passkeys concurrently.
+///
 /// Default vault path (`None` = use `~/.onecipher`).
 fn vault_path() -> Option<&'static std::path::Path> {
     None
@@ -91,53 +128,158 @@ fn vault_path() -> Option<&'static std::path::Path> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Load the persistent device key.
+///
+/// The device key — not the per-request Passkey signature — is the stable
+/// secret the vault passphrase is derived from. Deriving the decryption
+/// passphrase from a single-use challenge signature (the pre-C2 design) made
+/// decryption impossible by construction: every request presents a fresh
+/// signature, so the derived passphrase never matched the one the vault was
+/// encrypted under. The Passkey proof is the *authorization* gate; the device
+/// key is the *decryption* secret. The two roles must not be conflated.
+fn load_device_key() -> Result<Vec<u8>, String> {
+    let store = DeviceKeyStore::open_default()
+        .map_err(|e| coded(err_code::INTERNAL, format!("device key store: {e}")))?;
+    Ok(store
+        .load_or_generate()
+        .map_err(|e| coded(err_code::INTERNAL, format!("device key: {e}")))?
+        .to_bytes()
+        .to_vec())
+}
+
+/// Decrypt the wallet's chain signing key using the given unlock token.
+fn attempt_decrypt_with_token(
+    wallet_id: &str,
+    chain_type: oc_core::ChainType,
+    token: &oc_core::UnlockToken,
+) -> Result<oc_signer::SecretBytes, String> {
+    let pp = token
+        .to_passphrase()
+        .map_err(|e| coded(err_code::DECRYPT, format!("passphrase derivation: {e}")))?;
+    oc_wallet::ops::decrypt_signing_key(wallet_id, chain_type, pp.as_bytes(), None, vault_path())
+        .map_err(|e| coded(err_code::DECRYPT, format!("wallet decrypt failed: {e}")))
+}
+
+/// Whether the wallet decrypts under `token` for ANY supported curve family.
+///
+/// The unlock probe must not be single-curve: an Ed25519-only wallet would
+/// otherwise fail an EVM-only probe at unlock time even though signing for
+/// its own chains works fine. Trying both curve families mirrors the two
+/// derivation paths [`oc_core::KeyType`] wallets can take.
+fn wallet_decrypts_with_token(wallet_id: &str, token: &oc_core::UnlockToken) -> bool {
+    [
+        oc_core::ChainType::Evm,    // secp256k1 derivation path
+        oc_core::ChainType::Solana, // ed25519 derivation path
+    ]
+    .iter()
+    .any(|ct| attempt_decrypt_with_token(wallet_id, *ct, token).is_ok())
+}
+
 /// Load a wallet from the vault, decrypt it, and derive the chain signing key.
 /// Returns `(key, signer)`. Key is zeroized on drop.
 ///
-/// `unlock_token` carries Passkey-derived key material. The token's passphrase
-/// is derived (validating the token) and used to decrypt the wallet. A valid
-/// unlock token is REQUIRED — the empty-passphrase backward-compat path was
-/// removed (C1 fix) because it allowed signing without a freshly-verified
-/// Passkey.
+/// The vault passphrase is derived from the **device key** via
+/// [`oc_core::UnlockToken`] (v2 HKDF derivation first, legacy SHA-256
+/// fallback for wallets created before the v2 migration). Callers MUST have
+/// verified a fresh Passkey authorization (or the daemon-internal SignAuth
+/// token) before calling — this function performs no authentication itself.
+///
+/// NOTE: the historical "empty-passphrase" fallback was intentionally removed
+/// (C1 fix); see git history for the migration instructions.
 fn load_chain_key(
     wallet_id: &str,
     chain_id: &str,
-    unlock_token: &oc_core::UnlockToken,
 ) -> Result<(oc_signer::SecretBytes, Box<dyn oc_signer::ChainSigner>), String> {
-    let chain = oc_core::parse_chain(chain_id).map_err(|e| format!("invalid chain: {e}"))?;
+    let chain = oc_core::parse_chain(chain_id)
+        .map_err(|e| coded(err_code::PARAM, format!("invalid chain: {e}")))?;
+    let device_key = load_device_key()?;
 
-    let pp = unlock_token.to_passphrase().map_err(|e| format!("passphrase derivation: {e}"))?;
-    let pp_bytes: &[u8] = pp.as_bytes();
+    // Primary: v2 HKDF derivation.
+    let v2_err = match oc_core::UnlockToken::new(wallet_id.to_string(), &device_key)
+        .map_err(|e| coded(err_code::DECRYPT, format!("token derivation: {e}")))
+        .and_then(|t| attempt_decrypt_with_token(wallet_id, chain.chain_type, &t))
+    {
+        Ok(key) => {
+            let signer = oc_signer::signer_for_chain(chain.chain_type);
+            return Ok((key, signer));
+        }
+        Err(e) => e,
+    };
 
-    let key = oc_wallet::ops::decrypt_signing_key(
-        wallet_id,
-        chain.chain_type,
-        pp_bytes,
-        None,
-        vault_path(),
-    )
-    .map_err(|e| format!("wallet decrypt failed: {e}"))?;
-    // NOTE: the legacy "empty-passphrase" fallback was intentionally removed
-    // (C1 fix). Pre-device-bound vaults must be migrated with
-    // `onecipher wallet migrate` before they can be unlocked; silently
-    // retrying with `b""` reintroduced a signing-without-passphrase path.
-    let signer = oc_signer::signer_for_chain(chain.chain_type);
-    Ok((key, signer))
+    // Fallback: legacy SHA-256 derivation (pre-v2 wallets).
+    match oc_core::UnlockToken::new_legacy_sha256(wallet_id.to_string(), &device_key)
+        .map_err(|e| coded(err_code::DECRYPT, format!("legacy token derivation: {e}")))
+        .and_then(|t| attempt_decrypt_with_token(wallet_id, chain.chain_type, &t))
+    {
+        Ok(key) => {
+            let signer = oc_signer::signer_for_chain(chain.chain_type);
+            Ok((key, signer))
+        }
+        // Report the primary (v2) failure — it is what a freshly migrated
+        // wallet would hit again.
+        Err(_) => Err(v2_err),
+    }
 }
 
-/// Append an audit entry. Silently logs on failure (audit must not break ops).
-fn audit(event_type: EventType, session_key_id: Option<&str>, payload: serde_json::Value) {
-    let audit_log = match global_audit_log() {
-        Ok(log) => log,
-        Err(e) => {
-            warn!(target: "oc-keyagent::audit", "audit log unavailable: {e}");
-            return;
-        }
-    };
-    if let Ok(mut log) = audit_log.lock() {
-        if let Err(e) = log.append(event_type, session_key_id.map(String::from), payload) {
-            warn!(target: "oc-keyagent::audit", "audit append failed: {e}");
-        }
+/// Append an audit entry.
+///
+/// Returns `Ok(())` on success. On append failure the event is logged via
+/// `tracing` and — when the context opts into [`AgentContext::audit_fail_closed`]
+/// semantics via [`record_audit_strict`] — surfaced to the caller so signing
+/// can be denied rather than silently unlogged.
+fn record_audit(
+    ctx: &AgentContext,
+    event_type: EventType,
+    session_key_id: Option<&str>,
+    payload: serde_json::Value,
+) {
+    if let Err(e) = log_audit(ctx, event_type, session_key_id, payload) {
+        warn!(target: "oc-keyagent::audit", "audit append failed: {e}");
+    }
+}
+
+/// Like [`record_audit`] but propagates the failure to the caller for
+/// fail-closed enforcement.
+fn record_audit_strict(
+    ctx: &AgentContext,
+    event_type: EventType,
+    session_key_id: Option<&str>,
+    payload: serde_json::Value,
+) -> Result<(), String> {
+    log_audit(ctx, event_type, session_key_id, payload)
+        .map_err(|e| coded(err_code::AUDIT, format!("audit unavailable: {e}")))
+}
+
+fn log_audit(
+    ctx: &AgentContext,
+    event_type: EventType,
+    session_key_id: Option<&str>,
+    payload: serde_json::Value,
+) -> Result<(), KeyAgentError> {
+    let mut log =
+        ctx.audit_log.lock().map_err(|_| KeyAgentError::Internal("audit mutex poisoned".into()))?;
+    log.append(event_type, session_key_id.map(String::from), payload)
+        .map(|_| ())
+        .map_err(|e| KeyAgentError::Internal(format!("audit append: {e}")))
+}
+
+/// Reject the request when `session_key_id` is non-empty but does not refer
+/// to an active (created, non-revoked) session key. Empty ids mean
+/// "no session key" and pass through unchanged.
+fn ensure_session_key_active(
+    ctx: &AgentContext,
+    session_key_id: &str,
+) -> Result<(), KeyAgentResponse> {
+    if session_key_id.is_empty() {
+        return Ok(());
+    }
+    match ctx.session_keys.is_active(session_key_id) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(KeyAgentResponse::error(coded(
+            err_code::SESSION_KEY,
+            format!("session key '{session_key_id}' is not active"),
+        ))),
+        Err(e) => Err(KeyAgentResponse::error(coded(err_code::SESSION_KEY, e))),
     }
 }
 
@@ -149,54 +291,77 @@ fn now_unix() -> u64 {
 /// Verify a [`PasskeyAuthorization`] against the stored public key.
 ///
 /// Returns `Ok(StoredPasskeyPubkey)` on success — the caller may inspect
-/// `wallet_id` for binding checks (e.g. `UnlockVault`). Returns
+/// `wallet_id` for binding checks (see [`verify_passkey_for`]). Returns
 /// `Err(KeyAgentResponse)` on any failure (store error, unknown credential,
 /// forged signature) so the caller can propagate it via `Ok(resp)`.
 ///
-/// P0-2 lifecycle fix: the verifier is now looked up from the process-wide
-/// [`GLOBAL_PASSKEY_VERIFIERS`] map (keyed by `credential_id`) so that
-/// challenges generated by [`handle_generate_challenge`] are visible here.
-/// If no verifier exists yet for this `credential_id`, one is lazily created
-/// — but its `pending_challenges` set will be empty, so the client MUST have
-/// called `GenerateChallenge` first or `verify()` will return `Replay`.
+/// The verifier is looked up from the context's shared verifier map (keyed by
+/// `credential_id`) so challenges generated by [`handle_generate_challenge`]
+/// are visible here. If no verifier exists yet, one is lazily created — its
+/// `pending_challenges` set will be empty, so the client MUST have called
+/// `GenerateChallenge` first or `verify()` returns `Replay`.
 fn verify_passkey(
+    ctx: &AgentContext,
     auth: &crate::proto::PasskeyAuthorization,
 ) -> Result<StoredPasskeyPubkey, KeyAgentResponse> {
     let store = match PasskeyPubkeyStore::open_default() {
         Ok(s) => s,
-        Err(e) => return Err(KeyAgentResponse::error(format!("passkey store: {e}"))),
+        Err(e) => {
+            return Err(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                format!("passkey store: {e}"),
+            )))
+        }
     };
     let stored = match store.get(&auth.credential_id) {
-        Some(s) => s,
-        None => return Err(KeyAgentResponse::error("passkey not registered")),
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return Err(KeyAgentResponse::error(coded(err_code::AUTH, "passkey not registered")))
+        }
+        Err(e) => {
+            return Err(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                format!("passkey store: {e}"),
+            )))
+        }
     };
 
-    let verifiers_map = global_passkey_verifiers();
-    let mut verifiers = match verifiers_map.lock() {
+    let mut verifiers = match ctx.passkey_verifiers.lock() {
         Ok(v) => v,
-        Err(_) => return Err(KeyAgentResponse::error("passkey verifiers mutex poisoned")),
+        Err(_) => {
+            return Err(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                "passkey verifiers mutex poisoned",
+            )))
+        }
     };
 
     // Lazy-init: if GenerateChallenge was never called for this credential_id,
-    // create the verifier on first verify. The pending_challenges set will be
-    // empty, so verify() will return Replay — clients MUST call GenerateChallenge
-    // first to obtain a valid challenge nonce.
+    // create the verifier on first verify. Its pending_challenges set is
+    // empty, so verify() returns Replay — clients MUST call
+    // GenerateChallenge first to obtain a valid challenge nonce.
     if !verifiers.contains_key(&auth.credential_id) {
         let pubkey = match PasskeyPubkeyStore::to_passkey_pubkey(&stored) {
             Ok(k) => k,
-            Err(e) => return Err(KeyAgentResponse::error(format!("passkey pubkey: {e}"))),
+            Err(e) => {
+                return Err(KeyAgentResponse::error(coded(
+                    err_code::AUTH,
+                    format!("passkey pubkey: {e}"),
+                )))
+            }
         };
         verifiers.insert(
             auth.credential_id.clone(),
             PasskeyVerifier::new(pubkey, auth.credential_id.as_bytes().to_vec()),
         );
     }
-    let verifier = verifiers
-        .get_mut(&auth.credential_id)
-        .ok_or_else(|| KeyAgentResponse::error("passkey verifier evicted"))?;
+    let verifier = verifiers.get_mut(&auth.credential_id).ok_or_else(|| {
+        KeyAgentResponse::error(coded(err_code::INTERNAL, "passkey verifier evicted"))
+    })?;
 
     if let Err(e) = verifier.verify(auth) {
-        audit(
+        record_audit(
+            ctx,
             EventType::PasskeyForged,
             None,
             serde_json::json!({"credential_id": auth.credential_id, "error": e.to_string()}),
@@ -206,11 +371,46 @@ fn verify_passkey(
     Ok(stored)
 }
 
-/// Issue a fresh passkey challenge for `credential_id` using the process-wide
-/// verifier table.
+/// Verify a [`PasskeyAuthorization`] AND enforce that it is bound to
+/// `wallet_id`.
+///
+/// Every passkey-gated signing path must go through this variant: skipping
+/// the binding check would let a passkey registered for wallet A authorize
+/// signing for wallet B. Unbound (`wallet_id == ""`) registrations are
+/// rejected — a wildcard credential has no legitimate use; the WebUI dual
+/// registration binds each browser passkey to a concrete wallet at
+/// registration time.
+fn verify_passkey_for(
+    ctx: &AgentContext,
+    auth: &crate::proto::PasskeyAuthorization,
+    wallet_id: &str,
+) -> Result<StoredPasskeyPubkey, KeyAgentResponse> {
+    let stored = verify_passkey(ctx, auth)?;
+    if stored.wallet_id != wallet_id {
+        record_audit(
+            ctx,
+            EventType::AuthFailed,
+            None,
+            serde_json::json!({
+                "reason": "passkey wallet binding mismatch",
+                "bound_wallet": stored.wallet_id,
+                "requested_wallet": wallet_id,
+            }),
+        );
+        return Err(KeyAgentResponse::error(coded(
+            err_code::AUTH,
+            "passkey is not registered for this wallet",
+        )));
+    }
+    Ok(stored)
+}
+
+/// Issue a fresh passkey challenge for `credential_id` using the shared
+/// default context. Convenience shim for out-of-crate callers (CLI wallet-rpc
+/// server); embedders should use [`dispatch_with`] with their own context.
 pub fn generate_passkey_challenge(credential_id: &str) -> Result<Vec<u8>, String> {
     let req = crate::proto::GenerateChallengeRequest { credential_id: credential_id.to_string() };
-    let resp = handle_generate_challenge(&req).map_err(|e| e.to_string())?;
+    let resp = handle_generate_challenge(default_context(), &req).map_err(|e| e.to_string())?;
     let bytes = match resp.kind {
         Some(crate::response::KeyAgentResponseKind::Ok(bytes)) => bytes,
         Some(crate::response::KeyAgentResponseKind::Error(message)) => return Err(message),
@@ -224,9 +424,9 @@ pub fn generate_passkey_challenge(credential_id: &str) -> Result<Vec<u8>, String
     Ok(decoded.challenge)
 }
 
-/// Verify a passkey proof against the process-wide verifier table.
+/// Verify a passkey proof against the shared default context.
 pub fn authorize_passkey(auth: &crate::proto::PasskeyAuthorization) -> Result<(), String> {
-    verify_passkey(auth).map(|_| ()).map_err(|resp| match resp.kind {
+    verify_passkey(default_context(), auth).map(|_| ()).map_err(|resp| match resp.kind {
         Some(crate::response::KeyAgentResponseKind::Error(message)) => message,
         Some(crate::response::KeyAgentResponseKind::Deny(reason)) => format!("denied: {reason:?}"),
         Some(crate::response::KeyAgentResponseKind::Ok(_)) => {
@@ -236,9 +436,15 @@ pub fn authorize_passkey(auth: &crate::proto::PasskeyAuthorization) -> Result<()
     })
 }
 
-/// Install or clear the daemon-internal capability token used by SignAuth.
+/// Install or clear the daemon-internal capability token used by SignAuth,
+/// on the shared default context.
 pub fn set_sign_auth_internal_token(token: Option<Vec<u8>>) {
-    if let Ok(mut slot) = sign_auth_internal_token().lock() {
+    set_sign_auth_internal_token_on(default_context(), token);
+}
+
+/// Context-injected variant of [`set_sign_auth_internal_token`].
+pub fn set_sign_auth_internal_token_on(ctx: &AgentContext, token: Option<Vec<u8>>) {
+    if let Ok(mut slot) = ctx.sign_auth_internal_token.lock() {
         *slot = token;
     }
 }
@@ -247,7 +453,8 @@ pub fn set_sign_auth_internal_token(token: Option<Vec<u8>>) {
 // Dispatch
 // ---------------------------------------------------------------------------
 
-/// Dispatch a request to the appropriate handler.
+/// Dispatch a request to the appropriate handler using the shared default
+/// context. See [`dispatch_with`] for the injectable variant.
 ///
 /// Returns `Ok(response)` for any successfully-processed request,
 /// and `Err(KeyAgentError)` only for unrecoverable dispatcher-level failures
@@ -256,44 +463,59 @@ pub fn set_sign_auth_internal_token(token: Option<Vec<u8>>) {
 /// connection loop can continue serving subsequent requests on the same
 /// connection.
 pub fn dispatch(req: &KeyAgentRequest) -> Result<KeyAgentResponse, KeyAgentError> {
+    dispatch_with(default_context(), req)
+}
+
+/// Dispatch a request against an explicit [`AgentContext`].
+pub fn dispatch_with(
+    ctx: &AgentContext,
+    req: &KeyAgentRequest,
+) -> Result<KeyAgentResponse, KeyAgentError> {
     match &req.kind {
         Some(KeyAgentRequestKind::ListWallets(_)) => handle_list_wallets(),
-        Some(KeyAgentRequestKind::SignTransaction(req)) => handle_sign_transaction(req),
-        Some(KeyAgentRequestKind::SignMessage(req)) => handle_sign_message(req),
-        Some(KeyAgentRequestKind::SignAuth(req)) => handle_sign_auth(req),
-        Some(KeyAgentRequestKind::SignTypedData(req)) => handle_sign_typed_data(req),
-        Some(KeyAgentRequestKind::SignUserOp(req)) => handle_sign_user_op(req),
-        Some(KeyAgentRequestKind::CreateSessionKey(req)) => handle_create_session_key(req),
-        Some(KeyAgentRequestKind::RevokeSessionKey(req)) => handle_revoke_session_key(req),
+        Some(KeyAgentRequestKind::SignTransaction(req)) => handle_sign_transaction(ctx, req),
+        Some(KeyAgentRequestKind::SignMessage(req)) => handle_sign_message(ctx, req),
+        Some(KeyAgentRequestKind::SignAuth(req)) => handle_sign_auth(ctx, req),
+        Some(KeyAgentRequestKind::SignTypedData(req)) => handle_sign_typed_data(ctx, req),
+        Some(KeyAgentRequestKind::SignUserOp(req)) => handle_sign_user_op(ctx, req),
+        Some(KeyAgentRequestKind::CreateSessionKey(req)) => handle_create_session_key(ctx, req),
+        Some(KeyAgentRequestKind::RevokeSessionKey(req)) => handle_revoke_session_key(ctx, req),
         Some(KeyAgentRequestKind::GetBalance(_)) => {
             // R56: Key-Agent cannot do network I/O. Net-Agent handles balance queries.
-            Ok(KeyAgentResponse::not_implemented(
+            Ok(KeyAgentResponse::not_implemented(&coded(
+                "E_UNSUPPORTED",
                 "GetBalance — Net-Agent handles balance queries (R56: no network I/O in Key-Agent)",
-            ))
+            )))
         }
-        Some(KeyAgentRequestKind::LockVault(_)) => handle_lock_vault(),
-        Some(KeyAgentRequestKind::UnlockVault(req)) => handle_unlock_vault(req),
-        Some(KeyAgentRequestKind::RegisterPasskey(req)) => handle_register_passkey(req),
-        Some(KeyAgentRequestKind::GenerateChallenge(req)) => handle_generate_challenge(req),
+        Some(KeyAgentRequestKind::LockVault(_)) => handle_lock_vault(ctx),
+        Some(KeyAgentRequestKind::UnlockVault(req)) => handle_unlock_vault(ctx, req),
+        Some(KeyAgentRequestKind::RegisterPasskey(req)) => handle_register_passkey(ctx, req),
+        Some(KeyAgentRequestKind::GenerateChallenge(req)) => handle_generate_challenge(ctx, req),
         Some(KeyAgentRequestKind::GetSecret(_)) => {
             // R56: Key-Agent cannot depend on oc-secret (age dependency chain).
             // The CLI handles secret reads locally via oc-secret; the Net-Agent
             // may handle them in the future. Returning "not implemented" keeps
             // the wire format forward-compatible.
-            Ok(KeyAgentResponse::not_implemented(
+            Ok(KeyAgentResponse::not_implemented(&coded(
+                "E_UNSUPPORTED",
                 "GetSecret — secret operations handled locally by CLI (R56: no oc-secret dep in Key-Agent)",
-            ))
+            )))
         }
-        Some(KeyAgentRequestKind::ListSecrets(_)) => Ok(KeyAgentResponse::not_implemented(
+        Some(KeyAgentRequestKind::ListSecrets(_)) => Ok(KeyAgentResponse::not_implemented(&coded(
+            "E_UNSUPPORTED",
             "ListSecrets — secret operations handled locally by CLI (R56: no oc-secret dep in Key-Agent)",
-        )),
-        Some(KeyAgentRequestKind::GenerateTotp(_)) => Ok(KeyAgentResponse::not_implemented(
-            "GenerateTotp — secret operations handled locally by CLI (R56: no oc-secret dep in Key-Agent)",
-        )),
-        Some(KeyAgentRequestKind::DrainTelemetry(req)) => handle_drain_telemetry(*req),
-        None => {
-            Err(KeyAgentError::InvalidRequest("request kind is None (empty request)".to_string()))
+        ))),
+        Some(KeyAgentRequestKind::GenerateTotp(_)) => {
+            Ok(KeyAgentResponse::not_implemented(&coded(
+                "E_UNSUPPORTED",
+                "GenerateTotp — secret operations handled locally by CLI (R56: no oc-secret dep in Key-Agent)",
+            )))
         }
+        Some(KeyAgentRequestKind::DrainTelemetry(req)) => handle_drain_telemetry(*req),
+        None => Err(KeyAgentError::InvalidRequest(coded(
+            err_code::PARAM,
+            "request kind is None (empty request)",
+        ))),
     }
 }
 
@@ -340,52 +562,86 @@ fn handle_list_wallets() -> Result<KeyAgentResponse, KeyAgentError> {
 }
 
 fn handle_sign_transaction(
+    ctx: &AgentContext,
     req: &crate::proto::SignTransactionRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
-    // P0-2: Passkey gate — verify authentication before signing.
+    // P0-2: Passkey gate — verify authentication AND wallet binding.
     let auth = match req.auth.as_ref() {
         Some(a) => a,
-        None => return Ok(KeyAgentResponse::error("missing passkey authorization")),
+        None => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                "missing passkey authorization",
+            )))
+        }
     };
-    if let Err(resp) = verify_passkey(auth) {
+    if let Err(resp) = verify_passkey_for(ctx, auth, &req.wallet_id) {
         return Ok(resp);
     }
 
-    // C1 fix: derive an UnlockToken from the freshly-verified Passkey signature.
-    // The empty-passphrase backward-compat path was removed; a valid token is
-    // required to decrypt the wallet signing key.
-    let unlock_token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
-        Ok(t) => t,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
-    };
-    let (key, signer) = match load_chain_key(&req.wallet_id, &req.chain_id, &unlock_token) {
+    // Session keys: a non-empty id must reference an active (non-revoked) key.
+    if let Err(resp) = ensure_session_key_active(ctx, &req.session_key_id) {
+        return Ok(resp);
+    }
+
+    // C2 fix: the decryption passphrase derives from the stable device key
+    // (see load_chain_key). The verified passkey above is the authorization
+    // gate; it no longer feeds the key-derivation input.
+    let (key, signer) = match load_chain_key(&req.wallet_id, &req.chain_id) {
         Ok(v) => v,
         Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
 
     let tx_bytes = match hex::decode(&req.raw_tx_hex) {
         Ok(b) => b,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("invalid tx hex: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::PARAM,
+                format!("invalid tx hex: {e}"),
+            )))
+        }
     };
 
     let signable = match signer.extract_signable_bytes(&tx_bytes) {
         Ok(b) => b.to_vec(),
-        Err(e) => return Ok(KeyAgentResponse::error(format!("extract signable failed: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::PARAM,
+                format!("extract signable failed: {e}"),
+            )))
+        }
     };
     let output = match signer.sign_transaction(key.expose(), &signable) {
         Ok(o) => o,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("signing failed: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                format!("signing failed: {e}"),
+            )))
+        }
     };
     let signed_tx = match signer.encode_signed_transaction(&tx_bytes, &output) {
         Ok(s) => s,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("encode signed tx failed: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                format!("encode signed tx failed: {e}"),
+            )))
+        }
     };
 
-    audit(
-        EventType::SignUserOp,
+    // Audit with fail-closed enforcement for signing operations.
+    let audit_result = record_audit_strict(
+        ctx,
+        EventType::TransactionSigned,
         Some(&req.session_key_id),
         serde_json::json!({"action": "sign_transaction", "chain_id": req.chain_id}),
     );
+    if ctx.audit_fail_closed &&
+        let Err(e) = audit_result
+    {
+        return Ok(KeyAgentResponse::error(e));
+    }
 
     let resp = crate::proto::SignTransactionResponse {
         signature: output.signature,
@@ -395,29 +651,52 @@ fn handle_sign_transaction(
 }
 
 fn handle_sign_message(
+    ctx: &AgentContext,
     req: &crate::proto::SignMessageRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
-    // P0-2: Passkey gate — verify authentication before signing.
+    // P0-2: Passkey gate — verify authentication AND wallet binding.
     let auth = match req.auth.as_ref() {
         Some(a) => a,
-        None => return Ok(KeyAgentResponse::error("missing passkey authorization")),
+        None => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                "missing passkey authorization",
+            )))
+        }
     };
-    if let Err(resp) = verify_passkey(auth) {
+    if let Err(resp) = verify_passkey_for(ctx, auth, &req.wallet_id) {
+        return Ok(resp);
+    }
+    if let Err(resp) = ensure_session_key_active(ctx, &req.session_key_id) {
         return Ok(resp);
     }
 
-    // C1 fix: derive an UnlockToken from the freshly-verified Passkey signature.
-    let unlock_token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
-        Ok(t) => t,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
-    };
-
-    // SignMessage has no chain_id; default to EVM (ponytail: most common).
+    // SignMessage has no chain_id field on the wire; default to EVM
+    // (personal_sign semantics). Non-EVM message signing goes through
+    // `SignAuth`, which carries an explicit chain_id.
     let (signature, _address, _public_key) =
-        match sign_message_core(&req.wallet_id, "eip155:1", &unlock_token, &req.message) {
+        match sign_message_core(&req.wallet_id, "eip155:1", &req.message) {
             Ok(v) => v,
             Err(e) => return Ok(KeyAgentResponse::error(e)),
         };
+
+    if ctx.audit_fail_closed {
+        if let Err(e) = record_audit_strict(
+            ctx,
+            EventType::TransactionSigned,
+            Some(&req.session_key_id),
+            serde_json::json!({"action": "sign_message", "chain_id": "eip155:1"}),
+        ) {
+            return Ok(KeyAgentResponse::error(e));
+        }
+    } else {
+        record_audit(
+            ctx,
+            EventType::TransactionSigned,
+            Some(&req.session_key_id),
+            serde_json::json!({"action": "sign_message", "chain_id": "eip155:1"}),
+        );
+    }
 
     let resp = crate::proto::SignMessageResponse { signature };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
@@ -433,14 +712,13 @@ fn handle_sign_message(
 ///
 /// This is the single signing path for message signing — callers MUST NOT
 /// duplicate it. Authorization (passkey vs. network-layer) is decided by the
-/// caller before the unlock token is produced.
+/// caller BEFORE calling this function.
 fn sign_message_core(
     wallet_id: &str,
     chain_id: &str,
-    unlock_token: &oc_core::UnlockToken,
     message: &[u8],
 ) -> Result<(Vec<u8>, String, Vec<u8>), String> {
-    let (key, signer) = load_chain_key(wallet_id, chain_id, unlock_token)?;
+    let (key, signer) = load_chain_key(wallet_id, chain_id)?;
     let output =
         signer.sign_message(key.expose(), message).map_err(|e| format!("signing failed: {e}"))?;
     let address =
@@ -473,78 +751,81 @@ fn derive_public_key(curve: oc_signer::Curve, private_key: &[u8]) -> Option<Vec<
 
 /// Handle `SignAuth` — auth-class message signing with explicit authorization.
 fn handle_sign_auth(
+    ctx: &AgentContext,
     req: &crate::proto::SignAuthRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     if req.wallet_id.is_empty() {
-        return Ok(KeyAgentResponse::error("missing wallet_id"));
+        return Ok(KeyAgentResponse::error(coded(err_code::PARAM, "missing wallet_id")));
     }
     if req.chain_id.is_empty() {
-        return Ok(KeyAgentResponse::error("missing chain_id"));
+        return Ok(KeyAgentResponse::error(coded(err_code::PARAM, "missing chain_id")));
     }
 
-    let unlock_token = if let Some(auth) = &req.auth {
+    if let Some(auth) = &req.auth {
         if !req.agent_token.is_empty() {
-            return Ok(KeyAgentResponse::error(
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::PARAM,
                 "sign_auth request must carry either auth or agent_token, not both",
-            ));
+            )));
         }
-        let stored = match verify_passkey(auth) {
-            Ok(stored) => stored,
-            Err(resp) => return Ok(resp),
-        };
-        if !stored.wallet_id.is_empty() && stored.wallet_id != req.wallet_id {
-            return Ok(KeyAgentResponse::error("passkey is not registered for this wallet"));
-        }
-        match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
-            Ok(token) => token,
-            Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
+        // Strict wallet binding — unbound ("") registrations are rejected.
+        if let Err(resp) = verify_passkey_for(ctx, auth, &req.wallet_id) {
+            return Ok(resp);
         }
     } else {
-        let configured = match sign_auth_internal_token().lock() {
+        let configured = match ctx.sign_auth_internal_token.lock() {
             Ok(guard) => guard.clone(),
-            Err(_) => return Ok(KeyAgentResponse::error("sign_auth internal token mutex poisoned")),
+            Err(_) => {
+                return Ok(KeyAgentResponse::error(coded(
+                    err_code::INTERNAL,
+                    "sign_auth internal token mutex poisoned",
+                )))
+            }
         };
         let Some(expected) = configured else {
-            return Ok(KeyAgentResponse::error("sign_auth internal token not configured"));
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                "sign_auth internal token not configured",
+            )));
         };
         if req.agent_token.is_empty() {
             return Ok(KeyAgentResponse::deny(crate::proto::DenyReason::PasskeyForged));
         }
-        if req.agent_token != expected {
-            audit(
-                EventType::PasskeyForged,
+        // Constant-time comparison: the token authorizes arbitrary auth-class
+        // signing, so a prefix-match timing oracle is not acceptable even for
+        // a loopback-only surface.
+        if !oc_crypto::constant_time_eq(&req.agent_token, &expected) {
+            record_audit(
+                ctx,
+                EventType::AuthFailed,
                 None,
                 serde_json::json!({"action": "sign_auth_internal_token_mismatch", "wallet_id": req.wallet_id}),
             );
             return Ok(KeyAgentResponse::deny(crate::proto::DenyReason::PasskeyForged));
         }
-        let store = DeviceKeyStore::open_default()
-            .map_err(|e| KeyAgentError::Internal(format!("device key store: {e}")))?;
-        let device_key = store
-            .load_or_generate()
-            .map_err(|e| KeyAgentError::Internal(format!("device key: {e}")))?;
-        match oc_core::UnlockToken::new(req.wallet_id.clone(), &device_key.to_bytes()) {
-            Ok(token) => token,
-            Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
-        }
-    };
+    }
 
     let (signature, address, public_key) =
-        match sign_message_core(&req.wallet_id, &req.chain_id, &unlock_token, &req.message) {
+        match sign_message_core(&req.wallet_id, &req.chain_id, &req.message) {
             Ok(v) => v,
             Err(e) => return Ok(KeyAgentResponse::error(e)),
         };
 
-    audit(
-        EventType::SignUserOp, // closest existing variant — auth-class signing
+    let audit_result = record_audit_strict(
+        ctx,
+        EventType::AuthSigned,
         None,
         serde_json::json!({
-            "action": "sign_auth",
             "chain_id": req.chain_id,
             "wallet_id": req.wallet_id,
             "mode": if req.auth.is_some() { "passkey" } else { "internal_token" }
         }),
     );
+    if ctx.audit_fail_closed &&
+        let Err(e) = audit_result
+    {
+        return Ok(KeyAgentResponse::error(e));
+    }
 
     let resp = crate::proto::SignAuthResponse {
         signature,
@@ -556,25 +837,28 @@ fn handle_sign_auth(
 }
 
 fn handle_sign_typed_data(
+    ctx: &AgentContext,
     req: &crate::proto::SignTypedDataRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
-    // P0-2: Passkey gate — verify authentication before signing.
+    // P0-2: Passkey gate — verify authentication AND wallet binding.
     let auth = match req.auth.as_ref() {
         Some(a) => a,
-        None => return Ok(KeyAgentResponse::error("missing passkey authorization")),
+        None => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                "missing passkey authorization",
+            )))
+        }
     };
-    if let Err(resp) = verify_passkey(auth) {
+    if let Err(resp) = verify_passkey_for(ctx, auth, &req.wallet_id) {
+        return Ok(resp);
+    }
+    if let Err(resp) = ensure_session_key_active(ctx, &req.session_key_id) {
         return Ok(resp);
     }
 
-    // C1 fix: derive an UnlockToken from the freshly-verified Passkey signature.
-    let unlock_token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
-        Ok(t) => t,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
-    };
-
     // EIP-712 typed data is EVM-only.
-    let (key, _) = match load_chain_key(&req.wallet_id, "eip155:1", &unlock_token) {
+    let (key, _) = match load_chain_key(&req.wallet_id, "eip155:1") {
         Ok(v) => v,
         Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
@@ -582,58 +866,110 @@ fn handle_sign_typed_data(
     let evm_signer = oc_signer::chains::EvmSigner;
     let output = match evm_signer.sign_typed_data(key.expose(), &req.typed_data_json) {
         Ok(o) => o,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("signing failed: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                format!("signing failed: {e}"),
+            )))
+        }
     };
+
+    if ctx.audit_fail_closed {
+        if let Err(e) = record_audit_strict(
+            ctx,
+            EventType::TransactionSigned,
+            Some(&req.session_key_id),
+            serde_json::json!({"action": "sign_typed_data", "chain_id": "eip155:1"}),
+        ) {
+            return Ok(KeyAgentResponse::error(e));
+        }
+    } else {
+        record_audit(
+            ctx,
+            EventType::TransactionSigned,
+            Some(&req.session_key_id),
+            serde_json::json!({"action": "sign_typed_data", "chain_id": "eip155:1"}),
+        );
+    }
 
     let resp = crate::proto::SignTypedDataResponse { signature: output.signature };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
 fn handle_sign_user_op(
+    ctx: &AgentContext,
     req: &crate::proto::SignUserOpRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
-    // P0-2: Passkey gate — verify authentication before signing.
+    // P0-2: Passkey gate — verify authentication AND wallet binding.
     let auth = match req.auth.as_ref() {
         Some(a) => a,
-        None => return Ok(KeyAgentResponse::error("missing passkey authorization")),
+        None => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                "missing passkey authorization",
+            )))
+        }
     };
-    if let Err(resp) = verify_passkey(auth) {
+    if let Err(resp) = verify_passkey_for(ctx, auth, &req.wallet_id) {
         return Ok(resp);
     }
-
-    // C1 fix: derive an UnlockToken from the freshly-verified Passkey signature.
-    let unlock_token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
-        Ok(t) => t,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("token derivation: {e}"))),
-    };
-    let (key, signer) = match load_chain_key(&req.wallet_id, &req.chain_id, &unlock_token) {
+    if let Err(resp) = ensure_session_key_active(ctx, &req.session_key_id) {
+        return Ok(resp);
+    }
+    let (key, signer) = match load_chain_key(&req.wallet_id, &req.chain_id) {
         Ok(v) => v,
         Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
 
     let user_op_bytes = match hex::decode(&req.user_op_hex) {
         Ok(b) => b,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("invalid user op hex: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::PARAM,
+                format!("invalid user op hex: {e}"),
+            )))
+        }
     };
 
     let signable = match signer.extract_signable_bytes(&user_op_bytes) {
         Ok(b) => b.to_vec(),
-        Err(e) => return Ok(KeyAgentResponse::error(format!("extract signable failed: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::PARAM,
+                format!("extract signable failed: {e}"),
+            )))
+        }
     };
     let output = match signer.sign_transaction(key.expose(), &signable) {
         Ok(o) => o,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("signing failed: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                format!("signing failed: {e}"),
+            )))
+        }
     };
     let signed_user_op = match signer.encode_signed_transaction(&user_op_bytes, &output) {
         Ok(s) => s,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("encode failed: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                format!("encode failed: {e}"),
+            )))
+        }
     };
 
-    audit(
-        EventType::SignUserOp,
+    let audit_result = record_audit_strict(
+        ctx,
+        EventType::TransactionSigned,
         Some(&req.session_key_id),
         serde_json::json!({"action": "sign_user_op", "chain_id": req.chain_id}),
     );
+    if ctx.audit_fail_closed &&
+        let Err(e) = audit_result
+    {
+        return Ok(KeyAgentResponse::error(e));
+    }
 
     let resp = crate::proto::SignUserOpResponse {
         signature: output.signature,
@@ -643,19 +979,45 @@ fn handle_sign_user_op(
 }
 
 fn handle_create_session_key(
+    ctx: &AgentContext,
     req: &crate::proto::CreateSessionKeyRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     // Stage 0: verify PasskeyAuthorization (R30/R31/C-05).
     let auth = match req.auth.as_ref() {
         Some(a) => a,
-        None => return Ok(KeyAgentResponse::error("missing passkey authorization")),
+        None => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                "missing passkey authorization",
+            )))
+        }
     };
-    if let Err(resp) = verify_passkey(auth) {
+    if let Err(resp) = verify_passkey(ctx, auth) {
         return Ok(resp);
     }
 
-    let session_key_id = format!("sk-{}", rand::random::<u64>());
+    let session_key_id = format!("sk-{:032x}", rand::random::<u128>());
     let created_at = now_unix();
+
+    // Persist the record so `RevokeSessionKey` has real effect and signing
+    // handlers can enforce liveness (see `ensure_session_key_active`).
+    let record = SessionKeyRecord {
+        session_key_id: session_key_id.clone(),
+        label: req.label.clone(),
+        status: SessionKeyStatus::Active,
+        created_at_unix: created_at,
+        revoked_at_unix: None,
+    };
+    if let Err(e) = ctx.session_keys.create(record) {
+        return Ok(KeyAgentResponse::error(coded(err_code::SESSION_KEY, e)));
+    }
+
+    record_audit(
+        ctx,
+        EventType::CreateSessionKey,
+        Some(&session_key_id),
+        serde_json::json!({"label": req.label, "status": "ACTIVE"}),
+    );
 
     let proto_policy = req.rules.clone().unwrap_or_else(|| crate::proto::Policy {
         version: 2,
@@ -664,12 +1026,6 @@ fn handle_create_session_key(
         rules: None,
         budget_allocation: None,
     });
-
-    audit(
-        EventType::CreateSessionKey,
-        Some(&session_key_id),
-        serde_json::json!({"label": req.label, "status": "ALLOWED"}),
-    );
 
     let resp = crate::proto::CreateSessionKeyResponse {
         session_key_id,
@@ -680,74 +1036,121 @@ fn handle_create_session_key(
 }
 
 fn handle_revoke_session_key(
+    ctx: &AgentContext,
     req: &crate::proto::RevokeSessionKeyRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     // Stage 0: verify PasskeyAuthorization (R30/R31/C-05).
     let auth = match req.auth.as_ref() {
         Some(a) => a,
-        None => return Ok(KeyAgentResponse::error("missing passkey authorization")),
+        None => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                "missing passkey authorization",
+            )))
+        }
     };
-    if let Err(resp) = verify_passkey(auth) {
+    if let Err(resp) = verify_passkey(ctx, auth) {
         return Ok(resp);
     }
 
-    let revoked_at = now_unix();
+    let revoked = match ctx.session_keys.revoke(&req.session_key_id) {
+        Ok(r) => r,
+        Err(e) => return Ok(KeyAgentResponse::error(coded(err_code::SESSION_KEY, e))),
+    };
 
-    audit(
+    record_audit(
+        ctx,
         EventType::RevokeSessionKey,
         Some(&req.session_key_id),
-        serde_json::json!({"status": "ALLOWED", "revoked_at_unix": revoked_at}),
+        serde_json::json!({
+            "status": "REVOKED",
+            "created_at_unix": revoked.created_at_unix,
+            "revoked_at_unix": revoked.revoked_at_unix.unwrap_or_else(now_unix),
+        }),
     );
 
-    let resp = crate::proto::RevokeSessionKeyResponse { revoked_at_unix: revoked_at };
+    let resp = crate::proto::RevokeSessionKeyResponse {
+        revoked_at_unix: revoked.revoked_at_unix.unwrap_or_else(now_unix),
+    };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
-fn handle_lock_vault() -> Result<KeyAgentResponse, KeyAgentError> {
+fn handle_lock_vault(ctx: &AgentContext) -> Result<KeyAgentResponse, KeyAgentError> {
     global_key_cache().clear();
     // Also drop any in-flight Passkey challenge state so a lock cannot be
     // followed by a replay of a previously-issued challenge (L1 fix).
-    global_passkey_verifiers()
-        .lock()
-        .map_err(|_| KeyAgentError::Internal("passkey verifiers mutex poisoned".into()))?
-        .clear();
+    if let Err(_poisoned) = ctx.passkey_verifiers.lock() {
+        return Err(KeyAgentError::Internal("passkey verifiers mutex poisoned".into()));
+    }
+    // Re-lock mutably to clear (the read above only proves liveness).
+    match ctx.passkey_verifiers.lock() {
+        Ok(mut verifiers) => verifiers.clear(),
+        Err(_) => return Err(KeyAgentError::Internal("passkey verifiers mutex poisoned".into())),
+    }
 
-    audit(
-        EventType::BudgetReclaim, // ponytail: closest existing variant; add LOCK_VAULT if needed
-        None,
-        serde_json::json!({"action": "lock_vault", "cache_cleared": true}),
-    );
+    record_audit(ctx, EventType::VaultLocked, None, serde_json::json!({"cache_cleared": true}));
 
     let resp = crate::proto::LockVaultResponse { locked: true };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
 fn handle_unlock_vault(
+    ctx: &AgentContext,
     req: &crate::proto::UnlockVaultRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
-    // 1. Verify Passkey.
+    // 1. Verify Passkey AND wallet binding (strict — no wildcard credentials).
     let auth = match req.auth.as_ref() {
         Some(a) => a,
-        None => return Ok(KeyAgentResponse::error("missing passkey authorization")),
+        None => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                "missing passkey authorization",
+            )))
+        }
     };
 
-    let stored = match verify_passkey(auth) {
-        Ok(s) => s,
-        Err(resp) => return Ok(resp),
-    };
-
-    // 2. Verify passkey is bound to the requested wallet.
-    if stored.wallet_id != req.wallet_id {
-        return Ok(KeyAgentResponse::error("passkey not bound to this wallet"));
+    if let Err(resp) = verify_passkey_for(ctx, auth, &req.wallet_id) {
+        return Ok(resp);
     }
 
-    // 3. Issue UnlockToken (30-second TTL, derived from Passkey signature).
-    let token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &auth.signature) {
+    // 2. Issue UnlockToken derived from the device key (C2 fix: stable decryption secret; the
+    //    verified passkey is the authorization gate). Probe both derivations across both curve
+    //    families so the returned token is guaranteed to unlock this wallet — an Ed25519-only
+    //    wallet must not fail an EVM-only probe.
+    let device_key = match load_device_key() {
+        Ok(k) => k,
+        Err(e) => return Ok(KeyAgentResponse::error(e)),
+    };
+    let probe = |t: &oc_core::UnlockToken| wallet_decrypts_with_token(&req.wallet_id, t);
+    let token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &device_key)
+        .map_err(|e| coded(err_code::DECRYPT, format!("token generation: {e}")))
+        .and_then(|t| {
+            if probe(&t) {
+                Ok(t)
+            } else {
+                Err(coded(
+                    err_code::DECRYPT,
+                    "v2 derivation does not unlock this wallet".to_string(),
+                ))
+            }
+        })
+        .or_else(|v2_err| {
+            oc_core::UnlockToken::new_legacy_sha256(req.wallet_id.clone(), &device_key)
+                .map_err(|e| coded(err_code::DECRYPT, format!("legacy token generation: {e}")))
+                .and_then(|t| if probe(&t) { Ok(t) } else { Err(v2_err) })
+        }) {
         Ok(t) => t,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("token generation: {e}"))),
+        Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
 
     let expires_at = now_unix() + oc_core::UnlockToken::DEFAULT_TTL.as_secs();
+
+    record_audit(
+        ctx,
+        EventType::VaultUnlocked,
+        None,
+        serde_json::json!({"wallet_id": req.wallet_id}),
+    );
 
     let resp = crate::proto::UnlockVaultResponse {
         unlock_token: token.key_bytes().to_vec(),
@@ -757,11 +1160,27 @@ fn handle_unlock_vault(
 }
 
 fn handle_register_passkey(
+    ctx: &AgentContext,
     req: &crate::proto::RegisterPasskeyRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
+    // A passkey MUST be bound to a concrete wallet. Unbound ("") credentials
+    // would act as wildcards in the SignAuth binding check — a local
+    // privilege escalation against any wallet.
+    if req.wallet_id.is_empty() {
+        return Ok(KeyAgentResponse::error(coded(
+            err_code::PARAM,
+            "register_passkey requires a non-empty wallet_id (wildcard passkeys are rejected)",
+        )));
+    }
+
     let mut store = match PasskeyPubkeyStore::open_default() {
         Ok(s) => s,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("passkey store: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                format!("passkey store: {e}"),
+            )))
+        }
     };
 
     let stored = StoredPasskeyPubkey {
@@ -772,8 +1191,22 @@ fn handle_register_passkey(
     };
 
     if let Err(e) = store.register(&req.credential_id, stored) {
-        return Ok(KeyAgentResponse::error(format!("register passkey: {e}")));
+        return Ok(KeyAgentResponse::error(coded(
+            err_code::INTERNAL,
+            format!("register passkey: {e}"),
+        )));
     }
+
+    record_audit(
+        ctx,
+        EventType::PasskeyRegistered,
+        None,
+        serde_json::json!({
+            "credential_id": req.credential_id,
+            "wallet_id": req.wallet_id,
+            "algorithm": req.algorithm,
+        }),
+    );
 
     let resp = crate::proto::RegisterPasskeyResponse { registered: true };
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
@@ -789,25 +1222,43 @@ fn handle_register_passkey(
 /// RPC. [`verify_passkey`] consumes the challenge from the same shared
 /// verifier, providing single-use replay protection.
 fn handle_generate_challenge(
+    ctx: &AgentContext,
     req: &crate::proto::GenerateChallengeRequest,
 ) -> Result<KeyAgentResponse, KeyAgentError> {
     if req.credential_id.is_empty() {
-        return Ok(KeyAgentResponse::error("missing credential_id"));
+        return Ok(KeyAgentResponse::error(coded(err_code::PARAM, "missing credential_id")));
     }
 
     let store = match PasskeyPubkeyStore::open_default() {
         Ok(s) => s,
-        Err(e) => return Ok(KeyAgentResponse::error(format!("passkey store: {e}"))),
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                format!("passkey store: {e}"),
+            )))
+        }
     };
     let stored = match store.get(&req.credential_id) {
-        Some(s) => s,
-        None => return Ok(KeyAgentResponse::error("passkey not registered")),
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return Ok(KeyAgentResponse::error(coded(err_code::AUTH, "passkey not registered")))
+        }
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                format!("passkey store: {e}"),
+            )))
+        }
     };
 
-    let verifiers_map = global_passkey_verifiers();
-    let mut verifiers = match verifiers_map.lock() {
+    let mut verifiers = match ctx.passkey_verifiers.lock() {
         Ok(v) => v,
-        Err(_) => return Ok(KeyAgentResponse::error("passkey verifiers mutex poisoned")),
+        Err(_) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                "passkey verifiers mutex poisoned",
+            )))
+        }
     };
 
     // Lazily create the verifier bound to this credential_id on first
@@ -816,7 +1267,12 @@ fn handle_generate_challenge(
     if !verifiers.contains_key(&req.credential_id) {
         let pubkey = match PasskeyPubkeyStore::to_passkey_pubkey(&stored) {
             Ok(k) => k,
-            Err(e) => return Ok(KeyAgentResponse::error(format!("passkey pubkey: {e}"))),
+            Err(e) => {
+                return Ok(KeyAgentResponse::error(coded(
+                    err_code::INTERNAL,
+                    format!("passkey pubkey: {e}"),
+                )))
+            }
         };
         verifiers.insert(
             req.credential_id.clone(),
@@ -829,10 +1285,14 @@ fn handle_generate_challenge(
 
     let challenge = verifier.generate_challenge();
 
-    audit(
-        EventType::PasskeyForged, // closest existing variant — records challenge issuance
+    // Challenge issuance is a routine event — it must NOT be recorded as a
+    // forgery (the old code reused PasskeyForged here, poisoning forgery
+    // alerts with false positives).
+    record_audit(
+        ctx,
+        EventType::ChallengeIssued,
         None,
-        serde_json::json!({"action": "generate_challenge", "credential_id": req.credential_id}),
+        serde_json::json!({"credential_id": req.credential_id}),
     );
 
     let resp = crate::proto::GenerateChallengeResponse { challenge: challenge.to_vec() };

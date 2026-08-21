@@ -82,6 +82,15 @@ pub enum EventType {
     SecretMigrated,
     AgeRecipientAdded,
     AgeReencrypted,
+    // Dedicated signing/lifecycle events. Added so handlers no longer reuse
+    // semantically unrelated variants (`PasskeyForged`, `BudgetReclaim`,
+    // `SignUserOp`) for routine operations — see handler.rs.
+    ChallengeIssued,
+    VaultLocked,
+    VaultUnlocked,
+    TransactionSigned,
+    AuthSigned,
+    PasskeyRegistered,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -424,6 +433,51 @@ impl AuditLog {
     /// Log an `AgeReencrypted` event. Records the secret name.
     pub fn log_age_reencrypted(&mut self, name: &str) -> Result<u64, AuditError> {
         self.append(EventType::AgeReencrypted, None, serde_json::json!({ "name": name }))
+    }
+
+    /// Log a `ChallengeIssued` event (routine passkey challenge issuance).
+    ///
+    /// Deliberately distinct from [`EventType::PasskeyForged`]: issuing a
+    /// challenge is a normal operation and must not pollute forgery alerts.
+    pub fn log_challenge_issued(&mut self, credential_id: &str) -> Result<u64, AuditError> {
+        self.append(
+            EventType::ChallengeIssued,
+            None,
+            serde_json::json!({ "credential_id": credential_id }),
+        )
+    }
+
+    /// Log a `VaultLocked` event. Records whether the derived-key cache was
+    /// cleared.
+    pub fn log_vault_locked(&mut self, cache_cleared: bool) -> Result<u64, AuditError> {
+        self.append(
+            EventType::VaultLocked,
+            None,
+            serde_json::json!({ "cache_cleared": cache_cleared }),
+        )
+    }
+
+    /// Log a `TransactionSigned` event. Records the chain id — never the
+    /// transaction bytes.
+    pub fn log_transaction_signed(
+        &mut self,
+        session_key_id: Option<&str>,
+        chain_id: &str,
+    ) -> Result<u64, AuditError> {
+        self.append(
+            EventType::TransactionSigned,
+            session_key_id.map(String::from),
+            serde_json::json!({ "chain_id": chain_id }),
+        )
+    }
+
+    /// Log an `AuthSigned` event (auth-class message signing).
+    pub fn log_auth_signed(&mut self, wallet_id: &str, chain_id: &str) -> Result<u64, AuditError> {
+        self.append(
+            EventType::AuthSigned,
+            None,
+            serde_json::json!({ "wallet_id": wallet_id, "chain_id": chain_id }),
+        )
     }
 }
 

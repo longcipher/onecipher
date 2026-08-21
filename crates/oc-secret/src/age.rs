@@ -246,18 +246,38 @@ mod tests {
         assert!(matches!(result, Err(AgeError::InvalidRecipient(_))));
     }
 
+    /// Encrypt with a **pinned** scrypt work factor.
+    ///
+    /// `Encryptor::with_user_passphrase` calibrates the work factor by
+    /// benchmarking the machine (~1 s target). Under heavily loaded CI/test
+    /// runners that calibration is noisy: it can pick a work factor so large
+    /// that sibling tests stall, making this test flake under parallel
+    /// execution. Tests pin a small factor for deterministic runtime; the
+    /// production helpers keep auto-calibration.
+    fn encrypt_with_pinned_work_factor(passphrase: &str, plaintext: &[u8]) -> Vec<u8> {
+        let recipient = age::scrypt::Recipient::new(SecretString::from(passphrase.to_owned()));
+        // `set_work_factor` requires 0 < log_n < 64; 10 keeps the test fast
+        // and deterministic regardless of machine-load calibration noise.
+        let mut recipient = recipient;
+        recipient.set_work_factor(10);
+
+        let mut encrypted = Vec::new();
+        let mut writer =
+            age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+                .expect("scrypt recipient is a valid encryptor")
+                .wrap_output(&mut encrypted)
+                .unwrap();
+        writer.write_all(plaintext).unwrap();
+        writer.finish().unwrap();
+        encrypted
+    }
+
     #[test]
     fn passphrase_decrypt_round_trip() {
         let passphrase = "correct horse battery staple";
         let plaintext = b"passphrase secret";
 
-        let secret = SecretString::from(passphrase.to_owned());
-        let encryptor = Encryptor::with_user_passphrase(secret);
-
-        let mut encrypted = Vec::new();
-        let mut writer = encryptor.wrap_output(&mut encrypted).unwrap();
-        writer.write_all(plaintext).unwrap();
-        writer.finish().unwrap();
+        let encrypted = encrypt_with_pinned_work_factor(passphrase, plaintext);
 
         let decrypted = decrypt_with_passphrase(&encrypted, passphrase).unwrap();
         assert_eq!(decrypted, plaintext);
@@ -268,13 +288,7 @@ mod tests {
         let passphrase = "correct horse battery staple";
         let plaintext = b"passphrase secret";
 
-        let secret = SecretString::from(passphrase.to_owned());
-        let encryptor = Encryptor::with_user_passphrase(secret);
-
-        let mut encrypted = Vec::new();
-        let mut writer = encryptor.wrap_output(&mut encrypted).unwrap();
-        writer.write_all(plaintext).unwrap();
-        writer.finish().unwrap();
+        let encrypted = encrypt_with_pinned_work_factor(passphrase, plaintext);
 
         let result = decrypt_with_passphrase(&encrypted, "wrong passphrase");
         assert!(result.is_err());

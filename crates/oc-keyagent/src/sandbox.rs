@@ -77,8 +77,96 @@ impl SandboxReport {
 /// See [`apply_sandbox_reported`] for the variant that returns which
 /// mechanisms engaged. Per `design.md` §"Key-Agent Main Loop Pseudocode", this
 /// MUST be called before `server::run()`.
+///
+/// **Embedded-daemon note:** when the Key-Agent shares its process with the
+/// tokio network layer (the single-binary daemon), use
+/// [`apply_signing_thread_sandbox`] instead — full-process confinement on
+/// macOS would sever the daemon's own WSS relay.
 pub fn apply_sandbox() -> Result<(), KeyAgentError> {
     apply_sandbox_reported().map(|_| ())
+}
+
+/// Sandbox variant that is safe for the single-binary daemon, where the
+/// Key-Agent thread shares its process with the tokio network layer.
+///
+/// Linux seccomp (`prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER)`) is
+/// **per-thread**: installing it on the dedicated Key-Agent thread confines
+/// only that thread and any threads it subsequently spawns (the per-connection
+/// `handle_conn` threads), while the tokio WSS relay keeps full freedom to
+/// create AF_INET sockets. Core-dump/ptrace denial and capability reduction
+/// are process-wide but pure hardening: the host side needs no capabilities,
+/// and `CAP_IPC_LOCK` (required for mlock) is retained.
+///
+/// macOS Seatbelt (`sandbox_init`) is **process-wide**, so applying the R12
+/// deny-network profile in-process would also cut off the daemon's own WSS
+/// relay. On macOS this variant therefore applies only core-dump + debugger
+/// denial and logs why Seatbelt is skipped; `SandboxReport::filter_installed`
+/// stays `false` there.
+///
+/// Windows mitigation policies are process-wide but benign for a pure-Rust
+/// binary (no JIT, no remote image loads) and are applied as-is.
+pub fn apply_signing_thread_sandbox() -> Result<SandboxReport, KeyAgentError> {
+    let mut report = SandboxReport::default();
+
+    #[cfg(target_os = "linux")]
+    {
+        disable_coredump()?;
+        report.coredump_disabled = true;
+        anti_ptrace()?;
+        report.ptrace_denied = true;
+        apply_seccomp()?;
+        report.filter_installed = true;
+        drop_capabilities_except_ipc_lock()?;
+        report.privileges_dropped = true;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        match macos::disable_coredump() {
+            Ok(()) => report.coredump_disabled = true,
+            Err(e) => tracing::warn!(error = %e, "could not disable core dumps"),
+        }
+        match macos::deny_ptrace() {
+            Ok(()) => report.ptrace_denied = true,
+            Err(e) => tracing::warn!(error = %e, "could not deny debugger attach"),
+        }
+        // Seatbelt is process-wide: applying the deny-network profile here
+        // would also confine the daemon's tokio WSS relay, which requires
+        // outbound TCP to the WalletConnect relay. Skip it deliberately.
+        tracing::info!(
+            "signing-thread sandbox: Seatbelt skipped (process-wide scope would break the \
+             host WSS relay); core-dump/ptrace denial active"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        match windows_impl::disable_crash_dumps() {
+            Ok(()) => report.coredump_disabled = true,
+            Err(e) => tracing::warn!(error = %e, "could not disable crash dumps"),
+        }
+        match windows_impl::apply_mitigation_policies() {
+            Ok(()) => {
+                report.filter_installed = true;
+                report.privileges_dropped = true;
+            }
+            Err(e) => {
+                return Err(KeyAgentError::Sandbox(format!(
+                    "process mitigation policies could not be applied: {e}"
+                )));
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        tracing::warn!(
+            "oc-keyagent: no runtime sandbox is available on this platform; \
+             network isolation is NOT enforced"
+        );
+    }
+
+    Ok(report)
 }
 
 /// Apply the platform sandbox and report which mechanisms engaged.

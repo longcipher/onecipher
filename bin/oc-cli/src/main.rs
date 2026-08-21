@@ -564,6 +564,27 @@ fn run_daemon() -> Result<(), CliError> {
     let ka_stop_thread = ka_stop.clone();
     let (ka_err_tx, ka_err_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
+        // R12d/R53: confine the signing core BEFORE accepting any request.
+        // The Linux seccomp filter is per-thread, so this does not restrict
+        // the tokio WSS/WebUI layers; on macOS Seatbelt is deliberately
+        // skipped by `apply_signing_thread_sandbox` because it is
+        // process-wide and would sever the daemon's own relay connection.
+        match oc_keyagent::apply_signing_thread_sandbox() {
+            Ok(report) => {
+                eprintln!(
+                    "key-agent sandbox active: network_blocked={} coredump_disabled={} \
+                     ptrace_denied={}",
+                    report.network_blocked(),
+                    report.coredump_disabled,
+                    report.ptrace_denied
+                );
+            }
+            Err(e) => {
+                // Fail-closed: an unconfined signing core must not serve.
+                let _ = ka_err_tx.send(format!("sandbox: {e}"));
+                return;
+            }
+        }
         if let Err(e) = oc_keyagent::server::run(Some(&ka_sock_clone), Some(ka_stop_thread)) {
             let _ = ka_err_tx.send(format!("{e}"));
         }
@@ -632,11 +653,44 @@ fn run_daemon() -> Result<(), CliError> {
         // requests are gated by the browser approval flow.
         let wc_cancel_task = wc_cancel.clone();
         let approval_tx_for_wc = approval_tx.clone();
+
+        // H3: load an optional pre-signing policy for the WC router. The
+        // file is a serialized `oc_policy::PolicyV2`; absence means NO
+        // policy evaluation on WC signing, which we surface loudly at
+        // startup instead of silently skipping.
+        let wc_policy = {
+            let path = state_dir.join("wc-policy.json");
+            match std::fs::read_to_string(&path).map_err(|e| (path.clone(), e)) {
+                Ok(contents) => match serde_json::from_str::<oc_policy::PolicyV2>(&contents) {
+                    Ok(p) => {
+                        eprintln!("WC policy loaded from {}", path.display());
+                        Some(p)
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "WARNING: malformed {} ({e}) — WC signing runs WITHOUT policy \
+                             evaluation",
+                            path.display()
+                        );
+                        None
+                    }
+                },
+                Err((_, read_err)) => {
+                    eprintln!(
+                        "WARNING: no WC policy at {} ({read_err}) — chain whitelists, expiry \
+                         and risk checks are NOT enforced on WalletConnect signing",
+                        path.display()
+                    );
+                    None
+                }
+            }
+        };
+
         let wc_task = tokio::spawn(async move {
             // dApp origin allowlist for wc_sessionPropose (deny-all by default).
             let trusted_origins = oc_core::Config::load_or_default().wc.trusted_origins;
             #[cfg(feature = "webui")]
-            let result = oc_netagent::run_server_controlled_with_approvals(
+            let result = oc_netagent::run_server_controlled_full(
                 &ka_sock_for_wc,
                 &relay_url,
                 &state_dir_str,
@@ -646,10 +700,11 @@ fn run_daemon() -> Result<(), CliError> {
                 Some(approval_tx_for_wc),
                 None,
                 Some(wc_cancel_task),
+                wc_policy,
             )
             .await;
             #[cfg(not(feature = "webui"))]
-            let result = oc_netagent::run_server_controlled_with_approvals(
+            let result = oc_netagent::run_server_controlled_full(
                 &ka_sock_for_wc,
                 &relay_url,
                 &state_dir_str,
@@ -659,6 +714,7 @@ fn run_daemon() -> Result<(), CliError> {
                 None,
                 None,
                 Some(wc_cancel_task),
+                wc_policy,
             )
             .await;
             if let Err(e) = result {
@@ -693,20 +749,57 @@ fn run_daemon() -> Result<(), CliError> {
                 let dual_register: Option<oc_webui::routes::auth::DualRegistrationFn> =
                     Some(std::sync::Arc::new(move |cred_id, algorithm, pubkey| {
                         use oc_keyagent::{
-                            KeyAgentRequest, KeyAgentRequestKind, frame::FrameClient,
-                            proto::RegisterPasskeyRequest,
+                            KeyAgentRequest, KeyAgentRequestKind,
+                            frame::FrameClient,
+                            proto::{ListWalletsResponse, RegisterPasskeyRequest},
                         };
+                        let sock = ka_sock_for_webui.clone();
+                        // M16: bind the browser passkey to a concrete wallet.
+                        // Unbound ("") credentials are rejected by the
+                        // Key-Agent because they act as signing wildcards.
+                        // We bind to the first wallet that has an account on
+                        // any chain — the daemon is single-user/local-first,
+                        // so "the user's default wallet" is the correct
+                        // binding target at registration time.
+                        let wallet_id = {
+                            use prost::Message as _;
+                            let list_req = KeyAgentRequest {
+                                kind: Some(KeyAgentRequestKind::ListWallets(
+                                    oc_keyagent::proto::Empty {},
+                                )),
+                            };
+                            match FrameClient::new(sock.clone()).send_request(&list_req) {
+                                Ok(resp) if !resp.is_error() => {
+                                    ListWalletsResponse::decode(match &resp.kind {
+                                        Some(oc_keyagent::KeyAgentResponseKind::Ok(b)) => {
+                                            b.as_slice()
+                                        }
+                                        _ => &[],
+                                    })
+                                    .ok()
+                                    .and_then(|w| w.wallets.first().map(|w| w.id.clone()))
+                                    .unwrap_or_default()
+                                }
+                                _ => String::new(),
+                            }
+                        };
+                        if wallet_id.is_empty() {
+                            eprintln!(
+                                "webui passkey registration refused: no wallet exists to bind \
+                                 the credential to"
+                            );
+                            return false;
+                        }
                         let req = KeyAgentRequest {
                             kind: Some(KeyAgentRequestKind::RegisterPasskey(
                                 RegisterPasskeyRequest {
-                                    wallet_id: String::new(),
+                                    wallet_id,
                                     credential_id: cred_id.to_string(),
                                     algorithm: algorithm.to_string(),
                                     public_key: pubkey.to_vec(),
                                 },
                             )),
                         };
-                        let sock = ka_sock_for_webui.clone();
                         match FrameClient::new(sock).send_request(&req) {
                             Ok(resp) if !resp.is_error() => true,
                             other => {

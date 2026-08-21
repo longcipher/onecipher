@@ -153,22 +153,34 @@ bin/oc-cli (single binary)
 11. Return signature
 ```
 
-> **Known integration gaps (honest status, C1/C2/H4):**
+> **Integration status (updated):**
 >
-> - **Policy engine is NOT wired into the Key-Agent.** `oc-keyagent` does not
->   depend on `oc-policy`; the 11-step / v3 evaluation is a standalone library
->   with no runtime consumer in the signing core. The "evaluate all attached
->   policies" step above is aspirational — today the Key-Agent signs without
->   a policy gate. Wiring it in is tracked (T16) and must be done behind an
->   explicit opt-in so existing dApp clients (which carry no policy context)
->   are not broken.
-> - **Policy v3 is a hand-rolled Cedar-*like* rule tree, not the `cedar-policy`
->   crate**, and is gated behind the `experimental-v3` feature (off by default).
-> - **The Intent Layer (`oc-netagent::intent`) is not on the production
->   signing path.** `simulate_intent`/`execute_intent` are exercised only by
->   unit tests; the WC router signs directly via `KeyAgentRequest`. The intent
->   layer is currently a CLI-adjacent library, not the core execution path
->   described in `design.md` §6.1.
+> - **Sandbox IS enforced at runtime.** The daemon calls
+>   `apply_signing_thread_sandbox()` on the dedicated Key-Agent thread before
+>   accepting requests (fail-closed on error). Linux seccomp is per-thread,
+>   so the tokio relay is unaffected; macOS skips Seatbelt deliberately
+>   because `sandbox_init` is process-wide and would sever the WSS relay.
+> - **Policy v2 is wired into the WC router** behind an opt-in file:
+>   `~/.onecipher/wc-policy.json` (a serialized `PolicyV2`). When the file is
+>   present, chain-whitelist and expiry rules deny non-conforming requests
+>   and contract/chain-unspecified checks surface as warnings on the approval
+>   card. When absent, the daemon logs a loud startup warning — absence is an
+>   explicit operator choice, not a silent bypass. The Key-Agent itself still
+>   does not depend on `oc-policy` (R56 layering); enforcement lives at the
+>   network boundary.
+> - **Session keys are real state**: `CreateSessionKey` persists a record;
+>   `RevokeSessionKey` flips it; signing requests carrying a revoked id are
+>   rejected (`E_SESSION_KEY`) before key material is touched.
+> - **Passkey unlock is stable-secret based**: the vault passphrase derives
+>   from the device key (v2 HKDF, legacy SHA-256 fallback for pre-v2
+>   wallets); the verified Passkey challenge/signature is purely the
+>   authorization gate. Every passkey-gated path enforces the
+>   passkey↔wallet binding.
+> - Policy v3 remains a hand-rolled Cedar-*like* rule tree gated behind the
+>   `experimental-v3` feature (off by default).
+> - The Intent Layer (`oc-netagent::intent`) remains off the production
+>   signing path; `simulate_intent`/`execute_intent` are exercised by unit
+>   tests only, and `HpxRpcClient::native_price_usd` is still a stub.
 
 ## Testing Strategy
 

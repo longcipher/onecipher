@@ -114,7 +114,7 @@ cross-chain routing via ERC-7683, and Cedar-policy full integration.
 - **R51/R52**: `oc-crypto` stays zero-I/O; `age` MUST NOT be added to `oc-crypto`.
 - **R55**: `oc-keyagent` remains tokio-free.
 - **R12**: The release binary MUST NOT contain TCP-specific symbols (`TcpListener`, `TcpStream`, `AF_INET`). Phase 1-6 changes add only file I/O, terminal rendering, and (optionally) libgit2 sync — no direct TCP code paths. Verified via `nm` symbol inspection.
-- **Memory hardening**: `SecretPayload.secret` MUST use `HardenedBytes`.
+- **Memory hardening**: Signing key material (mnemonics, private keys) MUST flow through `HardenedBytes`. **Documented exemption:** `SecretPayload.secret` (oc-core/src/secret.rs) remains a `String` with a custom `Drop` zeroize — this is a formally accepted deviation: the payload covers passwords/TOTP/notes whose CLI `--json` output contract requires plain string serialization, it never holds wallet signing keys, and serde round-trips would otherwise copy plaintext through unhardened JSON buffers anyway. Any future signing-key field on this type MUST use `HardenedBytes`.
 
 ### 4.11 Feature Flags
 

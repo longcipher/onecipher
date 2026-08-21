@@ -216,6 +216,11 @@ pub enum PasskeyStoreError {
     Json(#[from] serde_json::Error),
     #[error("HOME not set")]
     HomeNotSet,
+    #[error(
+        "passkey store at {path} is corrupt: {detail} — restore it from a backup or remove the \
+         file to re-register passkeys"
+    )]
+    Corrupt { path: String, detail: String },
     #[error("unsupported algorithm: {0} (expected \"p256\" or \"ed25519\")")]
     UnsupportedAlgorithm(String),
     #[error("invalid public key: {0}")]
@@ -228,7 +233,7 @@ pub enum PasskeyStoreError {
 /// wallet-creation time and verifies `PasskeyAuthorization.signature` itself.
 /// The `algorithm` field determines which variant of [`PasskeyPubkey`] the
 /// raw `public_key` bytes decode into.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredPasskeyPubkey {
     /// Algorithm identifier: `"p256"` or `"ed25519"`.
     pub algorithm: String,
@@ -264,17 +269,24 @@ impl PasskeyPubkeyStore {
         Self { path: path.to_path_buf() }
     }
 
-    /// Load the full credential map from disk. Returns an empty map if the
-    /// file does not exist or cannot be parsed (best-effort, matching the
-    /// `Option` return type of [`Self::get`]).
-    fn load(&self) -> HashMap<String, StoredPasskeyPubkey> {
+    /// Load the full credential map from disk.
+    ///
+    /// A missing file yields an empty map (first use). A file that exists but
+    /// fails to parse is an explicit [`PasskeyStoreError::Corrupt`] — silently
+    /// treating corruption as "no passkeys registered" would lock the user
+    /// out with a misleading `passkey not registered` error, and a subsequent
+    /// `register` would clobber whatever data remains recoverable.
+    fn load(&self) -> Result<HashMap<String, StoredPasskeyPubkey>, PasskeyStoreError> {
         match fs::read_to_string(&self.path) {
-            Ok(contents) if !contents.trim().is_empty() => serde_json::from_str(&contents)
-                .unwrap_or_else(|e| {
-                    eprintln!("warning: corrupt passkey store at {}: {e}", self.path.display());
-                    HashMap::new()
-                }),
-            _ => HashMap::new(),
+            Ok(contents) if contents.trim().is_empty() => Ok(HashMap::new()),
+            Ok(contents) => {
+                serde_json::from_str(&contents).map_err(|e| PasskeyStoreError::Corrupt {
+                    path: self.path.display().to_string(),
+                    detail: e.to_string(),
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -297,10 +309,14 @@ impl PasskeyPubkeyStore {
 
     /// Look up a stored passkey by credential ID.
     ///
-    /// Returns `None` if the credential ID is not registered or the store
-    /// file cannot be read (best-effort — callers treat absence as rejection).
-    pub fn get(&self, credential_id: &str) -> Option<StoredPasskeyPubkey> {
-        self.load().get(credential_id).cloned()
+    /// Returns `Ok(None)` if the credential ID is not registered. A corrupt
+    /// store file is an explicit [`PasskeyStoreError::Corrupt`] (fail-closed —
+    /// callers must reject the request, not treat it as "not registered").
+    pub fn get(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<StoredPasskeyPubkey>, PasskeyStoreError> {
+        Ok(self.load()?.get(credential_id).cloned())
     }
 
     /// Register (or replace) a passkey public key for the given credential ID.
@@ -309,7 +325,7 @@ impl PasskeyPubkeyStore {
         credential_id: &str,
         stored: StoredPasskeyPubkey,
     ) -> Result<(), PasskeyStoreError> {
-        let mut map = self.load();
+        let mut map = self.load()?;
         map.insert(credential_id.to_string(), stored);
         self.save(&map)
     }
@@ -344,5 +360,50 @@ impl PasskeyPubkeyStore {
             }
             other => Err(PasskeyStoreError::UnsupportedAlgorithm(other.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> StoredPasskeyPubkey {
+        StoredPasskeyPubkey {
+            algorithm: "ed25519".to_string(),
+            public_key: vec![0u8; 32],
+            wallet_id: "w1".to_string(),
+            registered_at: 0,
+        }
+    }
+
+    #[test]
+    fn missing_store_is_empty_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PasskeyPubkeyStore::open(&dir.path().join("passkeys.json"));
+        assert_eq!(store.get("cred").unwrap(), None);
+    }
+
+    #[test]
+    fn register_then_get_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PasskeyPubkeyStore::open(&dir.path().join("passkeys.json"));
+        store.register("cred", sample()).unwrap();
+        assert!(store.get("cred").unwrap().is_some());
+    }
+
+    #[test]
+    fn corrupt_store_is_an_explicit_error_not_silent_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("passkeys.json");
+        std::fs::write(&path, b"{ not valid json").unwrap();
+        let store = PasskeyPubkeyStore::open(&path);
+
+        let err = store.get("cred").unwrap_err();
+        assert!(matches!(err, PasskeyStoreError::Corrupt { .. }), "got: {err:?}");
+
+        // register must refuse to clobber a corrupt store (fail-closed).
+        let mut store_mut = store;
+        let err = store_mut.register("cred", sample()).unwrap_err();
+        assert!(matches!(err, PasskeyStoreError::Corrupt { .. }), "got: {err:?}");
     }
 }

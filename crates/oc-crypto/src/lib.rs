@@ -31,6 +31,20 @@ pub use pqc::{
 };
 pub use secrecy::SecretBox as HardenedKey;
 
+/// Constant-time byte-slice equality.
+///
+/// Use for comparing capability tokens, API tokens and other secrets where a
+/// data-dependent early exit (`==` on slices) would leak prefix-match timing
+/// to a local attacker. Length differences still short-circuit (length is not
+/// treated as secret).
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    if a.len() != b.len() {
+        return false;
+    }
+    bool::from(a.ct_eq(b))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MemGuardError {
     #[error("mlock failed: {0}")]

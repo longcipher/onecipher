@@ -18,6 +18,7 @@ default = []
 hardened = ["dep:oc-crypto"]
 
 [dependencies]
+hkdf = { workspace = true }
 jiff = { workspace = true, features = ["serde", "std"] }
 oc-crypto = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }

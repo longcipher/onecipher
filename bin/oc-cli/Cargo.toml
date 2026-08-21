@@ -49,6 +49,7 @@ k256 = { workspace = true }
 oc-core = { workspace = true, features = ["hardened"] }
 oc-keyagent = { workspace = true }
 oc-netagent = { workspace = true }
+oc-policy = { workspace = true }
 oc-secret = { workspace = true }
 oc-signer = { workspace = true }
 oc-vault = { workspace = true }

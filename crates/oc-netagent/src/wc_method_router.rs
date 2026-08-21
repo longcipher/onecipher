@@ -17,9 +17,9 @@ use oc_core::{ChainIdExt, TxSimulation, approval_log::ApprovalLog};
 use oc_keyagent::{
     KeyAgentRequest, KeyAgentRequestKind, KeyAgentResponse, KeyAgentResponseKind,
     proto::{
-        GenerateChallengeRequest, GetBalanceRequest, ListWalletsResponse, PasskeyAuthorization,
-        SignAuthRequest, SignAuthResponse, SignMessageRequest, SignTransactionRequest,
-        SignTypedDataRequest, SignUserOpRequest,
+        GenerateChallengeRequest, ListWalletsResponse, PasskeyAuthorization, SignAuthRequest,
+        SignAuthResponse, SignMessageRequest, SignTransactionRequest, SignTypedDataRequest,
+        SignUserOpRequest,
     },
 };
 use oc_walletconnect::{
@@ -27,7 +27,21 @@ use oc_walletconnect::{
 };
 use prost::Message;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+
+/// Build the EIP-191 `personal_sign` payload: `"\x19Ethereum Signed Message:\n" + len + msg`.
+pub fn eip191_prefixed_message(message: &[u8]) -> Vec<u8> {
+    let mut out = format!("\x19Ethereum Signed Message:\n{}", message.len()).into_bytes();
+    out.extend_from_slice(message);
+    out
+}
+
+/// keccak256 over `data` (sha3 crate, same primitive oc-walletconnect uses for SIWE).
+fn keccak256(data: &[u8]) -> Vec<u8> {
+    use sha3::Digest;
+    let mut hasher = sha3::Keccak256::new();
+    hasher.update(data);
+    hasher.finalize().to_vec()
+}
 
 use crate::{
     approval::{
@@ -62,6 +76,11 @@ pub struct WcMethodRouter {
     approval_log: Option<Arc<ApprovalLog>>,
     /// Loaded policy for pre-signing risk evaluation (W2.1).
     policy: Option<oc_policy::PolicyV2>,
+    /// Whether a Danger-level simulation result should hard-reject a request
+    /// when no approval gate is active. Defaults to `true` (secure default):
+    /// without it, a reverted transaction signs silently whenever the Web UI
+    /// approval flow is disabled.
+    block_on_danger_simulation: bool,
     /// Shared WC session table (when wired by the daemon) — used to resolve
     /// the dApp name/origin for the approval gate when the wallet server did
     /// not attach them (e.g. pairing-topic requests).
@@ -79,6 +98,7 @@ impl WcMethodRouter {
             approval_timeout: Duration::from_secs(300),
             approval_log: None,
             policy: None,
+            block_on_danger_simulation: true,
             sessions: None,
             sign_auth_mode: SignAuthMode::RequirePasskey,
         }
@@ -99,6 +119,7 @@ impl WcMethodRouter {
             approval_timeout,
             approval_log,
             policy: None,
+            block_on_danger_simulation: true,
             sessions: None,
             sign_auth_mode: SignAuthMode::RequirePasskey,
         }
@@ -107,6 +128,20 @@ impl WcMethodRouter {
     /// Attach a loaded `PolicyV2` for pre-signing risk evaluation (W2.1).
     pub fn with_policy(mut self, policy: oc_policy::PolicyV2) -> Self {
         self.policy = Some(policy);
+        self
+    }
+
+    /// Attach an optional `PolicyV2` (builder-friendly variant used by the
+    /// daemon, which may or may not have a policy file on disk).
+    pub fn with_policy_opt(mut self, policy: Option<oc_policy::PolicyV2>) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Configure whether a Danger-level simulation result hard-rejects a
+    /// request when no approval gate is active. Defaults to `true`.
+    pub fn with_block_on_danger(mut self, block: bool) -> Self {
+        self.block_on_danger_simulation = block;
         self
     }
 
@@ -375,23 +410,35 @@ impl WcMethodRouter {
         params: &Value,
         chain_id: &str,
     ) -> Result<(RiskLevel, Vec<RiskReason>), (JsonRpcErrorCode, String)> {
-        let policy = match &self.policy {
-            Some(p) => p,
-            None => return Ok((RiskLevel::Safe, vec![])),
+        let Some(policy) = &self.policy else {
+            return Ok((RiskLevel::Safe, vec![]));
         };
 
         let mut reasons: Vec<RiskReason> = vec![];
 
-        // Chain whitelist check → Deny
-        if !policy.rules.chain_whitelist.is_empty() &&
-            !chain_id.is_empty() &&
-            !policy.rules.chain_whitelist.iter().any(|c| c == chain_id)
-        {
-            tracing::warn!(method, chain_id, "policy deny: chain not whitelisted");
-            return Err((
-                JsonRpcErrorCode::PolicyChainNotWhitelisted,
-                format!("chain {chain_id} not in policy whitelist"),
-            ));
+        // Chain whitelist check → Deny. An empty chain_id cannot be matched
+        // against the whitelist; instead of silently skipping (the previous
+        // behavior, which let message/typed-data signing bypass the
+        // whitelist entirely) we surface a Warning so approvers see that the
+        // rule was not evaluated.
+        if !policy.rules.chain_whitelist.is_empty() {
+            if chain_id.is_empty() {
+                reasons.push(RiskReason {
+                    code: "policy_warn_chain_unspecified".into(),
+                    level: RiskLevel::Warning,
+                    message: "request carries no chain id; chain-whitelist policy was not \
+                              evaluated"
+                        .into(),
+                    source: RiskSource::Policy,
+                    detail: None,
+                });
+            } else if !policy.rules.chain_whitelist.iter().any(|c| c == chain_id) {
+                tracing::warn!(method, chain_id, "policy deny: chain not whitelisted");
+                return Err((
+                    JsonRpcErrorCode::PolicyChainNotWhitelisted,
+                    format!("chain {chain_id} not in policy whitelist"),
+                ));
+            }
         }
 
         // Expiry check → Deny
@@ -424,6 +471,38 @@ impl WcMethodRouter {
         } else {
             Ok((RiskLevel::Warning, reasons))
         }
+    }
+
+    /// Whether an approval gate will actually run for this request.
+    ///
+    /// `maybe_gate_approval` returns `Ok(true)` both when it approved AND
+    /// when gating is disabled; callers that need to distinguish the two
+    /// (e.g. the Danger-simulation hard stop) use this predicate.
+    fn approval_gating_active(&self) -> bool {
+        self.approval_mode.load(Ordering::Relaxed) && self.approval.is_some()
+    }
+
+    /// Hard-stop on a Danger-level simulation result when no approval gate
+    /// is active (secure default; see [`Self::with_block_on_danger`]).
+    ///
+    /// When the Web UI approval flow IS active, the danger signal reaches the
+    /// human approver through the risk card and their decision governs.
+    fn maybe_block_on_danger(
+        &self,
+        simulation_risk: RiskLevel,
+        simulation_reasons: &[RiskReason],
+    ) -> Result<(), (JsonRpcErrorCode, String)> {
+        if !self.block_on_danger_simulation || self.approval_gating_active() {
+            return Ok(());
+        }
+        if simulation_risk == RiskLevel::Danger {
+            let detail = simulation_reasons
+                .first()
+                .map_or_else(|| "simulation failed".to_string(), |r| r.message.clone());
+            tracing::warn!(detail = %detail, "blocking ungated signing: dangerous simulation");
+            return Err((JsonRpcErrorCode::UserRejected, format!("transaction rejected: {detail}")));
+        }
+        Ok(())
     }
 
     /// Process simulation result into (simulation, risk_delta, risk_reasons_delta).
@@ -563,21 +642,25 @@ impl WalletMethodHandler for WcMethodRouter {
                     let (mut risk, mut risk_reasons) =
                         self.policy_evaluate_signing(&method, &params, &chain_id)?;
 
-                    // W3.3: Simulate EVM transactions before approval
-                    let simulation = {
+                    // W3.3: Simulate EVM transactions before approval. The
+                    // simulation risk is tracked separately so the danger
+                    // gate can hard-stop ungated requests even though `risk`
+                    // is later merged for the approval card.
+                    let (simulation, sim_risk, sim_reasons) = {
                         let cid: Option<oc_core::ChainId> = chain_id.parse().ok();
                         if cid.as_ref().map_or(false, |c| c.is_evm()) {
                             let sim_result =
                                 crate::sim::simulate_evm_tx(&raw_tx_hex, &chain_id).await;
                             let (sim, sim_risk, sim_reasons) =
                                 Self::apply_simulation_result(sim_result);
-                            risk = std::cmp::max(risk, sim_risk);
-                            risk_reasons.extend(sim_reasons);
-                            sim
+                            (sim, sim_risk, sim_reasons)
                         } else {
-                            None
+                            (None, RiskLevel::Safe, vec![])
                         }
                     };
+                    self.maybe_block_on_danger(sim_risk, &sim_reasons)?;
+                    risk = std::cmp::max(risk, sim_risk);
+                    risk_reasons.extend(sim_reasons);
 
                     // Web UI approval gate (W1.3)
                     self.maybe_gate_approval(
@@ -783,13 +866,18 @@ impl WalletMethodHandler for WcMethodRouter {
                         AuthType::Eip191 => {
                             // Keep it simple: sign `aud || "\n" || nonce`, or
                             // the raw `message` field when the dApp supplied one.
+                            // The Key-Agent applies the EIP-191 personal_sign
+                            // prefix, so the reported hash is keccak256 over
+                            // the *prefixed* message — exactly what standard
+                            // `ecrecover` tooling expects (the previous
+                            // SHA-256 digest verified against nothing).
                             let raw = match params.get("message").and_then(Value::as_str) {
                                 Some(m) => m.as_bytes().to_vec(),
                                 None => format!("{}\n{}", auth_params.aud, auth_params.nonce)
                                     .into_bytes(),
                             };
-                            let hash = Sha256::digest(&raw).to_vec();
-                            (raw, hash)
+                            let prefixed = eip191_prefixed_message(&raw);
+                            (raw, keccak256(&prefixed))
                         }
                     };
 
@@ -951,16 +1039,18 @@ impl WalletMethodHandler for WcMethodRouter {
                 }
 
                 "onecipher_getBalance" => {
-                    let CommonParams { wallet_id, chain_id, .. } =
-                        Self::extract_common_params(&params)?;
-                    let req = GetBalanceRequest { wallet_id, chain_id };
-                    let bytes = self.forward(KeyAgentRequestKind::GetBalance(req)).await?;
-                    let resp: oc_keyagent::proto::BalanceResponse =
-                        Message::decode(bytes.as_slice())
-                            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
-                    Ok(
-                        json!({"wallet_id": resp.wallet_id, "chain_id": resp.chain_id, "balance": resp.balance, "decimals": resp.decimals, "symbol": resp.symbol}),
-                    )
+                    // Balance queries require network I/O, which the
+                    // Key-Agent forbids by design (R56). The previous
+                    // implementation forwarded the request anyway and always
+                    // surfaced a `not_implemented` error; reject locally with
+                    // actionable guidance instead of burning an IPC round-trip.
+                    let _ = Self::extract_common_params(&params)?;
+                    Err((
+                        JsonRpcErrorCode::UnsupportedMethod,
+                        "onecipher_getBalance is not served over WalletConnect; use the local \
+                         HTTP-RPC or CLI surface"
+                            .into(),
+                    ))
                 }
 
                 _ => {

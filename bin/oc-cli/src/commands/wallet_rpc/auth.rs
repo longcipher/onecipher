@@ -50,6 +50,7 @@ pub(crate) fn require_authorization(state: &SignerState, params: &Value) -> Resu
         .map_err(|e| RpcError::new(-32603, format!("passkey store: {e}")))?;
     let stored = store
         .get(&auth.credential_id)
+        .map_err(|e| RpcError::new(-32603, format!("passkey store: {e}")))?
         .ok_or_else(|| RpcError::new(-32602, "passkey not registered"))?;
     if stored.wallet_id != configured_wallet_id {
         return Err(RpcError::new(-32602, "passkey is not bound to configured wallet"));

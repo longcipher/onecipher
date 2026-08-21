@@ -98,8 +98,11 @@ pub struct UnlockToken {
 
 impl Clone for UnlockToken {
     fn clone(&self) -> Self {
+        // Best-effort mlock: Clone is infallible by trait contract, and an
+        // mlock failure must never panic on a signing hot path. The fallback
+        // copy is still zeroized on drop, just not page-locked.
         Self {
-            key: HardenedBytes::from_slice(self.key.as_ref()).expect("clone unlock token key"),
+            key: HardenedBytes::from_slice_best_effort(self.key.as_ref()),
             issued_at: self.issued_at,
             ttl: self.ttl,
             wallet_id: self.wallet_id.clone(),
@@ -113,11 +116,35 @@ impl UnlockToken {
 
     /// Create a new unlock token from Passkey-derived key material.
     ///
-    /// Derives a 32-byte key by hashing the key material together with a
-    /// domain-separation tag and the wallet ID (SHA-256). This is a
-    /// simplified HKDF-like construction; a full HKDF would require an
-    /// additional `hkdf` crate dependency.
+    /// Derives a 32-byte key with HKDF-SHA256 (RFC 5869):
+    /// salt = `"onecipher-unlock-token-v2"`, IKM = key material,
+    /// info = wallet ID. The wallet ID as HKDF `info` provides domain
+    /// separation per wallet while keeping the derivation a proper KDF
+    /// (extract-then-expand) instead of a bare hash concatenation.
+    ///
+    /// Wallets encrypted under the pre-v2 scheme remain readable via
+    /// [`UnlockToken::new_legacy_sha256`]; callers decrypting user data must
+    /// try [`Self::new`] first and fall back to the legacy constructor on
+    /// decryption failure.
     pub fn new(wallet_id: String, key_material: &[u8]) -> Result<Self, OcError> {
+        let hk = hkdf::Hkdf::<Sha256>::new(Some(b"onecipher-unlock-token-v2"), key_material);
+        let mut hash = [0u8; 32];
+        // 32 bytes is a valid HKDF-SHA256 output length — expand cannot fail.
+        hk.expand(wallet_id.as_bytes(), &mut hash).map_err(|e| OcError::InvalidInput {
+            message: format!("unlock token hkdf expand failed: {e}"),
+        })?;
+        let key = HardenedBytes::from_slice(&hash).map_err(|e| OcError::InvalidInput {
+            message: format!("failed to harden unlock token: {e}"),
+        })?;
+        Ok(Self { key, issued_at: Instant::now(), ttl: Self::DEFAULT_TTL, wallet_id })
+    }
+
+    /// Legacy v1 derivation (pre-HKDF): SHA-256 over
+    /// `"onecipher-unlock-token" || key_material || wallet_id`.
+    ///
+    /// Retained ONLY so wallets encrypted under the pre-v2 scheme stay
+    /// readable during migration. New code MUST use [`UnlockToken::new`].
+    pub fn new_legacy_sha256(wallet_id: String, key_material: &[u8]) -> Result<Self, OcError> {
         let mut hasher = Sha256::new();
         hasher.update(b"onecipher-unlock-token");
         hasher.update(key_material);
@@ -237,6 +264,16 @@ mod tests {
         let p1 = t1.to_passphrase().unwrap();
         let p2 = t2.to_passphrase().unwrap();
         assert_eq!(p1.as_bytes(), p2.as_bytes(), "same inputs must yield same passphrase");
+    }
+
+    #[test]
+    fn test_v2_hkdf_differs_from_legacy_sha256() {
+        // The v2 (HKDF) and legacy v1 (bare SHA-256) derivations must produce
+        // different keys so a mixed fleet of old/new wallets can never collide.
+        let km = [0x42u8; 32];
+        let v2 = UnlockToken::new("w".to_string(), &km).unwrap();
+        let v1 = UnlockToken::new_legacy_sha256("w".to_string(), &km).unwrap();
+        assert_ne!(v2.key_bytes(), v1.key_bytes());
     }
 
     #[test]

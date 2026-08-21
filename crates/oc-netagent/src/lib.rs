@@ -153,6 +153,49 @@ pub async fn run_server_controlled_with_approvals(
     relay_url: &str,
     state_dir: &str,
     trusted_origins: Vec<String>,
+    pairing_rx: tokio::sync::mpsc::Receiver<oc_walletconnect::PairingUri>,
+    sign_auth_internal_token: Option<Vec<u8>>,
+    approvals: Option<
+        tokio::sync::mpsc::Sender<(
+            oc_core::approval::PendingApproval,
+            tokio::sync::oneshot::Sender<oc_core::approval::ApprovalDecision>,
+        )>,
+    >,
+    approval_log: Option<std::sync::Arc<oc_core::approval_log::ApprovalLog>>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<(), NetAgentError> {
+    run_server_controlled_full(
+        key_agent_sock,
+        relay_url,
+        state_dir,
+        trusted_origins,
+        pairing_rx,
+        sign_auth_internal_token,
+        approvals,
+        approval_log,
+        cancel,
+        // No policy loaded — the daemon passes one when `~/.onecipher/
+        // wc-policy.json` exists (see bin/oc-cli). `None` means every signing
+        // request bypasses policy evaluation, which callers must do
+        // deliberately.
+        None,
+    )
+    .await
+}
+
+/// [`run_server_controlled_with_approvals`] with an optional pre-signing
+/// [`oc_policy::PolicyV2`] wired into the method router (H3).
+///
+/// When `policy` is `Some`, chain-whitelist/expiry rules are enforced (deny)
+/// and contract/chain-unspecified checks surface as warnings on the approval
+/// card. When `None`, no policy evaluation happens — the daemon logs a
+/// startup warning in that case.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_server_controlled_full(
+    key_agent_sock: &str,
+    relay_url: &str,
+    state_dir: &str,
+    trusted_origins: Vec<String>,
     mut pairing_rx: tokio::sync::mpsc::Receiver<oc_walletconnect::PairingUri>,
     sign_auth_internal_token: Option<Vec<u8>>,
     approvals: Option<
@@ -163,6 +206,7 @@ pub async fn run_server_controlled_with_approvals(
     >,
     approval_log: Option<std::sync::Arc<oc_core::approval_log::ApprovalLog>>,
     cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    policy: Option<oc_policy::PolicyV2>,
 ) -> Result<(), NetAgentError> {
     let key_agent = KeyAgentClient::new(key_agent_sock);
     // Shared WC session table: handed to BOTH the method router (so the
@@ -192,10 +236,12 @@ pub async fn run_server_controlled_with_approvals(
             )
             .with_sign_auth_mode(sign_auth_mode.clone())
             .with_sessions(std::sync::Arc::clone(&sessions))
+            .with_policy_opt(policy)
         }
         None => WcMethodRouter::new(key_agent)
             .with_sign_auth_mode(sign_auth_mode)
-            .with_sessions(std::sync::Arc::clone(&sessions)),
+            .with_sessions(std::sync::Arc::clone(&sessions))
+            .with_policy_opt(policy),
     };
     let store = SessionStore::open(state_dir)?;
 

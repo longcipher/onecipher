@@ -13,7 +13,7 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
 };
@@ -29,31 +29,61 @@ use crate::{
 /// Default UDS path: `$XDG_RUNTIME_DIR/onecipher/key-agent.sock`.
 ///
 /// **Deviation note (T11):** If `XDG_RUNTIME_DIR` is unset, the fallback is
-/// `/tmp/onecipher-key-agent.sock` (NO uid suffix). This is acceptable for T11
-/// scaffolding because:
-/// 1. On systemd Linux, `XDG_RUNTIME_DIR` is always set (`/run/user/$UID`).
-/// 2. On macOS dev (this build host), `/tmp` is fine for testing.
-/// 3. T12 (sandbox) will enforce proper isolation via seccomp + landlock + App Sandbox entitlements
-///    at runtime — the socket path itself is not the security boundary.
-/// 4. The original plan called for `unsafe { libc::getuid() }` to build
-///    `/tmp/onecipher-key-agent-$UID.sock`. We skipped `libc` entirely to keep
-///    `#![deny(unsafe_code)]` at the crate root without any `#[allow(unsafe_code)]` exceptions
-///    (ponytail step 2 — stdlib beats step 3 native). Production deployments MUST set
-///    `XDG_RUNTIME_DIR`.
+/// `/tmp/onecipher-key-agent-$UID.sock`. The per-UID suffix prevents the
+/// classic multi-user hazard of a predictable shared `/tmp` path (pre-created
+// socket files / symlink games by other local users). Production deployments
+/// MUST still prefer `XDG_RUNTIME_DIR`.
 pub fn default_socket_path() -> String {
-    socket_path_from(std::env::var("XDG_RUNTIME_DIR").ok().as_deref())
+    socket_path_from(std::env::var("XDG_RUNTIME_DIR").ok().as_deref(), current_uid())
+}
+
+#[cfg(unix)]
+fn current_uid() -> u64 {
+    #[allow(unsafe_code)]
+    // SAFETY: `libc::getuid()` takes no arguments, cannot fail, and only
+    // reads the process's real user id.
+    unsafe {
+        u64::from(libc::getuid())
+    }
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> u64 {
+    0
+}
+
+/// Tighten the file-mode creation mask around `f` so nodes it creates are
+/// owner-only. Returns the result of `f` (the old mask is always restored).
+#[cfg(unix)]
+fn with_tight_umask<T>(f: impl FnOnce() -> T) -> T {
+    #[allow(unsafe_code)]
+    // SAFETY: `umask` is a simple process-wide getter/setter of the
+    // file-mode creation mask; no pointers involved.
+    let old = unsafe { libc::umask(0o077) };
+    let out = f();
+    #[allow(unsafe_code)]
+    // SAFETY: same primitive as above; restores the previous mask.
+    unsafe {
+        libc::umask(old)
+    };
+    out
 }
 
 /// Pure path-computation helper (no env access).
 ///
 /// Exposed so tests can verify the path logic without mutating the global
 /// `XDG_RUNTIME_DIR` (which races under parallel test execution).
-pub fn socket_path_from(xdg: Option<&str>) -> String {
+pub fn socket_path_from(xdg: Option<&str>, uid: u64) -> String {
     match xdg {
         Some(xdg) => format!("{xdg}/onecipher/key-agent.sock"),
-        None => "/tmp/onecipher-key-agent.sock".to_string(),
+        None => format!("/tmp/onecipher-key-agent-{uid}.sock"),
     }
 }
+
+/// Maximum number of concurrently served connections. Thread-per-connection
+/// is unbounded by default; a local process could otherwise exhaust threads
+/// by opening UDS connections in a tight loop.
+const MAX_CONNECTIONS: usize = 64;
 
 /// Run the Key-Agent server with a cooperative shutdown flag.
 ///
@@ -79,12 +109,20 @@ pub fn run(socket_path: Option<&str>, stop: Option<Arc<AtomicBool>>) -> Result<(
     // Remove stale socket file if present (best-effort).
     let _ = std::fs::remove_file(&path);
 
-    // Bind.
-    let listener = UnixListener::bind(&path)?;
-    // R55: chmod 0600 on the socket file — only the owner may connect.
+    // Tighten the creation mask around bind so the socket node is created
+    // owner-only — closing the bind→chmod permission window.
+    #[cfg(unix)]
+    let bind_result = with_tight_umask(|| UnixListener::bind(&path));
+    #[cfg(not(unix))]
+    let bind_result = UnixListener::bind(&path);
+    let listener = bind_result?;
+    // R55: chmod 0600 on the socket file — belt-and-braces behind the umask.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
 
-    eprintln!("oc-keyagent: listening on {path}");
+    tracing::info!(path = %path, "oc-keyagent: listening");
+
+    // Live-connection counter enforcing MAX_CONNECTIONS.
+    let live_connections = Arc::new(AtomicUsize::new(0));
 
     // Cooperative shutdown. `UnixListener::accept` is blocking, so when `stop`
     // is set we switch the listener to non-blocking and wake the accept loop
@@ -102,10 +140,23 @@ pub fn run(socket_path: Option<&str>, stop: Option<Arc<AtomicBool>>) -> Result<(
 
         match listener.accept() {
             Ok((stream, _addr)) => {
+                if live_connections.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
+                    tracing::warn!("connection limit {MAX_CONNECTIONS} reached; rejecting");
+                    // Best-effort rejection notice so well-behaved clients see
+                    // an error instead of a hang.
+                    let _ = write_typed(
+                        &mut &stream,
+                        &Frame::new(KeyAgentResponse::error("connection limit reached")),
+                    );
+                    continue;
+                }
+                live_connections.fetch_add(1, Ordering::Relaxed);
+                let live = Arc::clone(&live_connections);
                 thread::spawn(move || {
                     if let Err(e) = handle_conn(stream) {
-                        eprintln!("oc-keyagent: connection error: {e}");
+                        tracing::warn!(error = %e, "connection error");
                     }
+                    live.fetch_sub(1, Ordering::Relaxed);
                 });
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -118,7 +169,7 @@ pub fn run(socket_path: Option<&str>, stop: Option<Arc<AtomicBool>>) -> Result<(
                 if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
                     break;
                 }
-                eprintln!("oc-keyagent: accept error: {e}");
+                tracing::warn!(error = %e, "accept error");
                 // Continue accepting — transient errors must not kill the agent.
             }
         }
@@ -185,15 +236,15 @@ mod tests {
     fn test_socket_path_from_xdg_runtime_dir() {
         // Pure-logic test — no env mutation, no race under parallel execution.
         assert_eq!(
-            socket_path_from(Some("/run/user/12345")),
+            socket_path_from(Some("/run/user/12345"), 12345),
             "/run/user/12345/onecipher/key-agent.sock"
         );
     }
 
     #[test]
-    fn test_socket_path_from_no_xdg_fallback() {
-        // Deviation: no UID suffix in the fallback path.
-        assert_eq!(socket_path_from(None), "/tmp/onecipher-key-agent.sock");
+    fn test_socket_path_from_no_xdg_fallback_includes_uid() {
+        // Deviation: per-UID fallback prevents cross-user /tmp collisions.
+        assert_eq!(socket_path_from(None, 42), "/tmp/onecipher-key-agent-42.sock");
     }
 
     #[test]

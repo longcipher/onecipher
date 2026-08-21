@@ -8,6 +8,12 @@ use zeroize::Zeroize;
 
 use crate::{MemGuardError, page_guard};
 
+/// Zeroize a `Vec` (including spare capacity semantics of the buffer's live
+/// bytes) immediately before it is dropped.
+fn wipe(mut v: Vec<u8>) {
+    v.zeroize();
+}
+
 pub struct HardenedBytes {
     inner: Box<[u8]>,
 }
@@ -57,17 +63,27 @@ impl HardenedBytes {
         Ok(hb)
     }
 
-    /// Convert an owned `Vec<u8>` into a `HardenedBytes` without re-allocating.
+    /// Convert an owned `Vec<u8>` into a `HardenedBytes`.
     ///
-    /// The Vec is shrunk to its exact length via `into_boxed_slice`, then
-    /// page-locked and marked DONT_DUMP. On `dont_dump` failure after a
-    /// successful `lock`, the lock is undone and the error is propagated.
+    /// The Vec's contents are first copied into an exactly-sized buffer and the
+    /// source (including any spare capacity) is zeroized. This prevents a
+    /// stale plaintext copy from surviving in freed heap memory when
+    /// `into_boxed_slice` would otherwise shrink-reallocate a `Vec` whose
+    /// capacity exceeds its length.
+    ///
+    /// On `dont_dump` failure after a successful `lock`, the lock is undone
+    /// and the error is propagated.
     pub fn from_vec(data: Vec<u8>) -> Result<Self, MemGuardError> {
         if data.is_empty() {
             return Ok(Self { inner: Box::default() });
         }
-        let len = data.len();
-        let inner = data.into_boxed_slice();
+        // Copy into an exactly-sized buffer, then wipe the source (including
+        // any spare capacity) so no plaintext survives in freed heap memory.
+        let mut exact = Vec::with_capacity(data.len());
+        exact.extend_from_slice(&data);
+        wipe(data);
+        let len = exact.len();
+        let inner = exact.into_boxed_slice();
         let ptr = inner.as_ptr();
         page_guard::lock(ptr, len)?;
         if let Err(e) = page_guard::dont_dump(ptr, len) {
@@ -75,6 +91,23 @@ impl HardenedBytes {
             return Err(e);
         }
         Ok(Self { inner })
+    }
+
+    /// Copy bytes into a new buffer, page-locking on a best-effort basis.
+    ///
+    /// Unlike [`HardenedBytes::from_slice`], an mlock/DONTDUMP failure
+    /// degrades to an unlocked — but still zeroized-on-drop — buffer instead
+    /// of returning an error. Intended for `Clone`-like contexts whose trait
+    /// contract forbids fallibility, and for callers that must never panic on
+    /// signing hot paths.
+    pub fn from_slice_best_effort(data: &[u8]) -> Self {
+        if data.is_empty() {
+            return Self { inner: Box::default() };
+        }
+        match Self::from_slice(data) {
+            Ok(hb) => hb,
+            Err(_) => Self { inner: data.to_vec().into_boxed_slice() },
+        }
     }
 
     /// Expose the underlying bytes. Use with care.
@@ -94,10 +127,7 @@ impl Clone for HardenedBytes {
     /// zeroized on `Drop`, just not pinned in RAM. This matches the
     /// historical `SecretBytes::clone` behavior (best-effort mlock).
     fn clone(&self) -> Self {
-        match Self::from_slice(&self.inner) {
-            Ok(c) => c,
-            Err(_) => Self { inner: self.inner.clone() },
-        }
+        Self::from_slice_best_effort(&self.inner)
     }
 }
 
@@ -211,10 +241,29 @@ mod tests {
     }
 
     #[test]
-    fn from_vec_preserves_data_no_realloc() {
+    fn from_vec_preserves_data_and_wipes_source() {
         let data = vec![1u8, 2, 3, 4, 5];
         let hb = HardenedBytes::from_vec(data).unwrap();
         assert_eq!(hb.expose(), &[1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn from_vec_with_spare_capacity_is_exact_length() {
+        // capacity > len previously triggered a shrink-realloc in
+        // into_boxed_slice; the fixed implementation must still yield an
+        // exact-length buffer holding only the logical bytes.
+        let mut data = Vec::with_capacity(64);
+        data.extend_from_slice(&[7u8; 5]);
+        let hb = HardenedBytes::from_vec(data).unwrap();
+        assert_eq!(hb.len(), 5);
+        assert_eq!(hb.expose(), &[7u8; 5][..]);
+    }
+
+    #[test]
+    fn from_slice_best_effort_preserves_data() {
+        let hb = HardenedBytes::from_slice_best_effort(&[0xA, 0xB]);
+        assert_eq!(hb.expose(), &[0xA, 0xB][..]);
+        assert_eq!(hb.len(), 2);
     }
 
     #[test]
