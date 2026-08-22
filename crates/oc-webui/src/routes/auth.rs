@@ -98,19 +98,36 @@ pub fn validate_session_headers(
     session_store.validate(&session_id)
 }
 
+/// State for [`require_session`]: browser sessions plus the loopback CLI
+/// capability token value (see [`crate::auth::cli_token`]).
+#[derive(Clone)]
+pub struct SessionGate {
+    pub session_store: SessionStore,
+    /// Expected `x-oc-cli-token` value; `None` disables token auth entirely.
+    pub cli_token: Option<std::sync::Arc<String>>,
+}
+
 /// Middleware gate for protected Web UI REST routes.
 pub async fn require_session(
-    State(session_store): State<SessionStore>,
+    State(gate): State<SessionGate>,
     headers: axum::http::HeaderMap,
     request: Request,
     next: Next,
 ) -> Response {
-    if validate_session_headers(&headers, &session_store).is_some() {
-        next.run(request).await
-    } else {
-        (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "authentication required"})))
-            .into_response()
+    if validate_session_headers(&headers, &gate.session_store).is_some() {
+        return next.run(request).await;
     }
+    // Local CLI bridge: same-user processes present the capability token that
+    // the daemon persisted at startup (`~/.onecipher/webui_cli.token`).
+    if let Some(expected) = &gate.cli_token {
+        let presented =
+            headers.get(crate::auth::CLI_TOKEN_HEADER).and_then(|v| v.to_str().ok()).map(str::trim);
+        if presented.is_some_and(|c| crate::auth::cli_token::token_matches(expected, c)) {
+            return next.run(request).await;
+        }
+    }
+    (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "authentication required"})))
+        .into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -530,9 +547,12 @@ mod tests {
     #[tokio::test]
     async fn require_session_rejects_missing_session() {
         let store = SessionStore::new(1800);
-        let app = Router::new()
-            .route("/protected", get(|| async { StatusCode::OK }))
-            .layer(from_fn_with_state(store, require_session));
+        let app = Router::new().route("/protected", get(|| async { StatusCode::OK })).layer(
+            from_fn_with_state(
+                SessionGate { session_store: store, cli_token: None },
+                require_session,
+            ),
+        );
 
         let resp = app
             .oneshot(Request::builder().uri("/protected").body(Body::empty()).unwrap())
@@ -545,9 +565,12 @@ mod tests {
     async fn require_session_accepts_header_session() {
         let store = SessionStore::new(1800);
         let session = store.create_session("cred-1", None);
-        let app = Router::new()
-            .route("/protected", get(|| async { StatusCode::OK }))
-            .layer(from_fn_with_state(store, require_session));
+        let app = Router::new().route("/protected", get(|| async { StatusCode::OK })).layer(
+            from_fn_with_state(
+                SessionGate { session_store: store, cli_token: None },
+                require_session,
+            ),
+        );
 
         let resp = app
             .oneshot(
@@ -560,5 +583,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn require_session_accepts_cli_token_and_rejects_wrong_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = crate::auth::cli_token::ensure_cli_token(dir.path()).unwrap();
+        let store = SessionStore::new(1800);
+
+        let build = |gate: SessionGate| {
+            Router::new()
+                .route("/protected", get(|| async { StatusCode::OK }))
+                .layer(from_fn_with_state(gate, require_session))
+        };
+
+        // Matching token → allowed without a browser session.
+        let ok = build(SessionGate {
+            session_store: store.clone(),
+            cli_token: Some(std::sync::Arc::new(token.clone())),
+        });
+        let resp = ok
+            .oneshot(
+                Request::builder()
+                    .uri("/protected")
+                    .header(crate::auth::CLI_TOKEN_HEADER, &token)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Wrong / missing token → 401.
+        for header in [Some("nope"), None] {
+            let mut req = Request::builder().uri("/protected");
+            if let Some(h) = header {
+                req = req.header(crate::auth::CLI_TOKEN_HEADER, h);
+            }
+            let bad = build(SessionGate {
+                session_store: store.clone(),
+                cli_token: Some(std::sync::Arc::new(token.clone())),
+            });
+            let resp = bad.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        }
     }
 }

@@ -1013,8 +1013,21 @@ fn test_policy_create_missing_file() {
 #[test]
 fn test_key_lifecycle() {
     let _home = HomeGuard::new();
+    // The API-key path decrypts the target wallet, so one must exist first
+    // (CLI-created wallets are empty-passphrase by default).
+    run_ok(&["onecipher", "wallet", "create", "--name", "w1"]);
+    // Attached policies must be registered before they can be referenced.
+    let dir = tempfile::tempdir().unwrap();
+    let policy_path = dir.path().join("policy.json");
+    std::fs::write(
+        &policy_path,
+        r#"{"id":"p1","name":"test","rules":[],"version":2,"created_at":"2026-01-01T00:00:00Z","action":"deny"}"#,
+    )
+    .unwrap();
+    run_ok(&["onecipher", "policy", "create", "--file", &policy_path.to_string_lossy()]);
+    // Timestamps only accept hour-or-smaller spans (jiff invariant).
     let expires =
-        jiff::Timestamp::now().checked_add(jiff::Span::new().days(1)).unwrap().to_string();
+        jiff::Timestamp::now().checked_add(jiff::Span::new().hours(24)).unwrap().to_string();
     run_ok(&[
         "onecipher",
         "key",
@@ -1032,6 +1045,46 @@ fn test_key_lifecycle() {
     // revoke requires confirm
     let res = run_cli(&["onecipher", "key", "revoke", "--id", "agent1"]);
     assert!(res.is_err());
+}
+
+// -----------------------------------------------------------------------
+// 51b. api key create works on an EMPTY-passphrase wallet without any
+//      passphrase env var (regression: forced read_passphrase made
+//      decryption fail on default wallets)
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_key_create_empty_passphrase_wallet() {
+    let _home = HomeGuard::new();
+    run_ok(&["onecipher", "wallet", "create", "--name", "nopw"]);
+    // No ONECIPHER_PASSPHRASE set — must not prompt (cfg(test) stdin is
+    // non-interactive) and must not fail decryption.
+    run_ok(&["onecipher", "key", "create", "--name", "agent-nopw", "--wallet", "nopw"]);
+
+    let keys = oc_wallet::key_store::list_api_keys(None).unwrap();
+    assert_eq!(keys.len(), 1, "exactly one key file expected");
+    assert_eq!(keys[0].name, "agent-nopw");
+    assert_eq!(keys[0].wallet_ids.len(), 1);
+
+    // A protected wallet still requires the matching passphrase.
+    set_env("ONECIPHER_PASSPHRASE", "np-secret");
+    run_ok(&[
+        "onecipher",
+        "wallet",
+        "change-password",
+        "--wallet",
+        "nopw",
+        "--passphrase",
+        "",
+        "--new-passphrase",
+        "np-secret",
+    ]);
+    remove_env("ONECIPHER_PASSPHRASE");
+
+    // Without the passphrase in non-interactive mode → clean error.
+    let res =
+        run_cli(&["onecipher", "key", "create", "--name", "agent-locked", "--wallet", "nopw"]);
+    assert!(res.is_err(), "protected wallet must require a passphrase non-interactively");
 }
 
 // -----------------------------------------------------------------------
@@ -1668,33 +1721,42 @@ fn test_webui_http_bridge_against_mock_server() {
     let _home = HomeGuard::new();
 
     // A tiny mock HTTP server that emulates the daemon's /api/approvals and
-    // /api/auth endpoints on 127.0.0.1.
+    // /api/auth endpoints on 127.0.0.1. Header violations are RECORDED, not
+    // asserted in-thread: a panicking server thread would leave the client
+    // hanging on its next request instead of failing the test with context.
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
 
+    let header_violations = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let violations_in_thread = header_violations.clone();
     let server = std::thread::spawn(move || {
-        for _ in 0..4 {
+        for _ in 0..5 {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buf = [0u8; 2048];
             let n = stream.read(&mut buf).unwrap();
             let req = String::from_utf8_lossy(&buf[..n]).to_string();
-            let (status, body) = if req.starts_with("GET /api/approvals ") {
+            let (status, body) = if !req.to_ascii_lowercase().contains("x-oc-cli-token:") {
+                violations_in_thread
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(req.lines().next().unwrap_or_default().to_string());
+                (401, r#"{"error":"authentication required"}"#.to_string())
+            } else if req.starts_with("GET /api/approvals ") {
                 (
                     200,
-                    r#"{"approvals":[{"id":"a1","method":"eth_sendTransaction","dapp_name":"Mock","chain_id":"eip155:1"}]}"#,
+                    r#"{"approvals":[{"id":"a1","method":"eth_sendTransaction","dapp_name":"Mock","chain_id":"eip155:1"}]}"#.to_string(),
                 )
             } else if req.starts_with("POST /api/approvals/") && req.contains("/decision") {
                 // Echo the decision body back.
-                let _ = req;
-                (200, r#"{"ok":true}"#)
+                (200, r#"{"ok":true}"#.to_string())
             } else if req.starts_with("GET /api/auth/status ") {
-                (200, r#"{"locked":false}"#)
+                (200, r#"{"locked":false}"#.to_string())
             } else if req.starts_with("POST /api/auth/lock ") {
-                (200, r#"{"ok":true}"#)
+                (200, r#"{"ok":true}"#.to_string())
             } else if req.starts_with("POST /api/auth/bootstrap ") {
-                (200, r#"{"needs_registration":true,"bootstrap_ready":false}"#)
+                (200, r#"{"needs_registration":true,"bootstrap_ready":false}"#.to_string())
             } else {
-                (404, r#"{"error":"not found"}"#)
+                (404, r#"{"error":"not found"}"#.to_string())
             };
             let resp = format!(
                 "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1705,8 +1767,12 @@ fn test_webui_http_bridge_against_mock_server() {
         }
     });
 
-    // Write the mock port into webui.port.
-    std::fs::write(_home.path().join("webui.port"), port.to_string()).unwrap();
+    // Write the mock port into $HOME/.onecipher/webui.port (the daemon's
+    // state dir) plus a CLI capability token the bridge must present.
+    let state_dir = _home.path().join(".onecipher");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    std::fs::write(state_dir.join("webui.port"), port.to_string()).unwrap();
+    std::fs::write(state_dir.join("webui_cli.token"), b"test-cli-token-123").unwrap();
 
     // approval list should succeed against the mock and find 1 approval.
     // (It prints; we only assert no error.)
@@ -1727,7 +1793,11 @@ fn test_webui_http_bridge_against_mock_server() {
         "--yes",
     ]);
 
-    drop(server);
+    server.join().expect("mock server thread should not panic");
+    assert!(
+        header_violations.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty(),
+        "every bridge request must carry the x-oc-cli-token header"
+    );
     let _ = listener;
 }
 
@@ -1753,8 +1823,9 @@ fn test_keyagent_real_uds_session_key_roundtrip() {
         frame::FrameClient,
         proto::{
             CreateSessionKeyRequest, CreateSessionKeyResponse, Empty, GenerateChallengeRequest,
-            GenerateChallengeResponse, PasskeyAuthorization, RegisterPasskeyRequest,
-            RegisterPasskeyResponse, RevokeSessionKeyRequest, RevokeSessionKeyResponse,
+            GenerateChallengeResponse, ListSessionKeysRequest, ListSessionKeysResponse,
+            PasskeyAuthorization, RegisterPasskeyRequest, RegisterPasskeyResponse,
+            RevokeSessionKeyRequest, RevokeSessionKeyResponse, SessionKeyStatus,
         },
         request::{KeyAgentRequest, KeyAgentRequestKind},
         response::KeyAgentResponseKind,
@@ -1840,6 +1911,25 @@ fn test_keyagent_real_uds_session_key_roundtrip() {
         other => panic!("expected Ok create, got {other:?}"),
     };
     assert!(created.session_key_id.starts_with("sk-"), "session key id");
+    let sk_id = created.session_key_id.clone();
+
+    // 2b. ListSessionKeys reports the fresh key as ACTIVE.
+    {
+        let list_req = KeyAgentRequest {
+            kind: Some(KeyAgentRequestKind::ListSessionKeys(ListSessionKeysRequest {})),
+        };
+        let resp = client.send_request(&list_req).unwrap();
+        match &resp.kind {
+            Some(KeyAgentResponseKind::Ok(bytes)) => {
+                let decoded = ListSessionKeysResponse::decode(bytes.as_slice()).unwrap();
+                assert_eq!(decoded.keys.len(), 1);
+                assert_eq!(decoded.keys[0].session_key_id, sk_id);
+                assert_eq!(decoded.keys[0].label, "b1-test");
+                assert_eq!(decoded.keys[0].status, SessionKeyStatus::Active as i32);
+            }
+            other => panic!("expected Ok list, got {other:?}"),
+        }
+    }
 
     // 3. Revoke with a FRESH challenge (single-use).
     let auth2 = make_auth(&client, "cred-b1");
@@ -1856,6 +1946,22 @@ fn test_keyagent_real_uds_session_key_roundtrip() {
             assert!(decoded.revoked_at_unix > 0);
         }
         other => panic!("expected Ok revoke, got {other:?}"),
+    }
+
+    // 3b. ListSessionKeys now reports the key as REVOKED.
+    {
+        let list_req = KeyAgentRequest {
+            kind: Some(KeyAgentRequestKind::ListSessionKeys(ListSessionKeysRequest {})),
+        };
+        let resp = client.send_request(&list_req).unwrap();
+        match &resp.kind {
+            Some(KeyAgentResponseKind::Ok(bytes)) => {
+                let decoded = ListSessionKeysResponse::decode(bytes.as_slice()).unwrap();
+                assert_eq!(decoded.keys.len(), 1);
+                assert_eq!(decoded.keys[0].status, SessionKeyStatus::Revoked as i32);
+            }
+            other => panic!("expected Ok list after revoke, got {other:?}"),
+        }
     }
 
     // 4. Reusing the SAME challenge must be rejected (replay protection). Issue ONE challenge, sign

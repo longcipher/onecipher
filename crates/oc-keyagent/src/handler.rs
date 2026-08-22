@@ -480,6 +480,7 @@ pub fn dispatch_with(
         Some(KeyAgentRequestKind::SignUserOp(req)) => handle_sign_user_op(ctx, req),
         Some(KeyAgentRequestKind::CreateSessionKey(req)) => handle_create_session_key(ctx, req),
         Some(KeyAgentRequestKind::RevokeSessionKey(req)) => handle_revoke_session_key(ctx, req),
+        Some(KeyAgentRequestKind::ListSessionKeys(_)) => handle_list_session_keys(ctx),
         Some(KeyAgentRequestKind::GetBalance(_)) => {
             // R56: Key-Agent cannot do network I/O. Net-Agent handles balance queries.
             Ok(KeyAgentResponse::not_implemented(&coded(
@@ -1075,6 +1076,36 @@ fn handle_revoke_session_key(
     Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
 }
 
+/// `ListSessionKeys` — return every registered session key with its
+/// lifecycle status.
+///
+/// Read-only and deliberately NOT Passkey-gated: the listing exposes only
+/// metadata (ids, labels, statuses, timestamps), never key material or
+/// signing capability. Mirrors the read-only posture of `ListWallets`.
+fn handle_list_session_keys(ctx: &AgentContext) -> Result<KeyAgentResponse, KeyAgentError> {
+    let records = ctx
+        .session_keys
+        .list()
+        .map_err(|e| KeyAgentError::Internal(format!("session key store: {e}")))?;
+
+    let keys = records
+        .into_iter()
+        .map(|r| crate::proto::SessionKeyInfo {
+            session_key_id: r.session_key_id,
+            label: r.label,
+            created_at_unix: r.created_at_unix,
+            expires_at_unix: 0, // no expiry tracked yet (budget/expiry rules pending)
+            policy: None,
+            status: match r.status {
+                SessionKeyStatus::Active => crate::proto::SessionKeyStatus::Active,
+                SessionKeyStatus::Revoked => crate::proto::SessionKeyStatus::Revoked,
+            } as i32,
+        })
+        .collect();
+
+    Ok(KeyAgentResponse::ok(crate::proto::ListSessionKeysResponse { keys }.encode_to_vec()))
+}
+
 fn handle_lock_vault(ctx: &AgentContext) -> Result<KeyAgentResponse, KeyAgentError> {
     global_key_cache().clear();
     // Also drop any in-flight Passkey challenge state so a lock cannot be
@@ -1471,6 +1502,90 @@ mod tests {
             },
         ));
         assert!(resp.is_error(), "RevokeSessionKey without auth should be rejected");
+    }
+
+    /// Build an [`AgentContext`] over a temp dir so session-key tests never
+    /// touch the default on-disk stores.
+    fn test_ctx(dir: &std::path::Path) -> AgentContext {
+        let device_key =
+            DeviceKeyStore::open(&dir.join("device.key")).load_or_generate().expect("device key");
+        let audit_log =
+            AuditLog::open(&dir.join("audit.jsonl"), "keyagent-test", device_key).expect("audit");
+        AgentContext {
+            audit_log: Arc::new(Mutex::new(audit_log)),
+            audit_fail_closed: false,
+            passkey_verifiers: Arc::new(Mutex::new(HashMap::new())),
+            sign_auth_internal_token: Arc::new(Mutex::new(None)),
+            session_keys: SessionKeyStore::open(dir.join("session_keys.json")),
+        }
+    }
+
+    fn decode_list(resp: &KeyAgentResponse) -> crate::proto::ListSessionKeysResponse {
+        match &resp.kind {
+            Some(KeyAgentResponseKind::Ok(bytes)) => {
+                prost::Message::decode(bytes.as_slice()).expect("decode ListSessionKeysResponse")
+            }
+            other => panic!("expected Ok response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_list_session_keys_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let resp = dispatch_with(
+            &ctx,
+            &KeyAgentRequest {
+                kind: Some(KeyAgentRequestKind::ListSessionKeys(
+                    crate::proto::ListSessionKeysRequest {},
+                )),
+            },
+        )
+        .expect("dispatch should return Ok(...)");
+        assert_eq!(decode_list(&resp).keys, []);
+    }
+
+    #[test]
+    fn test_list_session_keys_reports_status_and_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+
+        // Seed out of creation order to prove deterministic sorting.
+        let newer = SessionKeyRecord {
+            session_key_id: "sk-newer".to_string(),
+            label: "newer".to_string(),
+            status: SessionKeyStatus::Active,
+            created_at_unix: 2_000,
+            revoked_at_unix: None,
+        };
+        let older = SessionKeyRecord {
+            session_key_id: "sk-older".to_string(),
+            label: "older".to_string(),
+            status: SessionKeyStatus::Active,
+            created_at_unix: 1_000,
+            revoked_at_unix: None,
+        };
+        ctx.session_keys.create(newer).unwrap();
+        ctx.session_keys.create(older).unwrap();
+        ctx.session_keys.revoke("sk-older").unwrap();
+
+        let resp = dispatch_with(
+            &ctx,
+            &KeyAgentRequest {
+                kind: Some(KeyAgentRequestKind::ListSessionKeys(
+                    crate::proto::ListSessionKeysRequest {},
+                )),
+            },
+        )
+        .expect("dispatch should return Ok(...)");
+
+        let listed = decode_list(&resp).keys;
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].session_key_id, "sk-older");
+        assert_eq!(listed[0].status, crate::proto::SessionKeyStatus::Revoked as i32);
+        assert_eq!(listed[0].created_at_unix, 1_000);
+        assert_eq!(listed[1].session_key_id, "sk-newer");
+        assert_eq!(listed[1].status, crate::proto::SessionKeyStatus::Active as i32);
     }
 
     #[test]

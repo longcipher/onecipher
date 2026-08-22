@@ -128,6 +128,18 @@ impl SessionKeyStore {
         Ok(self.load()?.get(session_key_id).cloned())
     }
 
+    /// All records, ordered by creation time then id (deterministic order
+    /// for listings).
+    pub fn list(&self) -> Result<Vec<SessionKeyRecord>, SessionKeyStoreError> {
+        let mut records: Vec<SessionKeyRecord> = self.load()?.into_values().collect();
+        records.sort_by(|a, b| {
+            a.created_at_unix
+                .cmp(&b.created_at_unix)
+                .then_with(|| a.session_key_id.cmp(&b.session_key_id))
+        });
+        Ok(records)
+    }
+
     /// Whether `id` refers to an existing, non-revoked session key.
     pub fn is_active(&self, session_key_id: &str) -> Result<bool, SessionKeyStoreError> {
         Ok(self.load()?.get(session_key_id).is_some_and(|r| r.status == SessionKeyStatus::Active))
@@ -215,6 +227,36 @@ mod tests {
         }
         let reopened = SessionKeyStore::open(path);
         assert!(reopened.is_active("sk-persist").unwrap());
+    }
+
+    #[test]
+    fn list_returns_all_records_sorted_by_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionKeyStore::open(dir.path().join("session_keys.json"));
+
+        let mut older = rec("sk-old");
+        older.created_at_unix = 1_000;
+        let mut newer = rec("sk-new");
+        newer.created_at_unix = 2_000;
+        // Insert out of creation order to prove sorting, not insertion order.
+        store.create(newer).unwrap();
+        store.create(older).unwrap();
+
+        let listed = store.list().unwrap();
+        let ids: Vec<&str> = listed.iter().map(|r| r.session_key_id.as_str()).collect();
+        assert_eq!(ids, vec!["sk-old", "sk-new"]);
+
+        store.revoke("sk-old").unwrap();
+        let listed = store.list().unwrap();
+        assert_eq!(listed[0].status, SessionKeyStatus::Revoked);
+        assert_eq!(listed[1].status, SessionKeyStatus::Active);
+    }
+
+    #[test]
+    fn list_on_missing_store_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionKeyStore::open(dir.path().join("missing.json"));
+        assert!(store.list().unwrap().is_empty());
     }
 
     #[test]

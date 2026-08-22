@@ -6,14 +6,13 @@
 //! `oneof` (encoded as tag + nested message).
 //!
 //! The set of variants covers every Key-Agent operation; the former
-//! `PayMPP` (bidirectional stream, never implemented) and `ListSessionKeys`
-//! (folded into `ListWallets` since both use `Empty`) RPCs are omitted.
+//! `PayMPP` (bidirectional stream, never implemented) RPC is omitted.
 
 use crate::proto::{
     CreateSessionKeyRequest, DrainTelemetryRequest, GenerateChallengeRequest, GenerateTotpRequest,
-    GetBalanceRequest, GetSecretRequest, ListSecretsRequest, RegisterPasskeyRequest,
-    RevokeSessionKeyRequest, SignAuthRequest, SignMessageRequest, SignTransactionRequest,
-    SignTypedDataRequest, SignUserOpRequest, UnlockVaultRequest,
+    GetBalanceRequest, GetSecretRequest, ListSecretsRequest, ListSessionKeysRequest,
+    RegisterPasskeyRequest, RevokeSessionKeyRequest, SignAuthRequest, SignMessageRequest,
+    SignTransactionRequest, SignTypedDataRequest, SignUserOpRequest, UnlockVaultRequest,
 };
 
 /// A request sent from the Network-Agent to the Key-Agent over UDS.
@@ -29,7 +28,7 @@ pub struct KeyAgentRequest {
     /// The request payload (exactly one variant set).
     #[prost(
         oneof = "KeyAgentRequestKind",
-        tags = "1, 2, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19"
+        tags = "1, 2, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20"
     )]
     pub kind: Option<KeyAgentRequestKind>,
 }
@@ -116,6 +115,11 @@ pub enum KeyAgentRequestKind {
     /// startup and injected only into trusted in-process callers.
     #[prost(message, tag = "19")]
     SignAuth(SignAuthRequest),
+    /// `AgentService.ListSessionKeys` — read-only (T18). Returns every
+    /// registered session key with its lifecycle status. Not Passkey-gated:
+    /// it exposes only metadata (ids, labels, statuses), never key material.
+    #[prost(message, tag = "20")]
+    ListSessionKeys(ListSessionKeysRequest),
 }
 
 #[cfg(test)]
@@ -201,6 +205,18 @@ mod tests {
                 name: "totp/github".to_string(),
                 api_token: "oc_key_def".to_string(),
             })),
+        };
+        let bytes = req.encode_to_vec();
+        let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();
+        assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn test_list_session_keys_round_trip() {
+        let req = KeyAgentRequest {
+            kind: Some(KeyAgentRequestKind::ListSessionKeys(
+                crate::proto::ListSessionKeysRequest {},
+            )),
         };
         let bytes = req.encode_to_vec();
         let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();

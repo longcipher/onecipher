@@ -164,10 +164,13 @@ pub struct RevokeSessionKeyResponse {
     pub revoked_at_unix: u64,
 }
 
-/// `ListSessionKeys` response — sent by the Key-Agent in reply to the
-/// `ListWallets` slot (the daemon folds list-session-keys into ListWallets per
-/// `request.rs` deviation note; the CLI still consumes this type as the
-/// canonical session-key listing).
+/// `ListSessionKeys` request — currently empty; future filters (status,
+/// label prefix) are added here without breaking the wire format.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ListSessionKeysRequest {}
+
+/// `ListSessionKeys` response — one [`SessionKeyInfo`] per registered
+/// session key, ordered by creation time.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct ListSessionKeysResponse {
     #[prost(message, repeated, tag = "1")]

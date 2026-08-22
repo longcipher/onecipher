@@ -16,6 +16,11 @@ const WEBUI_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// Poll interval when waiting for the port file to appear.
 const WEBUI_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// Loopback CLI capability token header. Mirrors
+/// `oc_webui::auth::CLI_TOKEN_HEADER`; declared locally so this module stays
+/// compilable with `--no-default-features` (oc-webui is optional).
+const CLI_TOKEN_HEADER: &str = "x-oc-cli-token";
+
 /// Open the Web UI in the default browser.
 ///
 /// If the daemon is not running or webui is not enabled, auto-spawns the daemon
@@ -102,13 +107,27 @@ fn webui_port(home: &std::path::Path) -> Result<u16, CliError> {
         .map_err(|e| CliError::InvalidArgs(format!("invalid webui port '{port}': {e}")))
 }
 
+/// Read the loopback CLI capability token the daemon persisted at startup
+/// (`~/.onecipher/webui_cli.token`). Protected REST routes accept it via
+/// `x-oc-cli-token` in lieu of a browser WebAuthn session.
+fn cli_token(home: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(home.join("webui_cli.token"))
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
 /// Perform a synchronous HTTP GET against the daemon's Web UI.
 fn http_get(home: &std::path::Path, path: &str) -> Result<serde_json::Value, CliError> {
     let port = webui_port(home)?;
     let url = format!("http://127.0.0.1:{port}{path}");
     let client = hpx::Client::new();
+    let mut req = client.get(url);
+    if let Some(token) = cli_token(home) {
+        req = req.header(CLI_TOKEN_HEADER, token);
+    }
     let resp = crate::shared_runtime()
-        .block_on(client.get(url).send())
+        .block_on(req.send())
         .map_err(|e| CliError::InvalidArgs(format!("HTTP GET failed: {e}")))?;
     let status = resp.status().as_u16();
     let body = crate::shared_runtime().block_on(resp.text()).unwrap_or_default();
@@ -129,8 +148,12 @@ fn http_post(
     let port = webui_port(home)?;
     let url = format!("http://127.0.0.1:{port}{path}");
     let client = hpx::Client::new();
+    let mut req = client.post(url).json(&body);
+    if let Some(token) = cli_token(home) {
+        req = req.header(CLI_TOKEN_HEADER, token);
+    }
     let resp = crate::shared_runtime()
-        .block_on(client.post(url).json(&body).send())
+        .block_on(req.send())
         .map_err(|e| CliError::InvalidArgs(format!("HTTP POST failed: {e}")))?;
     let status = resp.status().as_u16();
     let resp_body = crate::shared_runtime().block_on(resp.text()).unwrap_or_default();

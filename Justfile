@@ -51,6 +51,11 @@ mutants:
 mutants-incremental:
     cargo mutants --in-place --since main --all-features
 
+# Run the CLI end-to-end suite against a release build (isolated HOME/runtime dir).
+e2e bin="onecipher":
+    cargo build --release --bin {{bin}}
+    ./scripts/e2e.sh
+
 # ============================================================
 # Build
 # ============================================================

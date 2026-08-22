@@ -123,6 +123,16 @@ pub async fn run_webui_server(
         }
     }
 
+    // Persist (or reuse) the loopback CLI capability token so `onecipher
+    // webui …` bridge commands can authenticate without a WebAuthn session.
+    let cli_token = match auth::cli_token::ensure_cli_token(&state_dir) {
+        Ok(t) => Some(std::sync::Arc::new(t)),
+        Err(e) => {
+            tracing::warn!(error = %e, "CLI token generation failed; CLI bridge auth disabled");
+            None
+        }
+    };
+
     let state = AppState { queue, state_dir, session_store: session_store.clone(), pairing_tx };
 
     // Auth routes carry their own state (WebAuthn manager + bootstrap token).
@@ -233,7 +243,10 @@ pub async fn run_webui_server(
             "/api/settings/secrets/{id}",
             axum::routing::delete(routes::settings::secrets::delete_secret),
         )
-        .layer(from_fn_with_state(session_store.clone(), routes::auth::require_session));
+        .layer(from_fn_with_state(
+            routes::auth::SessionGate { session_store: session_store.clone(), cli_token },
+            routes::auth::require_session,
+        ));
 
     let app = axum::Router::new()
         .nest("/api/auth", auth_router)

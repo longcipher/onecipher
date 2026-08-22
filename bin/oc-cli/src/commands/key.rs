@@ -18,8 +18,18 @@ pub(crate) fn create(
         wallet_ids.push(info.id);
     }
 
-    // Read passphrase (needed to decrypt wallet mnemonics for re-encryption)
-    let passphrase = super::read_passphrase();
+    // Mirror `wallet export` / `resolve_signing_key`: CLI-created wallets are
+    // encrypted with an EMPTY passphrase by default, so probe with the empty
+    // passphrase first and only read the env var / prompt when at least one
+    // target wallet is actually protected. Passing a non-empty passphrase to
+    // `create_api_key` for an empty-pass wallet fails decryption.
+    let needs_passphrase =
+        wallet_names.iter().any(|w| oc_wallet::export_wallet(w, None, None).is_err());
+    let passphrase = if needs_passphrase {
+        super::read_passphrase()
+    } else {
+        zeroize::Zeroizing::new(String::new())
+    };
 
     let (token, key_file) = oc_wallet::key_ops::create_api_key(
         name,

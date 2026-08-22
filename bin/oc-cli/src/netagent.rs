@@ -10,8 +10,8 @@ use std::os::unix::net::UnixStream;
 use oc_keyagent::{
     frame::FrameClient,
     proto::{
-        CreateSessionKeyRequest, CreateSessionKeyResponse, ListSessionKeysResponse,
-        RevokeSessionKeyRequest, RevokeSessionKeyResponse,
+        CreateSessionKeyRequest, CreateSessionKeyResponse, ListSessionKeysRequest,
+        ListSessionKeysResponse, RevokeSessionKeyRequest, RevokeSessionKeyResponse,
     },
     request::{KeyAgentRequest, KeyAgentRequestKind},
     response::{KeyAgentResponse, KeyAgentResponseKind},
@@ -240,12 +240,11 @@ impl NetAgentClient for UdsKeyAgentClient {
     }
 
     fn list_session_keys(&self) -> Result<ListSessionKeysResponse, CliError> {
-        // The Key-Agent has no ListSessionKeys request variant (folded into
-        // the ListWallets slot per request.rs deviation note; T18 will wire
-        // it). Return an error rather than sending an unmatched request.
-        Err(CliError::InvalidArgs(
-            "ListSessionKeys not supported by Key-Agent (T18 pending)".to_string(),
-        ))
+        let req = KeyAgentRequest {
+            kind: Some(KeyAgentRequestKind::ListSessionKeys(ListSessionKeysRequest {})),
+        };
+        let resp = self.send(&req)?;
+        decode_ok(resp)
     }
 }
 
