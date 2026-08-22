@@ -39,7 +39,8 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 │  │  └─────────────────────────────────────────────────────────┘ │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                      │
-│  CLI subcommands (clap): wallet · intent · pay · x402 · secret · ... │
+│  CLI subcommands (clap): wallet · sign · secret · password · totp ·  │
+│  age · tui · wc · webui · intent · policy · key · audit · ...        │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │ WSS (outbound)
                                ▼
@@ -117,7 +118,7 @@ oc-netagent (async — tokio runtime)
 bin/oc-cli (single binary)
 ├── tokio runtime (WC v2 server, Control Socket UDS)
 ├── oc-keyagent (sync std::thread signing engine, R55)
-└── clap (CLI: wallet · intent · pay · x402 · secret · ...)
+└── clap (CLI: wallet · sign · secret · password · totp · age · tui · wc · webui · intent · policy · key · audit · ...)
 ```
 
 > **R56 scope clarification (M6):** the R56 hard gate (no tokio/reqwest/

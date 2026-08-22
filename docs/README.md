@@ -1,6 +1,6 @@
 # OneCipher Documentation
 
-> Cross-platform, cross-chain cryptographic wallet for AI Agent workloads.
+> Policy-gated, local-key-custody signing stack and **unified sensitive data vault** for AI Agent workloads.
 > Fully implemented in Rust. Designed in accordance with the WalletConnect v2 protocol and the Open Wallet Standard.
 
 ## Quick Start
@@ -23,6 +23,13 @@
 ## Security
 
 - [Security Model](security-model.md) — key isolation, memory hardening, threat model, conformance requirements
+- [Sign-in with Wallet](sign-in-with-wallet.md) — generic IAM integration over WalletConnect v2 (`onecipher_signAuth`, `wc_authRequest`)
+
+## Design Notes
+
+- [Design](design.md) — staged architecture evolution (unified binary, unified secret vault, intent layer)
+- [Web UI Approval Design](webui-approval-design.md) — local browser approval flow (Leptos CSR + axum + WebAuthn)
+- [x402/MPP Integration Gaps](x402-mpp-integration-gaps.md) — live-test findings and fixes applied to the wallet
 
 ## Specification
 

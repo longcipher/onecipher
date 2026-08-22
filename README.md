@@ -538,15 +538,16 @@ nm target/release/onecipher | grep -i tcp    # R12 hard gate (requires release b
 | `onecipher wallet rename` | Rename a wallet |
 | `onecipher wallet list` | List all wallets in the vault |
 | `onecipher wallet info` | Show vault path and supported chains |
-| `onecipher sign message` | Sign a message with chain-specific formatting |
-| `onecipher sign tx` | Sign a raw transaction |
+| `onecipher wallet change-password` | Change a wallet's encryption passphrase |
+| `onecipher sign message` | Sign a message (EIP-191, EIP-712, chain-specific) |
+| `onecipher sign tx` | Sign a raw transaction (`--via wc` for WalletConnect) |
 | `onecipher sign send-tx` | Sign and broadcast a transaction |
+| `onecipher sign auth` | Sign an EIP-7702 authorization |
+| `onecipher verify` | Verify a signature (message / typed data / raw hash) |
+| `onecipher send` | Build, sign, and broadcast an ERC-20 transfer |
+| `onecipher vanity` | Brute-force generate vanity addresses |
 | `onecipher mnemonic generate` | Generate a BIP-39 mnemonic phrase |
-| `onecipher mnemonic derive` | Derive an address from a mnemonic |
-| `onecipher fund deposit` | Create a MoonPay deposit to fund a wallet with USDC |
-| `onecipher fund balance` | Check token balances for a wallet |
-| `onecipher pay request` | Make a paid request to an x402-enabled API endpoint |
-| `onecipher pay discover` | Discover x402-enabled services |
+| `onecipher mnemonic derive` | Derive addresses from a mnemonic |
 | `onecipher policy create` | Register a policy from a JSON file |
 | `onecipher policy list` | List all registered policies |
 | `onecipher policy show` | Show details of a policy |
@@ -557,35 +558,64 @@ nm target/release/onecipher | grep -i tcp    # R12 hard gate (requires release b
 | `onecipher session-key create` | Create a session key (via Network-Agent) |
 | `onecipher session-key revoke` | Revoke a session key (via Network-Agent) |
 | `onecipher session-key list` | List all session keys (via Network-Agent) |
-| `onecipher ocpay x402` | x402 payment via session key (via Network-Agent) |
-| `onecipher audit list` | List audit log entries |
+| `onecipher intent submit` | Submit an intent: simulate → confirm → execute |
+| `onecipher intent simulate` | Simulate an intent (dry-run) |
+| `onecipher intent execute` | Execute an intent programmatically |
+| `onecipher audit list` | List audit log entries (`--since`, `--agent`, `--status`) |
+| `onecipher audit secrets` | Audit stored passwords (weak/duplicate/old/HIBP) |
 | `onecipher vault unlock` | Unlock the vault |
 | `onecipher backup export` | Create an encrypted `.ocbk` backup |
 | `onecipher backup import` | Restore from an `.ocbk` backup |
 | `onecipher sbom verify` | Verify a CycloneDX SBOM file |
+| `onecipher sbom generate` | Generate a CycloneDX SBOM for the workspace |
 | `onecipher wc pair` | Generate a WalletConnect pairing URI |
 | `onecipher wc connect` | Connect to a dApp via WalletConnect pairing URI |
 | `onecipher wc sessions` | List saved WalletConnect sessions |
 | `onecipher wc disconnect` | Disconnect a WalletConnect session |
+| `onecipher wc relay` | Configure the WC v2 relay endpoint |
+| `onecipher wc probe` | Probe relay connectivity (subscribe + ping echo) |
+| `onecipher wc dapp-send` | Send a JSON-RPC request as a dApp (testing aid) |
+| `onecipher webui open` | Open the local Web UI in the browser |
+| `onecipher webui approval` | List/show/approve/reject pending approvals |
+| `onecipher webui auth` | Query/lock Web UI passkey sessions |
+| `onecipher service install` | Install the daemon as a systemd user service |
+| `onecipher service uninstall` | Remove the systemd user service |
+| `onecipher service status` | Show daemon service status |
 | `onecipher status` | Show Key-Agent / Network-Agent status |
 | `onecipher config show` | Show current configuration and RPC endpoints |
+| `onecipher config set` | Set a configuration value |
 | `onecipher update` | Update onecipher to the latest release |
 | `onecipher uninstall` | Remove onecipher from the system |
 | `onecipher age init` | Initialize the age encryption key |
-| `onecipher age recipient add` | Add an age recipient for multi-device access |
+| `onecipher age identity-show` | Show the age public key |
+| `onecipher age recipient add/list/remove` | Manage age recipients for multi-device access |
 | `onecipher age reencrypt` | Re-encrypt the entire vault to current recipients |
-| `onecipher password add` | Add a password entry (url, username) |
+| `onecipher password add` | Add a password entry (url, username, `--generate`) |
 | `onecipher password get` | Retrieve a password (optionally `--copy` to clipboard) |
-| `onecipher password generate` | Generate a random password |
-| `onecipher totp add` | Add a TOTP secret from an `otpauth://` URI |
+| `onecipher password generate` | Generate a random password (cryptic/memorable/xkcd) |
+| `onecipher totp add` | Add a TOTP secret from an `otpauth://` URI or base32 secret |
 | `onecipher totp generate` | Generate the current TOTP code for an entry |
-| `onecipher secret list` | List all vault entries (`--json` supported) |
-| `onecipher secret add` | Add a generic secret (note, etc.) via `--stdin` |
-| `onecipher secret get` | Retrieve a generic secret (`--json` supported) |
-| `onecipher migrate` | Migrate legacy wallets into the unified vault |
+| `onecipher totp uris` | Output the otpauth URI for backup |
+| `onecipher totp hotp` | Generate an HOTP code at a counter value |
+| `onecipher secret list/get/add/update/delete/rename` | Generic secret CRUD (`--json` / `--stdin`) |
+| `onecipher secret edit/copy/move` | Edit in `$EDITOR`, copy, or move secrets |
+| `onecipher agent-secret get/list/totp` | Agent-mode reads via API token permissions |
+| `onecipher env` | Run a command with secrets injected as env vars |
+| `onecipher grep` | Search inside decrypted secret content |
+| `onecipher find` | Fuzzy-search secrets by name/type |
+| `onecipher fsck` | Check and repair secret store integrity |
+| `onecipher history` | Show version history of a secret (`git` feature) |
+| `onecipher migrate` | Migrate legacy keystore wallets to age-encrypted secrets |
 | `onecipher tui` | Launch the interactive terminal UI |
-| `onecipher git pull` | Pull encrypted vault changes from the git remote |
-| `onecipher git push` | Push encrypted vault changes to the git remote |
+| `onecipher git init/pull/push/log/status` | Git sync for the encrypted vault (`git` feature) |
+| `onecipher doctor` | Run system health diagnostics |
+| `onecipher completion` | Generate shell completions (bash/zsh/fish/…) |
+| `onecipher wallet-rpc serve` | Expose the loopback JSON-RPC 2.0 WalletSigner |
+
+Payment-protocol commands (`pay`, `fund`, `ocpay`) were removed — payment
+protocol work now lives entirely in
+[LedgerFlow](https://github.com/longcipher/ledgerflow), which consumes
+OneCipher's signing through `wallet-rpc serve`.
 
 ## Language Bindings
 
@@ -607,15 +637,21 @@ pip install onecipher
 
 The full spec lives in [`docs/`](docs/):
 
-1. [Specification](docs/00-specification.md) — Scope, document classes, conformance
-2. [Storage Format](docs/01-storage-format.md) — Vault layout, keystore schema
-3. [Signing Interface](docs/02-signing-interface.md) — Sign, signAndSend, signMessage
-4. [Policy Engine](docs/03-policy-engine.md) — Pre-signing transaction policies
-5. [Agent Access Layer](docs/04-agent-access-layer.md) — Optional access profiles
-6. [Key Isolation](docs/05-key-isolation.md) — Deployment guidance for key isolation
-7. [Wallet Lifecycle](docs/06-wallet-lifecycle.md) — Creation, recovery, deletion
-8. [Supported Chains](docs/07-supported-chains.md) — Chain families, derivation rules
-9. [Conformance and Security](docs/08-conformance-and-security.md) — Interop + security
+| Document | Scope |
+|---|---|
+| [Quick Start](docs/quickstart.md) | Install, create a wallet, sign, agent access |
+| [CLI Reference](docs/cli-reference.md) | Full command reference |
+| [Architecture](docs/architecture.md) | Two-layer design, crates, hard gates |
+| [Storage Format](docs/storage-format.md) | Vault layout, wallet/API key file formats, encryption |
+| [Signing Interface](docs/signing-interface.md) | Sign, signAndSend, signMessage, signTypedData, error codes |
+| [Policy Engine](docs/policy-engine.md) | Declarative rules, executable policies, API key crypto |
+| [Wallet Lifecycle](docs/wallet-lifecycle.md) | Creation, import, export, backup, deletion |
+| [Supported Chains](docs/supported-chains.md) | Chain families, CAIP identifiers, derivation rules |
+| [Security Model](docs/security-model.md) | Key isolation, memory hardening, threat model |
+| [Sign-in with Wallet](docs/sign-in-with-wallet.md) | Generic IAM integration over WC v2 |
+| [Web UI Approval Design](docs/webui-approval-design.md) | Local browser approval flow design |
+| [x402/MPP Integration Gaps](docs/x402-mpp-integration-gaps.md) | Live-test findings and fixes |
+| [Design](docs/design.md) | Staged architecture evolution notes |
 
 OneCipher-specific design notes live in [`docs/design.md`](docs/design.md).
 

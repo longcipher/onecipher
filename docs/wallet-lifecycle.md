@@ -6,253 +6,168 @@
 
 ### Create from New Mnemonic
 
-Generates a new BIP-39 mnemonic and derives initial accounts.
+Generates a new BIP-39 mnemonic and derives accounts for all supported chains.
 
 ```bash
-onecipher wallet create --name "agent-treasury" --chain evm
-```
-
-```typescript
-const wallet = await onecipher.createWallet({
-  name: "agent-treasury",
-  chainType: "evm",
-  chains: ["eip155:8453"],           // derive accounts for these chains
-  accountCount: 1,                    // number of accounts per chain
-  mnemonicStrength: 128               // 128 = 12 words, 256 = 24 words
-});
-// Returns: WalletDescriptor (never the mnemonic)
+onecipher wallet create --name "agent-treasury"
+onecipher wallet create --name "cold-storage" --words 24
+onecipher wallet create --name "verify-once" --show-mnemonic   # DANGEROUS: prints the phrase once
 ```
 
 **Flow:**
-1. Generate 128 or 256 bits of cryptographically secure randomness
-2. Encode as BIP-39 mnemonic (12 or 24 words)
+1. Generate 128–256 bits of cryptographically secure randomness
+2. Encode as BIP-39 mnemonic (12/15/18/21/24 words)
 3. Derive master seed via PBKDF2
-4. Derive accounts for each requested chain using BIP-44 paths
+4. Derive one account per supported chain using each chain's BIP-44 path
 5. Encrypt mnemonic with vault passphrase (Argon2id + AES-256-GCM-SIV)
 6. Write encrypted wallet file to `~/.onecipher/wallets/<uuid>.json`
 7. Wipe mnemonic, seed, and private keys from memory
-8. Return only the `WalletDescriptor` (addresses, IDs, metadata)
+8. Print only public information (addresses, IDs, derivation paths)
 
-The mnemonic is never returned to the caller. Only public information (addresses, IDs, metadata) is returned.
+The mnemonic is never returned to the caller unless `--show-mnemonic` is passed explicitly.
 
-### Create from Existing Private Key
+### Import from Existing Key Material
 
-Import a raw private key (for single-chain wallets).
-
-```bash
-echo "<private-key>" | onecipher wallet import --name "imported" --chain evm --format raw
-```
-
-```typescript
-const wallet = await onecipher.importWallet({
-  name: "imported",
-  chainType: "evm",
-  chains: ["eip155:8453"],
-  keyMaterial: privateKeyBytes,        // Uint8Array, wiped after import
-  keyType: "private_key"
-});
-```
-
-The key material is encrypted immediately and the input buffer is zeroed.
-
-## Import
-
-OneCipher supports importing from standard formats:
-
-### Ethereum Keystore v3
+Import a mnemonic or a raw private key. Secrets are read from environment
+variables or stdin — never as CLI arguments — to avoid shell-history exposure.
 
 ```bash
-onecipher wallet import --name "from-geth" --format keystore --file ~/keystore/UTC--2024-01-01T00-00-00.000Z--abc123
+# Mnemonic via stdin
+echo "goose puzzle decorate ..." | onecipher wallet import --name "from-metamask" --mnemonic
+
+# Private key via env var
+ONECIPHER_PRIVATE_KEY="4c0883a691..." onecipher wallet import --name "from-evm" --private-key
+
+# Ed25519 key (curve inferred from --chain)
+ONECIPHER_PRIVATE_KEY="9d61b19d..." onecipher wallet import --name "from-sol" --private-key --chain solana
+
+# Explicit keys for both curves
+ONECIPHER_SECP256K1_KEY="4c0883a691..." \
+ONECIPHER_ED25519_KEY="9d61b19d..." \
+  onecipher wallet import --name "both"
+
+# Interactive prompt
+onecipher wallet import --name "manual" --interactive
 ```
 
-The importer reads the v3 JSON, wraps it in the OneCipher envelope, and optionally re-encrypts with the vault passphrase. If the keystore uses a different passphrase than the vault, the user is prompted for both.
+Private key imports generate all chain accounts: the provided key covers its
+curve's chains and a random key is generated for the other curve. The key
+material is encrypted immediately and input buffers are zeroed.
 
-### BIP-39 Mnemonic
+## Inspection
 
 ```bash
-onecipher wallet import --name "from-metamask" --format mnemonic --chain evm
-# Prompts for mnemonic words interactively (never as a CLI argument)
+onecipher wallet list          # all wallets in the vault
+onecipher wallet info          # vault path + supported chains
 ```
-
-The mnemonic is entered interactively to avoid shell history exposure. It is read via stdin, encrypted, and the input buffer is zeroed.
-
-### WIF (Bitcoin Wallet Import Format)
-
-```bash
-echo "<wif-key>" | onecipher wallet import --name "btc-wallet" --format wif --chain bitcoin
-```
-
-### Solana Keypair JSON
-
-```bash
-onecipher wallet import --name "sol-wallet" --format solana-keypair --file ~/.config/solana/id.json
-```
-
-Reads the 64-byte keypair JSON array format used by the Solana CLI.
-
-### Sui Keystore JSON
-
-```bash
-onecipher wallet import --name "sui-wallet" --format sui-keystore --file ~/.sui/sui_config/sui.keystore
-```
-
-Reads the base64-encoded keypair array format used by the Sui CLI (`sui keytool`).
 
 ## Export
 
-Export operations extract key material for use with other wallet software. They require explicit confirmation and produce a visible security warning.
+Export operations extract key material for use with other wallet software.
 
-### Export Mnemonic
-
-```bash
-onecipher wallet export --id 3198bc9c-... --format mnemonic
-# Displays the 12/24 word mnemonic on screen
-# Warning: "This mnemonic provides full access to all accounts derived from this wallet."
-```
-
-```typescript
-const mnemonic = await onecipher.exportWallet("3198bc9c-...", {
-  format: "mnemonic"
-});
-// Returns string (12 or 24 words)
-// Caller MUST handle securely and wipe from memory
-```
-
-### Export Keystore v3
+### Export Secret
 
 ```bash
-onecipher wallet export --id 3198bc9c-... --format keystore --output ~/exported.json
+onecipher wallet export --wallet agent-treasury
 ```
 
-Exports a standard Ethereum Keystore v3 file compatible with geth, MetaMask, etc. Only works for `key_type: "private_key"` or single-account EVM wallets.
+- Mnemonic wallets output the phrase.
+- Private-key wallets output JSON: `{"secp256k1":"hex...","ed25519":"hex..."}`.
 
-### Export Private Key (Raw)
+### Export Public Key
 
 ```bash
-onecipher wallet export --id 3198bc9c-... --format raw --account eip155:8453:0xab16...
+onecipher wallet export --wallet agent-treasury --public-key --chain ethereum
+onecipher wallet export --wallet agent-treasury --public-key --compressed   # secp256k1 only
 ```
 
-Exports a single account's private key as hex. For mnemonic-based wallets, the specific account's key is derived and exported (not the mnemonic itself).
+Public keys are safe to share — no `--confirm`-style warnings needed.
+
+## Passphrase Rotation
+
+Change a wallet's encryption passphrase without touching key material:
+
+```bash
+onecipher wallet change-password --wallet agent-treasury
+
+# Non-interactive (falls back to ONECIPHER_PASSPHRASE / ONECIPHER_NEW_PASSPHRASE)
+onecipher wallet change-password --wallet agent-treasury \
+  --passphrase "$OLD" --new-passphrase "$NEW"
+```
+
+API keys are unaffected: their encrypted secret copies are derived from the
+API token, not the wallet passphrase.
+
+## Rename & Delete
+
+```bash
+onecipher wallet rename --wallet old-name --new-name new-name
+
+onecipher wallet delete --wallet old-name --confirm    # --confirm required
+```
+
+Deletion removes the encrypted wallet file and logs the operation to the
+audit log. Ensure you have exported the mnemonic or private key first —
+deletion is not reversible.
 
 ## Backup
 
-### Full Vault Backup
+OneCipher ships an encrypted `.ocbk` backup container format
+(Argon2id + XChaCha20-Poly1305, separate passphrase from the vault):
 
 ```bash
-onecipher backup --output ~/onecipher-backup-2026-02-27.tar.gz.enc
+# Export an encrypted backup of the wallet
+onecipher backup export --out ~/backups/treasury.ocbk
+
+# Restore from a backup container
+onecipher backup import --in ~/backups/treasury.ocbk
 ```
 
-Creates an encrypted archive of the entire `~/.onecipher/` directory:
-1. Tar the vault directory (excluding `logs/` and `state/`)
-2. Encrypt the tar with a backup passphrase (separate from vault passphrase)
-3. Write to the output path
-
-The backup is self-contained — it includes wallet files, policies, plugins, and config.
-
-### Restore from Backup
-
-```bash
-onecipher restore --input ~/onecipher-backup-2026-02-27.tar.gz.enc
-```
-
-Decrypts and extracts the backup to `~/.onecipher/`. If the vault directory already exists, the user is prompted to merge or overwrite.
-
-### Automated Backup
-
-In `~/.onecipher/config.json`:
-
-```json
-{
-  "backup": {
-    "enabled": true,
-    "schedule": "daily",
-    "destination": "~/.onecipher/backups/",
-    "retention": 30,
-    "passphrase_env": "ONECIPHER_BACKUP_PASSPHRASE"
-  }
-}
-```
+The `.ocbk` container is self-contained and safe to store on any media —
+it is encrypted at rest.
 
 ## Recovery
 
-### From Mnemonic
-
-If the vault is lost but the mnemonic is available:
+If the vault is lost but the mnemonic is available, re-import it:
 
 ```bash
-onecipher wallet recover --name "recovered" --chain evm --chains eip155:8453,eip155:1
-# Prompts for mnemonic interactively
-# Scans for accounts with balance using gap limit of 20
+echo "<mnemonic>" | onecipher wallet import --name "recovered" --mnemonic
 ```
 
-The recovery process:
-1. Accept mnemonic interactively
-2. Derive accounts using the chain's BIP-44 path, incrementing the index
-3. For each derived address, query the RPC for balance or transaction history
-4. Stop after 20 consecutive empty addresses (BIP-44 gap limit)
-5. Create a new wallet file with all discovered accounts
-
-### From Backup
-
-See "Restore from Backup" above.
-
-### From Keystore v3
-
-See "Import > Ethereum Keystore v3" above.
-
-## Deletion
+All chain addresses derive deterministically from the same mnemonic at the
+same account index, so the recovered wallet controls the same accounts.
+For deeper recovery flows (scanning historical indices), derive candidate
+addresses offline:
 
 ```bash
-onecipher wallet delete --id 3198bc9c-...
-# Warning: "This will permanently delete the encrypted wallet file.
-# Ensure you have exported the mnemonic or private key before proceeding."
-# Requires --confirm flag or interactive confirmation
+echo "<mnemonic>" | onecipher mnemonic derive --chain ethereum --count 20
 ```
 
-Deletion:
-1. Verifies the wallet exists
-2. Prompts for confirmation (unless `--confirm` is passed)
-3. Securely overwrites the wallet file with random bytes before unlinking (to prevent recovery from disk)
-4. Removes the wallet ID from the `wallet_ids` array of all API keys that reference it
-5. Logs the deletion to the audit log
+## Migration (legacy keystore → age vault)
 
-## Key Rotation
-
-OneCipher supports creating a new wallet and migrating assets from an old one:
+Wallets created before the unified secret vault used keystore v3-style JSON
+files. Migrate them into age-encrypted vault entries:
 
 ```bash
-onecipher wallet rotate --from old-wallet --to new-wallet --chain eip155:8453
+onecipher migrate              # migrate legacy wallets into the unified vault
+onecipher migrate --dry-run    # preview what would be migrated
+onecipher migrate --rollback   # remove migrated .age entries (legacy files are kept)
 ```
 
-This is a convenience operation that:
-1. Creates a new wallet (or uses an existing one)
-2. Queries balances on the old wallet
-3. Constructs transfer transactions for all assets
-4. Signs and sends using the old wallet
-5. Verifies receipt on the new wallet
+Legacy `.json` files are never deleted by migration, so rollback is always
+possible.
 
-Key rotation does NOT re-encrypt the old wallet — it transfers assets to a new key.
+## Vault-Wide Key Rotation
 
-## Wallet Discovery
-
-For environments where multiple tools may create OneCipher wallets, a discovery mechanism helps avoid duplicate wallet creation:
-
-```typescript
-// Find wallets matching criteria
-const wallets = await onecipher.discoverWallets({
-  chainType: "evm",
-  chainId: "eip155:8453",
-  name: "agent-*",                    // glob pattern
-  hasPolicy: true
-});
-```
-
-The `onecipher wallet list` CLI command also supports filtering:
+Rotate the age encryption layer itself (e.g., after adding/removing devices):
 
 ```bash
-onecipher wallet list --chain evm --with-policy
-onecipher wallet list --name "agent-*"
+onecipher age recipient add age1newdevice...
+onecipher age reencrypt        # re-encrypt every entry to current recipients
 ```
+
+This changes *who can decrypt* the vault — it does not rotate blockchain
+keys. To rotate blockchain keys, create a new wallet and transfer assets.
 
 ## Lifecycle State Diagram
 
@@ -260,7 +175,6 @@ onecipher wallet list --name "agent-*"
                     ┌─────────┐
                     │ Create  │
                     │ Import  │
-                    │ Recover │
                     └────┬────┘
                          │
                          ▼
@@ -274,10 +188,10 @@ onecipher wallet list --name "agent-*"
               └─────│  Locked │        │
                     └────┬────┘        │
                          │             │
-                    ┌────▼────┐   ┌────┴────┐
-                    │ Export  │   │ Rotate  │
-                    │ Backup │   └─────────┘
-                    └────┬────┘
+                    ┌────▼────┐   ┌────┴──────────┐
+                    │ Export  │   │ change-password│
+                    │ Backup  │   │ age reencrypt  │
+                    └────┬────┘   └───────────────┘
                          │
                     ┌────▼────┐
                     │ Delete  │
@@ -287,6 +201,6 @@ onecipher wallet list --name "agent-*"
 ## References
 
 - [BIP-39: Mnemonic Generation](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki)
-- [BIP-44: Gap Limit](https://github.com/bitcoin/bips/blob/master/bip-0044.mediawiki)
+- [BIP-32: Hierarchical Deterministic Wallets](https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki)
 - [Ethereum Keystore v3](https://ethereum.org/developers/docs/data-structures-and-encoding/web3-secret-storage)
-- [Solana CLI Keypair Format](https://docs.solanalabs.com/cli/wallets/file-system)
+- [age encryption](https://age-encryption.org/)
