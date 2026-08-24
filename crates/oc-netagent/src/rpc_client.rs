@@ -20,6 +20,12 @@ use crate::intent::rpc::{CallData, RpcClient, RpcError};
 /// [`RpcError::Timeout`].
 const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Per-request deadline for a single JSON-RPC call (L-03). A stalled endpoint
+/// surfaces as [`RpcError::Timeout`] instead of hanging the caller forever;
+/// each receipt poll is bounded by this AND the overall [`RECEIPT_TIMEOUT`]
+/// backoff budget.
+const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// EVM JSON-RPC client backed by `hpx`.
 ///
 /// Stateless aside from the reused [`hpx::Client`] connection pool. All trait
@@ -54,35 +60,45 @@ impl HpxRpcClient {
             "method": method,
             "params": params,
         });
-        let resp = self
-            .client
-            .post(&self.rpc_url)
-            .header("content-type", "application/json")
-            .body(body.to_string())
-            .send()
-            .await
-            .map_err(|e| RpcError::Transport(e.to_string()))?;
+        let request = async {
+            let resp = self
+                .client
+                .post(&self.rpc_url)
+                .header("content-type", "application/json")
+                .body(body.to_string())
+                .send()
+                .await
+                .map_err(|e| RpcError::Transport(e.to_string()))?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(RpcError::Transport(format!("HTTP {status}: {text}")));
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(RpcError::Transport(format!("HTTP {status}: {text}")));
+            }
+
+            let v: Value = resp.json().await.map_err(|e| RpcError::Parse(e.to_string()))?;
+
+            if let Some(err) = v.get("error") {
+                return Err(RpcError::Server(err.to_string()));
+            }
+
+            Ok(v.get("result").cloned().unwrap_or(Value::Null))
+        };
+        // L-03: bound every round trip so a hung endpoint surfaces as a
+        // typed timeout instead of blocking the caller indefinitely.
+        match tokio::time::timeout(RPC_CALL_TIMEOUT, request).await {
+            Ok(result) => result,
+            Err(_) => Err(RpcError::Timeout),
         }
-
-        let v: Value = resp.json().await.map_err(|e| RpcError::Parse(e.to_string()))?;
-
-        if let Some(err) = v.get("error") {
-            return Err(RpcError::Server(err.to_string()));
-        }
-
-        Ok(v.get("result").cloned().unwrap_or(Value::Null))
     }
 
     /// Build the EVM call object from [`CallData`].
     ///
-    /// `data` is hex-encoded with a `0x` prefix. `value` is passed through
-    /// as-is (callers are expected to provide a hex-encoded wei amount).
-    fn call_object(call_data: &CallData) -> Value {
+    /// `data` is hex-encoded with a `0x` prefix. A decimal `value` string is
+    /// converted to a hex quantity; a malformed decimal is a typed parse
+    /// error (M-08) — it is never silently coerced to zero, which would
+    /// understate the simulated transfer value.
+    fn call_object(call_data: &CallData) -> Result<Value, RpcError> {
         let mut obj = json!({
             "to": call_data.to,
         });
@@ -94,16 +110,18 @@ impl HpxRpcClient {
             let hex_value = if value.starts_with("0x") {
                 json!(value)
             } else {
-                // Decimal string → hex quantity
-                let n: u128 = value.parse().unwrap_or(0);
-                json!(format!("0x{:x}", n))
+                // Decimal string → hex quantity (strict; M-08)
+                let n: u128 = value.parse().map_err(|e| {
+                    RpcError::Parse(format!("invalid decimal value '{value}': {e}"))
+                })?;
+                json!(format!("0x{n:x}"))
             };
             obj["value"] = hex_value;
         }
         if let Some(data) = &call_data.data {
             obj["data"] = json!(format!("0x{}", hex::encode(data)));
         }
-        obj
+        Ok(obj)
     }
 }
 
@@ -118,6 +136,7 @@ impl RpcClient for HpxRpcClient {
     ) -> Pin<Box<dyn Future<Output = Result<u64, RpcError>> + Send + '_>> {
         let call_obj = Self::call_object(call_data);
         Box::pin(async move {
+            let call_obj = call_obj?;
             let result = self.rpc_call("eth_estimateGas", json!([call_obj])).await?;
             let hex_str = result.as_str().ok_or_else(|| {
                 RpcError::Parse(format!("estimate_gas: expected hex string, got {result}"))
@@ -131,7 +150,10 @@ impl RpcClient for HpxRpcClient {
         call_data: &CallData,
     ) -> Pin<Box<dyn Future<Output = Result<Value, RpcError>> + Send + '_>> {
         let call_obj = Self::call_object(call_data);
-        Box::pin(async move { self.rpc_call("eth_call", json!([call_obj, "latest"])).await })
+        Box::pin(async move {
+            let call_obj = call_obj?;
+            self.rpc_call("eth_call", json!([call_obj, "latest"])).await
+        })
     }
 
     fn send_raw_transaction(
@@ -213,6 +235,21 @@ impl RpcClient for HpxRpcClient {
             ))
         })
     }
+
+    fn transaction_count(
+        &self,
+        address: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<u64, RpcError>> + Send + '_>> {
+        let address = address.to_string();
+        Box::pin(async move {
+            let result =
+                self.rpc_call("eth_getTransactionCount", json!([address, "pending"])).await?;
+            let hex_str = result.as_str().ok_or_else(|| {
+                RpcError::Parse(format!("transaction_count: expected hex string, got {result}"))
+            })?;
+            parse_hex_u64(hex_str)
+        })
+    }
 }
 
 /// Parse a hex-encoded quantity (e.g. `"0x5208"` → `21000`).
@@ -249,7 +286,7 @@ mod tests {
             value: Some("0x1".into()),
             data: Some(vec![0xde, 0xad]),
         };
-        let obj = HpxRpcClient::call_object(&cd);
+        let obj = HpxRpcClient::call_object(&cd).expect("call object");
         assert_eq!(obj["to"], "0xdef");
         assert_eq!(obj["from"], "0xabc");
         assert_eq!(obj["value"], "0x1");
@@ -259,11 +296,33 @@ mod tests {
     #[test]
     fn call_object_omits_optional_fields_when_absent() {
         let cd = CallData { from: None, to: "0xdef".into(), value: None, data: None };
-        let obj = HpxRpcClient::call_object(&cd);
+        let obj = HpxRpcClient::call_object(&cd).expect("call object");
         assert_eq!(obj["to"], "0xdef");
         assert!(obj.get("from").is_none());
         assert!(obj.get("value").is_none());
         assert!(obj.get("data").is_none());
+    }
+
+    #[test]
+    fn call_object_converts_decimal_value_to_hex_quantity() {
+        let cd =
+            CallData { from: None, to: "0xdef".into(), value: Some("1000000".into()), data: None };
+        let obj = HpxRpcClient::call_object(&cd).expect("call object");
+        assert_eq!(obj["value"], "0xf4240");
+    }
+
+    #[test]
+    fn call_object_rejects_malformed_decimal_value() {
+        // M-08 regression: a malformed decimal value must be a typed parse
+        // error, never a silent zero-value call object.
+        let cd = CallData {
+            from: None,
+            to: "0xdef".into(),
+            value: Some("10.5 USDC".into()),
+            data: None,
+        };
+        let err = HpxRpcClient::call_object(&cd).expect_err("must reject malformed decimal");
+        assert!(matches!(err, RpcError::Parse(_)), "got: {err}");
     }
 
     #[test]

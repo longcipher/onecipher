@@ -27,7 +27,8 @@ pub(crate) fn init() -> Result<(), CliError> {
     std::fs::create_dir_all(&keys_dir)?;
     set_dir_mode_0700(&keys_dir);
 
-    // Write identity file (0600).
+    // Write identity file (H-02: atomic private write — created 0600 from
+    // the start, never world-readable, never torn).
     let identity_path = super::age_identity_path();
     if identity_path.exists() {
         return Err(CliError::InvalidArgs(format!(
@@ -35,13 +36,12 @@ pub(crate) fn init() -> Result<(), CliError> {
             identity_path.display()
         )));
     }
-    std::fs::write(&identity_path, &identity_str)?;
-    set_file_mode_0600(&identity_path);
+    oc_core::paths::write_atomic_private(&identity_path, identity_str.as_bytes())?;
 
-    // Write public recipient file (for display purposes).
+    // Write public recipient file (for display purposes; still private-mode
+    // via the same atomic helper).
     let recipient_pub_path = super::age_recipient_public_path();
-    std::fs::write(&recipient_pub_path, &recipient_str)?;
-    set_file_mode_0600(&recipient_pub_path);
+    oc_core::paths::write_atomic_private(&recipient_pub_path, recipient_str.as_bytes())?;
 
     // Add to .age-recipients (dedup).
     recipient_add(&recipient_str)?;

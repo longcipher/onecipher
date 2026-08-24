@@ -10,15 +10,26 @@
 //! - KDF: Argon2id (m=64 MiB, t=3, p=4 by default per AD-05).
 //! - Cipher: XChaCha20-Poly1305 (24-byte nonce, 16-byte Poly1305 tag appended to the ciphertext by
 //!   the `chacha20poly1305` crate).
-//! - `failed_attempts` and `locked` are persisted in the container header so a caller can serialize
-//!   the container back to disk after a failed attempt and observe the lockout on next load.
+//! - `failed_attempts` and `locked` are mirrored in the container header for informational
+//!   purposes, but the *authoritative* failed-attempt state lives in a sidecar file
+//!   (`<state_dir>/backup_attempts.json`, mode 0600) keyed by a prefix of the container salt. This
+//!   makes the lockout effective even when callers re-read a fresh copy of the container from disk
+//!   on every attempt (H-03): the counter survives process restarts and fresh loads. After
+//!   [`MAX_FAILED_ATTEMPTS`] failures, imports are refused until [`LOCKOUT_COOLDOWN_SECS`] seconds
+//!   have elapsed since the last failure ([`OcVaultError::LockedOut`]); a successful import clears
+//!   the recorded attempts.
 //!
 //! Wrong-passphrase backoff: production default is exponential
 //! (1 s, 2 s, 4 s, ... = `2^(attempts-1)` seconds). For tests, call
 //! [`set_backoff_override`] with `Some(Duration::ZERO)`; the override is
 //! thread-local so it does not bleed between parallel test threads.
 
-use std::{cell::RefCell, time::Duration};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
@@ -27,6 +38,7 @@ use chacha20poly1305::{
 };
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::error::OcVaultError;
 
@@ -39,6 +51,21 @@ pub const VERSION: u8 = 1;
 /// Failed-passphrase attempts after which the container becomes permanently
 /// locked (per R42 behavioral contract: 10).
 pub const MAX_FAILED_ATTEMPTS: u32 = 10;
+
+/// Cooldown (in seconds) enforced once the persistent failed-attempt counter
+/// reaches [`MAX_FAILED_ATTEMPTS`], counted from the most recent failure.
+/// Further imports are rejected with [`OcVaultError::LockedOut`] until it
+/// elapses; after expiry a fresh attempt window starts.
+pub const LOCKOUT_COOLDOWN_SECS: u64 = 15 * 60;
+
+/// Name of the sidecar file (inside the OneCipher state directory) that
+/// persists failed-attempt counters across processes and fresh container
+/// loads.
+const ATTEMPTS_FILE_NAME: &str = "backup_attempts.json";
+
+/// Number of leading salt bytes used to identify a container in the
+/// attempts sidecar map.
+const ATTEMPTS_KEY_BYTES: usize = 16;
 
 /// Argon2id output length (32 bytes — XChaCha20-Poly1305 key size).
 const KEY_LEN: usize = 32;
@@ -67,6 +94,22 @@ thread_local! {
 #[cfg(any(test, feature = "test-utils"))]
 pub fn set_backoff_override(d: Option<Duration>) {
     BACKOFF_OVERRIDE.with(|cell| *cell.borrow_mut() = d);
+}
+
+thread_local! {
+    static ATTEMPTS_STATE_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Override the location of the failed-attempts sidecar file for the calling
+/// thread.
+///
+/// **Test-only utility.** See [`set_backoff_override`] for the gating rules.
+/// Pass `Some(path)` to redirect the sidecar (unit tests point it at a
+/// per-test tempdir so the real `~/.onecipher` state is never touched); pass
+/// `None` to restore production behavior.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn set_attempts_state_override(p: Option<PathBuf>) {
+    ATTEMPTS_STATE_OVERRIDE.with(|cell| *cell.borrow_mut() = p);
 }
 
 /// Argon2id KDF parameters.
@@ -156,21 +199,50 @@ impl BackupContainer {
 
     /// Attempt to decrypt the container with `passphrase`.
     ///
-    /// - On success: resets `failed_attempts` to 0 and returns the plaintext.
-    /// - On wrong passphrase: increments `failed_attempts`, applies backoff (see module docs), and
-    ///   returns [`OcVaultError::WrongPassphrase`]. After [`MAX_FAILED_ATTEMPTS`] failures, sets
-    ///   `locked = true` and subsequent calls return [`OcVaultError::Locked`] without trying the
-    ///   passphrase.
+    /// - On success: resets `failed_attempts` to 0, clears the persistent failed-attempt record for
+    ///   this container, and returns the plaintext.
+    /// - On wrong passphrase: increments `failed_attempts` (both in-memory and in the persistent
+    ///   sidecar file), applies backoff (see module docs), and returns
+    ///   [`OcVaultError::WrongPassphrase`]. After [`MAX_FAILED_ATTEMPTS`] failures, sets `locked =
+    ///   true` and subsequent calls return [`OcVaultError::Locked`] without trying the passphrase.
     /// - On a locked container: returns [`OcVaultError::Locked`] immediately.
+    /// - Once the persistent counter reaches [`MAX_FAILED_ATTEMPTS`], further attempts are refused
+    ///   with [`OcVaultError::LockedOut`] until [`LOCKOUT_COOLDOWN_SECS`] have elapsed since the
+    ///   last failure — even for freshly loaded copies of the container (H-03).
+    ///
+    /// The persistent state lives in `<state_dir>/backup_attempts.json`
+    /// (mode 0600, atomic writes). Resolving that path requires a usable home
+    /// directory; import fails closed when it cannot be resolved.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::import_with_state`] for the full error surface.
     pub fn import(&mut self, passphrase: &str) -> Result<Vec<u8>, OcVaultError> {
-        if self.locked {
-            return Err(OcVaultError::Locked);
-        }
+        // Structural validation runs before state-dir resolution so that an
+        // invalid container reports its format error even without `HOME`.
+        self.validate_header()?;
+        let state_file = attempts_state_file()?;
+        self.import_with_state(passphrase, &state_file, system_time_unix())
+    }
+
+    /// Validate the container header (magic, version, salt and nonce lengths)
+    /// without touching KDF, AEAD or any persisted state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OcVaultError::InvalidFormat`] for a bad magic, salt or nonce
+    /// length, and [`OcVaultError::UnsupportedVersion`] for any format version
+    /// other than [`VERSION`] (H-03a: a future v2 container must never be
+    /// parsed as v1).
+    fn validate_header(&self) -> Result<(), OcVaultError> {
         if self.magic != MAGIC {
             return Err(OcVaultError::InvalidFormat(format!(
                 "bad magic: expected {:?}, got {:?}",
                 MAGIC, self.magic
             )));
+        }
+        if self.version != VERSION {
+            return Err(OcVaultError::UnsupportedVersion { found: self.version, expected: VERSION });
         }
         if self.salt.len() != SALT_LEN {
             return Err(OcVaultError::InvalidFormat(format!(
@@ -186,6 +258,45 @@ impl BackupContainer {
                 self.nonce.len()
             )));
         }
+        Ok(())
+    }
+
+    /// [`Self::import`] with explicit sidecar path and clock — the
+    /// testability seam for the persistent lockout (H-03b). Production
+    /// callers use [`Self::import`], which supplies the default state file
+    /// and the system clock.
+    ///
+    /// `now_unix` is the current UNIX time in seconds; tests pass fixed
+    /// values to exercise cooldown expiry deterministically.
+    pub(crate) fn import_with_state(
+        &mut self,
+        passphrase: &str,
+        state_file: &Path,
+        now_unix: u64,
+    ) -> Result<Vec<u8>, OcVaultError> {
+        if self.locked {
+            return Err(OcVaultError::Locked);
+        }
+        self.validate_header()?;
+
+        let key_id = attempts_key(&self.salt);
+        let mut attempts = load_attempt_map(state_file);
+
+        // Enforce the persistent lockout before any KDF work: once
+        // MAX_FAILED_ATTEMPTS have been recorded for this container, refuse
+        // every attempt until the cooldown since the last failure elapses.
+        if attempts.get(&key_id).is_some_and(|rec| rec.count >= MAX_FAILED_ATTEMPTS) {
+            let elapsed = now_unix
+                .saturating_sub(attempts.get(&key_id).map_or(0, |rec| rec.last_failed_unix));
+            if elapsed < LOCKOUT_COOLDOWN_SECS {
+                return Err(OcVaultError::LockedOut {
+                    retry_after_secs: LOCKOUT_COOLDOWN_SECS - elapsed,
+                });
+            }
+            // Cooldown elapsed: start a fresh attempt window.
+            attempts.remove(&key_id);
+            persist_attempt_map(state_file, &attempts)?;
+        }
 
         let key = derive_key(passphrase, &self.salt, &self.kdf_params)?;
         let cipher = XChaCha20Poly1305::new_from_slice(&key)
@@ -196,17 +307,122 @@ impl BackupContainer {
             self.ciphertext.as_ref(),
         ) {
             self.failed_attempts = 0;
+            if attempts.remove(&key_id).is_some() {
+                persist_attempt_map(state_file, &attempts)?;
+            }
             Ok(plaintext)
         } else {
             self.failed_attempts = self.failed_attempts.saturating_add(1);
-            if self.failed_attempts >= MAX_FAILED_ATTEMPTS {
+            // Flip the in-memory lock before persisting so the per-process
+            // guard holds even when the sidecar write fails.
+            let now_locked = self.failed_attempts >= MAX_FAILED_ATTEMPTS;
+            if now_locked {
                 self.locked = true;
-            } else {
+            }
+            let count = attempts.get(&key_id).map_or(0, |rec| rec.count).saturating_add(1);
+            warn!(count, "backup passphrase rejected; persistent attempt counter incremented");
+            attempts.insert(key_id, AttemptRecord { count, last_failed_unix: now_unix });
+            // Persist before sleeping so the failure survives a crash
+            // mid-backoff.
+            persist_attempt_map(state_file, &attempts)?;
+            if !now_locked {
                 std::thread::sleep(backoff_duration(self.failed_attempts));
             }
             Err(OcVaultError::WrongPassphrase)
         }
     }
+}
+
+/// Persistent failed-attempt record for one backup container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AttemptRecord {
+    /// Cumulative failed-passphrase count across processes and reloads.
+    count: u32,
+    /// UNIX time (seconds) of the most recent failure.
+    last_failed_unix: u64,
+}
+
+/// Sidecar map: container key → attempt record.
+type AttemptMap = HashMap<String, AttemptRecord>;
+
+/// Current UNIX time in seconds (0 if the clock is before the epoch).
+fn system_time_unix() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Resolve the failed-attempts sidecar path: the thread-local test override
+/// when installed, otherwise `<state_dir>/backup_attempts.json`.
+///
+/// # Errors
+///
+/// Fails closed when no home directory can be determined and no override is
+/// installed — silently skipping persistence would defeat the brute-force
+/// protection.
+fn attempts_state_file() -> Result<PathBuf, OcVaultError> {
+    if let Some(p) = ATTEMPTS_STATE_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        return Ok(p);
+    }
+    oc_core::paths::state_path(ATTEMPTS_FILE_NAME).map_err(|e| {
+        OcVaultError::InvalidInput(format!("cannot resolve backup attempts state path: {e}"))
+    })
+}
+
+/// Hex-encode `bytes` (lowercase).
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[usize::from(b >> 4)] as char);
+        out.push(HEX[usize::from(b & 0x0f)] as char);
+    }
+    out
+}
+
+/// Stable identifier for a container within the sidecar map: the leading
+/// bytes of its random salt. Salts are unique per export, so this pins the
+/// counter to the exact container contents — stronger than a filesystem-path
+/// key, because copying the `.ocbk` file elsewhere cannot reset the counter.
+fn attempts_key(salt: &[u8]) -> String {
+    let n = salt.len().min(ATTEMPTS_KEY_BYTES);
+    hex_encode(&salt[..n])
+}
+
+/// Load the sidecar map. A missing, unreadable or corrupt file is treated as
+/// empty (logged): the sidecar is defense-in-depth, and bricking legitimate
+/// recovery because an auxiliary file is damaged would be worse than losing
+/// the counter.
+fn load_attempt_map(path: &Path) -> AttemptMap {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return AttemptMap::new();
+    };
+    match serde_json::from_str(&raw) {
+        Ok(map) => map,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "corrupt backup attempts sidecar; ignoring");
+            AttemptMap::new()
+        }
+    }
+}
+
+/// Durably persist the sidecar map (mode 0600, atomic replace). An empty map
+/// removes the file entirely.
+///
+/// # Errors
+///
+/// Propagates I/O failures: silently dropping failed-attempt increments
+/// would defeat the brute-force protection.
+fn persist_attempt_map(path: &Path, map: &AttemptMap) -> Result<(), OcVaultError> {
+    if map.is_empty() {
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(e.into());
+            }
+        }
+        return Ok(());
+    }
+    let json = serde_json::to_vec(map)?;
+    oc_core::paths::write_atomic_private(path, &json).map_err(OcVaultError::Io)?;
+    Ok(())
 }
 
 /// Derive a 32-byte XChaCha20-Poly1305 key from `passphrase` + `salt` via Argon2id.
@@ -278,6 +494,8 @@ mod tests {
 
     #[test]
     fn test_wrong_passphrase_fails_and_increments_counter() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_attempts_state_override(Some(tmp.path().join(ATTEMPTS_FILE_NAME)));
         set_backoff_override(Some(Duration::ZERO));
         let mut c =
             BackupContainer::export_with_params(b"secret", "correct", fast_params()).unwrap();
@@ -285,11 +503,14 @@ mod tests {
         assert!(matches!(result, Err(OcVaultError::WrongPassphrase)));
         assert_eq!(c.failed_attempts, 1);
         assert!(!c.locked);
+        set_attempts_state_override(None);
         set_backoff_override(None);
     }
 
     #[test]
     fn test_correct_passphrase_resets_counter() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_attempts_state_override(Some(tmp.path().join(ATTEMPTS_FILE_NAME)));
         set_backoff_override(Some(Duration::ZERO));
         let mut c =
             BackupContainer::export_with_params(b"secret", "correct", fast_params()).unwrap();
@@ -300,11 +521,14 @@ mod tests {
         let decrypted = c.import("correct").unwrap();
         assert_eq!(decrypted, b"secret");
         assert_eq!(c.failed_attempts, 0);
+        set_attempts_state_override(None);
         set_backoff_override(None);
     }
 
     #[test]
     fn test_10_wrong_passphrases_locks() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_attempts_state_override(Some(tmp.path().join(ATTEMPTS_FILE_NAME)));
         set_backoff_override(Some(Duration::ZERO));
         let mut c =
             BackupContainer::export_with_params(b"secret", "correct", fast_params()).unwrap();
@@ -339,6 +563,7 @@ mod tests {
             "11th attempt on locked container should return Locked, got {:?}",
             result
         );
+        set_attempts_state_override(None);
         set_backoff_override(None);
     }
 
@@ -373,6 +598,143 @@ mod tests {
     }
 
     #[test]
+    fn test_wrong_version_rejected_before_kdf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("backup_attempts.json");
+        let mut c = BackupContainer::export_with_params(b"secret", "pass", fast_params()).unwrap();
+        c.version = VERSION + 1;
+        // Make the KDF parameters impossible so that, were the version check
+        // skipped, decryption would fail with a Crypto error instead of ever
+        // succeeding — proving the version gate runs first.
+        c.kdf_params.m_cost = u32::MAX;
+        let result = c.import_with_state("pass", &state, 1_000);
+        match result {
+            Err(OcVaultError::UnsupportedVersion { found, expected }) => {
+                assert_eq!(found, VERSION + 1);
+                assert_eq!(expected, VERSION);
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
+    }
+
+    /// Drive a fresh container copy through `MAX_FAILED_ATTEMPTS` wrong
+    /// passphrases against one sidecar file, returning the sidecar path and
+    /// the serialized container for reloading fresh copies.
+    fn locked_out_fixture(dir: &Path) -> (std::path::PathBuf, String, Vec<u8>) {
+        // Disable the exponential backoff sleep so the 10 wrong attempts do
+        // not take ~511 s of wall time.
+        set_backoff_override(Some(Duration::ZERO));
+        let state = dir.join("backup_attempts.json");
+        let payload = b"secret".to_vec();
+        let c = BackupContainer::export_with_params(&payload, "right", fast_params()).unwrap();
+        let json = serde_json::to_string(&c).unwrap();
+        let mut working: BackupContainer = serde_json::from_str(&json).unwrap();
+
+        for i in 1..MAX_FAILED_ATTEMPTS {
+            let result = working.import_with_state("wrong", &state, 1_000);
+            assert!(
+                matches!(result, Err(OcVaultError::WrongPassphrase)),
+                "attempt {i} should be WrongPassphrase, got {result:?}"
+            );
+        }
+        // 10th failure completes the persistent lockout window.
+        let result = working.import_with_state("wrong", &state, 1_000);
+        assert!(matches!(result, Err(OcVaultError::WrongPassphrase)));
+        (state, json, payload)
+    }
+
+    #[test]
+    fn test_persistent_lockout_blocks_fresh_container_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, json, _) = locked_out_fixture(tmp.path());
+
+        // A brand-new copy of the container (as an offline attacker would
+        // re-load it every attempt) is refused while cooling down — this is
+        // the H-03 scenario the header-only counter could not stop.
+        let mut fresh: BackupContainer = serde_json::from_str(&json).unwrap();
+        match fresh.import_with_state("right", &state, 1_000) {
+            Err(OcVaultError::LockedOut { retry_after_secs }) => {
+                assert_eq!(retry_after_secs, LOCKOUT_COOLDOWN_SECS);
+            }
+            other => panic!("expected LockedOut, got {other:?}"),
+        }
+        // Retry-after shrinks as time passes.
+        match fresh.import_with_state("right", &state, 1_000 + 60) {
+            Err(OcVaultError::LockedOut { retry_after_secs }) => {
+                assert_eq!(retry_after_secs, LOCKOUT_COOLDOWN_SECS - 60);
+            }
+            other => panic!("expected LockedOut after partial cooldown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cooldown_expiry_allows_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (state, json, payload) = locked_out_fixture(tmp.path());
+
+        let mut fresh: BackupContainer = serde_json::from_str(&json).unwrap();
+        let decrypted =
+            fresh.import_with_state("right", &state, 1_000 + LOCKOUT_COOLDOWN_SECS).unwrap();
+        assert_eq!(decrypted, payload);
+
+        // The expired window was cleared, so another fresh copy imports
+        // cleanly immediately afterwards and the sidecar is gone.
+        let mut fresh2: BackupContainer = serde_json::from_str(&json).unwrap();
+        let result = fresh2.import_with_state("right", &state, 1_000 + LOCKOUT_COOLDOWN_SECS + 1);
+        assert!(result.is_ok());
+        assert!(!state.exists(), "sidecar must be removed once attempts clear");
+    }
+
+    #[test]
+    fn test_success_resets_persistent_counter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("backup_attempts.json");
+        let payload = b"secret";
+        let c = BackupContainer::export_with_params(payload, "right", fast_params()).unwrap();
+        let json = serde_json::to_string(&c).unwrap();
+        let mut working: BackupContainer = serde_json::from_str(&json).unwrap();
+
+        for _ in 0..3 {
+            let _ = working.import_with_state("wrong", &state, 1_000);
+        }
+        assert!(state.exists(), "failures must be persisted");
+
+        let mut recover: BackupContainer = serde_json::from_str(&json).unwrap();
+        let decrypted = recover.import_with_state("right", &state, 1_001).unwrap();
+        assert_eq!(decrypted, payload);
+        assert!(!state.exists(), "success must clear the persistent counter");
+
+        // No residual history: a fresh copy starts from a clean slate.
+        let mut fresh: BackupContainer = serde_json::from_str(&json).unwrap();
+        let decrypted = fresh.import_with_state("right", &state, 1_002).unwrap();
+        assert_eq!(decrypted, payload);
+    }
+
+    #[test]
+    fn test_sidecar_file_has_private_permissions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("backup_attempts.json");
+        let mut c = BackupContainer::export_with_params(b"x", "p", fast_params()).unwrap();
+        let _ = c.import_with_state("wrong", &state, 1_000);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&state).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "sidecar holds brute-force state; must be 0600");
+        }
+    }
+
+    #[test]
+    fn test_corrupt_sidecar_treated_as_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path().join("backup_attempts.json");
+        std::fs::write(&state, b"not json{").unwrap();
+        let mut c = BackupContainer::export_with_params(b"x", "p", fast_params()).unwrap();
+        let decrypted = c.import_with_state("p", &state, 1_000).unwrap();
+        assert_eq!(decrypted, b"x");
+    }
+
+    #[test]
     fn test_argon2_default_params_match_ad05() {
         let p = Argon2idParams::default();
         assert_eq!(p.m_cost, 64 * 1024);
@@ -401,6 +763,8 @@ mod tests {
 
     #[test]
     fn test_container_carries_lock_state_through_serde() {
+        let tmp = tempfile::tempdir().unwrap();
+        set_attempts_state_override(Some(tmp.path().join(ATTEMPTS_FILE_NAME)));
         set_backoff_override(Some(Duration::ZERO));
         let mut c = BackupContainer::export_with_params(b"x", "p", fast_params()).unwrap();
         for _ in 0..MAX_FAILED_ATTEMPTS {
@@ -419,6 +783,7 @@ mod tests {
         let mut c2 = c2;
         let result = c2.import("p");
         assert!(matches!(result, Err(OcVaultError::Locked)));
+        set_attempts_state_override(None);
         set_backoff_override(None);
     }
 

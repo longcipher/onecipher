@@ -38,6 +38,10 @@ impl SignerState {
     }
 
     /// Decrypt the secret key for the given chain type.
+    ///
+    /// L-07: the detailed error may embed filesystem paths, so it is logged
+    /// via `tracing` and replaced with a generic message before it can reach
+    /// a JSON-RPC client.
     pub(crate) fn secret_key(
         &self,
         chain_type: ChainType,
@@ -49,17 +53,25 @@ impl SignerState {
             Some(self.index),
             self.vault_path.as_ref().map(|p| p.as_path()),
         )
-        .map_err(|e| format!("failed to decrypt signing key: {e}"))
+        .map_err(|e| {
+            tracing::warn!(error = %e, "wallet-rpc: failed to decrypt signing key");
+            "internal error".to_string()
+        })
     }
 
     /// Resolve the configured wallet name/id to the canonical wallet ID.
+    ///
+    /// L-07: see [`SignerState::secret_key`] — details stay in the log.
     pub(crate) fn configured_wallet_id(&self) -> Result<String, String> {
         oc_vault::load_wallet_by_name_or_id(
             &self.wallet,
             self.vault_path.as_ref().map(|p| p.as_path()),
         )
         .map(|wallet| wallet.id)
-        .map_err(|e| format!("failed to resolve configured wallet: {e}"))
+        .map_err(|e| {
+            tracing::warn!(error = %e, "wallet-rpc: failed to resolve configured wallet");
+            "internal error".to_string()
+        })
     }
 
     /// Derive the compressed secp256k1 public key (33 bytes) for a secret key.

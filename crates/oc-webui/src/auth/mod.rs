@@ -9,4 +9,4 @@ pub mod webauthn;
 pub use bootstrap::BootstrapToken;
 pub use cli_token::CLI_TOKEN_HEADER;
 pub use session::{AuthSession, SessionStore};
-pub use webauthn::{StoredCredential, WebAuthnManager};
+pub use webauthn::{ChallengeError, StoredCredential, WebAuthnError, WebAuthnManager};

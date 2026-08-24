@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 //! Policy Engine v2 for OneCipher.
 //!
 //! Fully designed and implemented in accordance with the Open Wallet Standard's policy engine

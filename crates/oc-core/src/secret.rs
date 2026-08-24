@@ -158,14 +158,14 @@ mod tests {
         assert!(m.chain.is_none());
         assert!(m.issuer.is_none());
         assert!(m.account.is_none());
-        assert!(m.tags.is_empty());
+        assert_eq!(m.tags.len(), 0);
     }
 
     #[test]
     fn secret_metadata_skips_empty_fields_when_serialized() {
         let m = SecretMetadata::default();
         let json = serde_json::to_value(&m).unwrap();
-        assert!(json.as_object().unwrap().is_empty());
+        assert_eq!(json.as_object().unwrap().len(), 0);
     }
 
     #[test]

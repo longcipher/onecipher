@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Full WalletConnect v2 pairing-flow test over the mock relay, driving the
 //! **encrypted** protocol path exactly as a real dApp↔wallet exchange would:
 //!

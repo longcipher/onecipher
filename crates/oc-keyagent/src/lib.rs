@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 //! oc-keyagent — Key-Agent main loop (sync, NO tokio).
 //!
 //! Per R55/R56/AD-01, the Key-Agent uses `std::os::unix::net::UnixListener`

@@ -45,6 +45,50 @@ pub(crate) use state::SignerState;
 
 use crate::CliError;
 
+/// Run a synchronous handler on tokio's blocking thread pool (H-06).
+///
+/// The `ledgerflow_*` handlers perform Argon2id KDF work and vault/passkey
+/// file I/O; running them inline on an async worker would stall the reactor.
+/// A cancelled or panicked blocking task maps to a generic -32603 (L-07: no
+/// internal detail leaks to the client).
+async fn run_blocking<T, F>(f: F) -> Result<T, state::RpcError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, state::RpcError> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(result) => result,
+        Err(_) => Err(state::RpcError::new(-32603, "internal error")),
+    }
+}
+
+/// H-06: [`auth::require_authorization`] off the async path.
+async fn authorize_async(state: &SignerState, params: &Value) -> Result<(), state::RpcError> {
+    let state = state.clone();
+    let params = params.clone();
+    run_blocking(move || auth::require_authorization(&state, &params)).await
+}
+
+/// H-06: [`handlers::handle_keys`] off the async path.
+async fn keys_async(state: SignerState) -> Result<Value, state::RpcError> {
+    run_blocking(move || handlers::handle_keys(&state)).await
+}
+
+/// H-06: [`handlers::handle_sign`] off the async path.
+async fn sign_async(state: SignerState, params: Value) -> Result<Value, state::RpcError> {
+    run_blocking(move || handlers::handle_sign(&state, &params)).await
+}
+
+/// H-06: [`handlers::handle_sign_payment`] off the async path.
+async fn sign_payment_async(state: SignerState, params: Value) -> Result<Value, state::RpcError> {
+    run_blocking(move || handlers::handle_sign_payment(&state, &params)).await
+}
+
+/// H-06: [`auth::handle_generate_challenge`] off the async path.
+async fn generate_challenge_async(params: Value) -> Result<Value, state::RpcError> {
+    run_blocking(move || auth::handle_generate_challenge(&params)).await
+}
+
 /// Single entry point: POST body is a JSON-RPC 2.0 request. Dispatches to the
 /// `ledgerflow_*` methods in [`handlers`], gating the stateful ones behind
 /// [`auth::require_authorization`].
@@ -55,26 +99,26 @@ async fn rpc(State(state): State<SignerState>, Json(req): Json<state::RpcRequest
     let id = req.id().clone();
     let result = match req.method() {
         "ledgerflow_generate_challenge" => match auth::validate_params(req.params()) {
-            Ok(p) => auth::handle_generate_challenge(&p),
+            Ok(p) => generate_challenge_async(p).await,
             Err(e) => Err(e),
         },
         "ledgerflow_keys" => match auth::validate_params(req.params()) {
-            Ok(p) => match auth::require_authorization(&state, &p) {
-                Ok(()) => handlers::handle_keys(&state),
+            Ok(p) => match authorize_async(&state, &p).await {
+                Ok(()) => keys_async(state.clone()).await,
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),
         },
         "ledgerflow_sign" => match auth::validate_params(req.params()) {
-            Ok(p) => match auth::require_authorization(&state, &p) {
-                Ok(()) => handlers::handle_sign(&state, &p),
+            Ok(p) => match authorize_async(&state, &p).await {
+                Ok(()) => sign_async(state.clone(), p).await,
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),
         },
         "ledgerflow_sign_payment" => match auth::validate_params(req.params()) {
-            Ok(p) => match auth::require_authorization(&state, &p) {
-                Ok(()) => handlers::handle_sign_payment(&state, &p),
+            Ok(p) => match authorize_async(&state, &p).await {
+                Ok(()) => sign_payment_async(state.clone(), p).await,
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),
@@ -205,7 +249,7 @@ mod tests {
         for k in arr {
             let pk = k["public_key"].as_str().expect("public_key must be a string");
             let bytes = base64::engine::general_purpose::STANDARD.decode(pk).expect("valid base64");
-            assert!(!bytes.is_empty());
+            assert_ne!(bytes.len(), 0);
         }
     }
 

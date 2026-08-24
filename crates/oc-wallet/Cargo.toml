@@ -19,6 +19,7 @@ xrpl = ["oc-signer/xrpl"]
 
 [dependencies]
 base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
 getrandom = { workspace = true }
 hex = { workspace = true }
 hpx = { workspace = true, features = ["rustls-tls", "http1", "http2", "json"], optional = true }
@@ -36,6 +37,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"], optional = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 bs58 = { workspace = true }

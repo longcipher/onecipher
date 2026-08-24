@@ -336,14 +336,14 @@ mod tests {
     #[test]
     fn unknown_selector_returns_empty() {
         let candidates = lookup(&[0xff, 0xff, 0xff, 0xff]);
-        assert!(candidates.is_empty());
+        assert!(candidates.is_empty(), "unknown selector must yield no candidates");
     }
 
     #[test]
     fn erc20_approve_has_collision_with_erc721() {
         // approve(address,uint256) = 0x095ea7b3 — shared by ERC20 and ERC721.
         let candidates = lookup(&[0x09, 0x5e, 0xa7, 0xb3]);
-        assert!(!candidates.is_empty());
+        assert!(!candidates.is_empty(), "known selector must yield candidates");
         // Both must be present. ERC20 is curated-first, so it's at index 0.
         assert_eq!(candidates[0].name, "approve");
         assert_eq!(candidates[0].contract_name, "ERC20");

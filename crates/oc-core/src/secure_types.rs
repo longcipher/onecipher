@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn test_passphrase_empty_bytes_is_ok() {
         let pp = Passphrase::from_bytes(Vec::new()).expect("empty passphrase should succeed");
-        assert!(pp.as_bytes().is_empty());
+        assert_eq!(pp.as_bytes().len(), 0);
     }
 
     #[test]

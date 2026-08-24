@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 //! Unified secret vault with age encryption.
 //!
 //! Provides a single interface for managing all sensitive data: wallet

@@ -71,6 +71,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal"] }
 toml = { workspace = true }
+tracing = { workspace = true }
 zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

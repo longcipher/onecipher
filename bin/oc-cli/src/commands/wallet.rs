@@ -2,14 +2,18 @@ use std::io::{BufRead, Write};
 
 use ed25519_dalek::SigningKey as Ed25519SigningKey;
 use k256::ecdsa::SigningKey as K256SigningKey;
-use zeroize::Zeroize;
 
 use crate::{CliError, audit};
 
 pub(crate) fn create(name: &str, words: u32, show_mnemonic: bool) -> Result<(), CliError> {
-    // Generate mnemonic, then import it to create the wallet
-    let mut mnemonic_phrase = oc_wallet::generate_mnemonic(words)?;
-    let info = oc_wallet::import_wallet_mnemonic(name, &mnemonic_phrase, None, Some(0), None)?;
+    // Generate mnemonic, then import it to create the wallet.
+    // generate_mnemonic returns SecretBytes (HardenedBytes): mlocked,
+    // MADV_DONTDUMP-marked and zeroized on drop — no manual zeroize call is
+    // needed (or possible); dropping the buffer wipes it.
+    let mnemonic_phrase = oc_wallet::generate_mnemonic(words)?;
+    let phrase_str = std::str::from_utf8(mnemonic_phrase.expose())
+        .map_err(|e| CliError::InvalidArgs(format!("generated mnemonic not valid UTF-8: {e}")))?;
+    let info = oc_wallet::import_wallet_mnemonic(name, phrase_str, None, Some(0), None)?;
 
     audit::log_wallet_created(&info);
 
@@ -28,14 +32,14 @@ pub(crate) fn create(name: &str, words: u32, show_mnemonic: bool) -> Result<(), 
         eprintln!("⚠️  WARNING: The mnemonic below provides FULL ACCESS to this wallet.");
         eprintln!("⚠️  Store it securely offline. It will NOT be shown again.");
         eprintln!();
-        println!("{mnemonic_phrase}");
+        println!("{phrase_str}");
     } else {
         eprintln!();
         eprintln!("Mnemonic encrypted and saved to vault.");
         eprintln!("Use --show-mnemonic at creation time if you need a backup copy.");
     }
 
-    mnemonic_phrase.zeroize();
+    // mnemonic_phrase (SecretBytes) is zeroized on drop automatically.
     Ok(())
 }
 

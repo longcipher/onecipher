@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 pub mod api_key;
 pub mod approval;
 pub mod approval_log;

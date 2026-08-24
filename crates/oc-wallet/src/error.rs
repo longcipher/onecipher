@@ -39,6 +39,9 @@ pub enum OcWalletError {
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("{0}")]
+    PolicyStore(#[from] crate::policy_store::PolicyStoreError),
+
     #[cfg(feature = "rpc")]
     #[error("HTTP error: {0}")]
     Http(#[from] hpx::Error),

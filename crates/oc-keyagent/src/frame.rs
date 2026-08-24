@@ -295,7 +295,7 @@ mod tests {
         write_frame(&mut buf, b"").unwrap();
         let mut cursor = Cursor::new(buf);
         let decoded = read_frame(&mut cursor).unwrap();
-        assert!(decoded.is_empty());
+        assert_eq!(decoded.len(), 0);
     }
 
     #[test]

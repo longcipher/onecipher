@@ -1232,7 +1232,7 @@ mod tests {
         let (risk, reasons) =
             router.policy_evaluate_signing("personal_sign", &json!({}), "eip155:1").unwrap();
         assert_eq!(risk, RiskLevel::Safe);
-        assert!(reasons.is_empty());
+        assert_eq!(reasons.len(), 0);
     }
 
     #[test]
@@ -1265,7 +1265,7 @@ mod tests {
             router.policy_evaluate_signing("personal_sign", &params, "eip155:1").unwrap();
         // No verified-dApp list exists yet, so dapp_origin is ignored.
         assert_eq!(risk, RiskLevel::Safe);
-        assert!(reasons.is_empty());
+        assert_eq!(reasons.len(), 0);
     }
 
     #[test]
@@ -1287,7 +1287,7 @@ mod tests {
         let (risk, reasons) =
             router.policy_evaluate_signing("eth_sendTransaction", &params, "eip155:1").unwrap();
         assert_eq!(risk, RiskLevel::Safe);
-        assert!(reasons.is_empty());
+        assert_eq!(reasons.len(), 0);
     }
 
     #[test]
@@ -1457,7 +1457,7 @@ mod tests {
             }
         });
         let result = WcMethodRouter::extract_passkey_auth(&params).unwrap().unwrap();
-        assert!(result.challenge.is_empty());
+        assert_eq!(result.challenge.len(), 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1799,7 +1799,7 @@ mod sim_integration {
         assert!(sim.is_some());
         assert!(sim.unwrap().success);
         assert_eq!(risk, RiskLevel::Safe);
-        assert!(reasons.is_empty());
+        assert_eq!(reasons.len(), 0);
     }
 
     #[test]

@@ -9,6 +9,11 @@ use super::{
 
 /// Execute a confirmed intent.
 ///
+/// `from_address` is the sender's EVM address; it is required so the real
+/// pending nonce can be fetched via `eth_getTransactionCount` before building
+/// the transaction (M-04a). A hard-coded nonce of 0 made every executed
+/// intent after the first revert on-chain.
+///
 /// `signer` is a sync closure invoked with `(key_ref, unsigned_tx_bytes)`
 /// that must return the signed RLP-encoded transaction bytes. The closure is
 /// sync because the Key-Agent UDS channel is itself sync (`std::os::unix::net`
@@ -24,6 +29,7 @@ use super::{
 pub async fn execute_intent<F>(
     intent: &Intent,
     rpc: &dyn RpcClient,
+    from_address: &str,
     signer: F,
 ) -> Result<IntentResult, IntentError>
 where
@@ -42,9 +48,19 @@ where
     let tx_bytes = match &intent.kind {
         IntentKind::SignTransaction { tx_hex, .. } => hex::decode(tx_hex.trim_start_matches("0x"))
             .map_err(|e| IntentError::InvalidInput(format!("invalid tx_hex: {e}")))?,
+        // CrossChainTransfer is included so `build_call_data`'s fail-closed
+        // Unsupported error (M-04b) fires before anything is signed.
         IntentKind::Pay { .. } | IntentKind::CrossChainTransfer { .. } => {
             let chain_num = parse_chain_id(&intent.chain_id)?;
             let call = build_call_data(&intent.kind, rpc.chain_id())?;
+            if from_address.trim().is_empty() {
+                return Err(IntentError::InvalidInput(
+                    "sender address is required to fetch the transaction nonce".to_string(),
+                ));
+            }
+            // M-04a: fetch the real pending nonce for the sender instead of
+            // hard-coding 0.
+            let nonce = rpc.transaction_count(from_address).await.map_err(IntentError::Rpc)?;
             // M8: surface RPC failures instead of silently falling back to
             // 21_000 gas / 1 gwei gas price — those defaults can mask a
             // misconfigured node and produce under-priced transactions.
@@ -57,6 +73,7 @@ where
                 call.data.as_deref(),
                 gas_limit,
                 gas_price,
+                nonce,
             )?
         }
         IntentKind::SignMessage { .. } => {
@@ -131,13 +148,23 @@ fn build_unsigned_eip1559_tx(
     data: Option<&[u8]>,
     gas_limit: u64,
     gas_price: u64,
+    nonce: u64,
 ) -> Result<Vec<u8>, IntentError> {
     use oc_signer::rlp::{encode_bytes, encode_list, encode_u64};
 
     let to_bytes = hex::decode(to.trim_start_matches("0x"))
         .map_err(|e| IntentError::InvalidInput(format!("invalid recipient: {e}")))?;
+    // Canonical EVM hex QUANTITIES omit leading zeros (e.g. 1 wei is "0x1"),
+    // which yields an odd digit count; pad to a whole byte before decoding
+    // instead of rejecting the canonical form.
+    let decode_quantity = |s: &str| -> Result<Vec<u8>, IntentError> {
+        let digits = s.trim_start_matches("0x");
+        let padded = if digits.len() % 2 == 1 { format!("0{digits}") } else { digits.to_string() };
+        hex::decode(&padded)
+            .map_err(|e| IntentError::InvalidInput(format!("invalid hex quantity '{s}': {e}")))
+    };
     let value_bytes = match value.as_deref() {
-        Some(v) => hex::decode(v.trim_start_matches("0x")).map_err(|e| {
+        Some(v) => decode_quantity(v).map_err(|e| {
             IntentError::InvalidInput(format!("invalid value (must be hex wei): {e}"))
         })?,
         None => Vec::new(),
@@ -148,7 +175,7 @@ fn build_unsigned_eip1559_tx(
 
     let items: Vec<u8> = [
         encode_u64(chain_id),
-        encode_u64(0), // nonce
+        encode_u64(nonce), // M-04a: real pending nonce, not a hard-coded 0
         encode_u64(max_priority),
         encode_u64(max_fee),
         encode_u64(gas_limit),
@@ -166,6 +193,8 @@ fn build_unsigned_eip1559_tx(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::{
         super::{
             rpc::MockRpcClient,
@@ -173,6 +202,9 @@ mod tests {
         },
         *,
     };
+
+    /// Sender address used by tests (the mock ignores its value).
+    const TEST_FROM: &str = "0x1111111111111111111111111111111111111111";
 
     fn make_pay_intent() -> Intent {
         Intent::new(
@@ -199,11 +231,82 @@ mod tests {
     async fn execute_returns_confirmed_for_valid_intent() {
         let intent = make_pay_intent();
         let rpc = MockRpcClient::new("eip155:8453");
-        let result = execute_intent(&intent, &rpc, identity_signer()).await.expect("execute");
+        let result =
+            execute_intent(&intent, &rpc, TEST_FROM, identity_signer()).await.expect("execute");
         assert_eq!(result.status, IntentStatus::Confirmed);
         assert!(result.tx_hash.is_some());
         assert!(result.receipt.is_some());
         assert!(result.error.is_none());
+        // M-04a: the nonce lookup must happen on every execution.
+        assert_eq!(rpc.transaction_count_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_fetches_nonce_and_encodes_it() {
+        // M-04a regression: the pending nonce from eth_getTransactionCount
+        // must be encoded into the unsigned transaction (never a hard-coded
+        // 0).
+        let intent = make_pay_intent();
+        let rpc = MockRpcClient::new("eip155:8453").with_nonce(7);
+        let captured: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&captured);
+        let signer = move |_key: &SigningKeyRef, tx_bytes: &[u8]| {
+            *sink.lock().unwrap() = Some(tx_bytes.to_vec());
+            Ok(tx_bytes.to_vec())
+        };
+        execute_intent(&intent, &rpc, TEST_FROM, signer).await.expect("execute");
+
+        assert_eq!(rpc.transaction_count_calls(), 1, "nonce must be fetched via RPC");
+        let tx = captured.lock().unwrap().clone().expect("signer captured tx bytes");
+        // Layout: type byte, RLP list header, then items starting with
+        // chain_id (8453 → minimal BE [0x21, 0x05]) followed by the nonce
+        // (7 → [0x07]).
+        let pos = tx.windows(2).position(|w| w == [0x21, 0x05]).expect("chain id bytes in tx");
+        assert_eq!(tx[pos + 2], 0x07, "nonce 7 must be encoded right after chain id");
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_missing_sender_address() {
+        // Fail closed: without a sender address the nonce cannot be fetched,
+        // so execution must error instead of silently building a nonce-0 tx.
+        let intent = make_pay_intent();
+        let rpc = MockRpcClient::new("eip155:8453");
+        let err = execute_intent(&intent, &rpc, "", identity_signer())
+            .await
+            .expect_err("empty sender must error");
+        assert!(matches!(err, IntentError::InvalidInput(_)), "got {err}");
+        assert_eq!(rpc.transaction_count_calls(), 0, "no nonce lookup without an address");
+        assert_eq!(rpc.send_raw_transaction_calls(), 0, "nothing may be broadcast");
+    }
+
+    #[tokio::test]
+    async fn execute_never_signs_cross_chain_transfer() {
+        // M-04b regression: CrossChainTransfer must fail closed with
+        // Unsupported — no signing, no broadcast.
+        let intent = Intent::new(
+            IntentKind::CrossChainTransfer {
+                amount: "100 USDC".to_string(),
+                asset: "eip155:8453/erc20:0x1".to_string(),
+                from_chain: "eip155:8453".to_string(),
+                to_chain: "eip155:42161".to_string(),
+                recipient: "0xabcabcabcabcabcabcabcabcabcabcabca".to_string(),
+            },
+            "eip155:8453".to_string(),
+            "sk-test".to_string(),
+        );
+        let rpc = MockRpcClient::new("eip155:8453");
+        let signed: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+        let flag = Arc::clone(&signed);
+        let signer = move |_key: &SigningKeyRef, tx_bytes: &[u8]| {
+            *flag.lock().unwrap() = true;
+            Ok(tx_bytes.to_vec())
+        };
+        let err = execute_intent(&intent, &rpc, TEST_FROM, signer)
+            .await
+            .expect_err("cross-chain transfer must be unsupported");
+        assert!(matches!(err, IntentError::Unsupported(_)), "got {err}");
+        assert!(!*signed.lock().unwrap(), "nothing may be signed");
+        assert_eq!(rpc.send_raw_transaction_calls(), 0, "nothing may be broadcast");
     }
 
     #[tokio::test]
@@ -211,7 +314,8 @@ mod tests {
         let mut intent = make_pay_intent();
         intent.expires_at = intent.created_at - 1;
         let rpc = MockRpcClient::new("eip155:8453");
-        let result = execute_intent(&intent, &rpc, identity_signer()).await.expect("execute");
+        let result =
+            execute_intent(&intent, &rpc, TEST_FROM, identity_signer()).await.expect("execute");
         assert_eq!(result.status, IntentStatus::Expired);
         assert!(result.tx_hash.is_none());
         assert!(result.error.is_some());
@@ -226,7 +330,8 @@ mod tests {
         let failing_signer = |_: &SigningKeyRef, _: &[u8]| {
             Err(IntentError::Execution("key-agent unavailable".to_string()))
         };
-        let err = execute_intent(&intent, &rpc, failing_signer).await.expect_err("must error");
+        let err =
+            execute_intent(&intent, &rpc, TEST_FROM, failing_signer).await.expect_err("must error");
         assert!(
             err.to_string().contains("signing failed"),
             "expected signing-failed wrapper, got: {err}"
@@ -250,7 +355,9 @@ mod tests {
             "sk-test".to_string(),
         );
         let rpc = MockRpcClient::new("eip155:1");
-        let err = execute_intent(&intent, &rpc, identity_signer()).await.expect_err("must error");
+        let err = execute_intent(&intent, &rpc, TEST_FROM, identity_signer())
+            .await
+            .expect_err("must error");
         assert!(err.to_string().contains("SignMessage"));
     }
 
@@ -267,7 +374,9 @@ mod tests {
             "sk-test".to_string(),
         );
         let rpc = MockRpcClient::new("not-a-caip2-id");
-        let err = execute_intent(&intent, &rpc, identity_signer()).await.expect_err("must error");
+        let err = execute_intent(&intent, &rpc, TEST_FROM, identity_signer())
+            .await
+            .expect_err("must error");
         assert!(matches!(err, IntentError::InvalidChain(_)), "got: {err}");
     }
 

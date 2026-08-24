@@ -242,7 +242,7 @@ mod tests {
 
         let content =
             std::fs::read_to_string(dir.path().join("logs/approval_queue.jsonl")).unwrap();
-        assert!(content.trim().is_empty());
+        assert_eq!(content.trim().len(), 0);
     }
 
     #[test]

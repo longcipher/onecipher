@@ -17,7 +17,7 @@ use age::{
     x25519::{Identity as AgeX25519Identity, Recipient as AgeX25519Recipient},
 };
 use oc_crypto::HardenedBytes;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Errors returned by age encryption / decryption operations.
 #[derive(Debug, thiserror::Error)]
@@ -68,13 +68,14 @@ impl AgeIdentity {
     /// Serialize the identity to the standard age identity string
     /// (`AGE-SECRET-KEY-1...`).
     ///
-    /// The returned `String` holds sensitive material — callers should
-    /// [`Zeroize::zeroize`] it when done, or prefer
-    /// [`to_hardened_bytes`](Self::to_hardened_bytes).
-    pub fn to_secret_string(&self) -> String {
+    /// The key material is wrapped in [`Zeroizing`] so the buffer is wiped
+    /// on drop. Note that `Zeroizing`'s `Debug` implementation renders the
+    /// inner value — never Debug-print the result. Prefer
+    /// [`to_hardened_bytes`](Self::to_hardened_bytes) when persisting.
+    pub fn to_secret_string(&self) -> Zeroizing<String> {
         // age 0.11.5's inherent `Identity::to_string()` returns a
         // `HardenedKey<str>` wrapper; `expose_secret()` yields the `&str`.
-        self.identity.to_string().expose_secret().to_owned()
+        Zeroizing::new(self.identity.to_string().expose_secret().to_owned())
     }
 
     /// Return the public recipient string (`age1...`) for this identity.
@@ -89,8 +90,11 @@ impl AgeIdentity {
     pub fn to_hardened_bytes(&self) -> Result<HardenedBytes, AgeError> {
         // Build the identity string and move it directly into a hardened
         // buffer without leaving a `String` around longer than necessary.
-        let s = self.to_secret_string();
-        let bytes = s.into_bytes();
+        // `mem::take` transfers ownership to `HardenedBytes` (leaving an
+        // empty string in the guard), and `HardenedBytes` wipes the source
+        // buffer internally.
+        let mut guarded = self.to_secret_string();
+        let bytes = std::mem::take(&mut *guarded).into_bytes();
         HardenedBytes::from_vec(bytes).map_err(AgeError::from)
     }
 
@@ -163,18 +167,30 @@ pub fn encrypt_payload(plaintext: &[u8], recipients: &[String]) -> Result<Vec<u8
 }
 
 /// Decrypt a ciphertext using an age X25519 identity.
-pub fn decrypt_payload(ciphertext: &[u8], identity: &AgeIdentity) -> Result<Vec<u8>, AgeError> {
+///
+/// The plaintext is returned in a [`Zeroizing`] buffer that is wiped on
+/// drop.
+pub fn decrypt_payload(
+    ciphertext: &[u8],
+    identity: &AgeIdentity,
+) -> Result<Zeroizing<Vec<u8>>, AgeError> {
     let decryptor = Decryptor::new(ciphertext).map_err(|e| AgeError::Decryption(e.to_string()))?;
     let mut reader = decryptor
         .decrypt(std::iter::once(identity.as_age_identity() as &dyn age::Identity))
         .map_err(|e| AgeError::Decryption(e.to_string()))?;
-    let mut decrypted = Vec::new();
+    let mut decrypted = Zeroizing::new(Vec::new());
     reader.read_to_end(&mut decrypted).map_err(|e| AgeError::Decryption(e.to_string()))?;
     Ok(decrypted)
 }
 
 /// Decrypt a passphrase-encrypted (scrypt) age ciphertext.
-pub fn decrypt_with_passphrase(ciphertext: &[u8], passphrase: &str) -> Result<Vec<u8>, AgeError> {
+///
+/// The plaintext is returned in a [`Zeroizing`] buffer that is wiped on
+/// drop.
+pub fn decrypt_with_passphrase(
+    ciphertext: &[u8],
+    passphrase: &str,
+) -> Result<Zeroizing<Vec<u8>>, AgeError> {
     let secret = SecretString::from(passphrase.to_owned());
     let scrypt_identity = age::scrypt::Identity::new(secret);
 
@@ -182,7 +198,7 @@ pub fn decrypt_with_passphrase(ciphertext: &[u8], passphrase: &str) -> Result<Ve
     let mut reader = decryptor
         .decrypt(std::iter::once(&scrypt_identity as &dyn age::Identity))
         .map_err(|e| AgeError::Decryption(e.to_string()))?;
-    let mut decrypted = Vec::new();
+    let mut decrypted = Zeroizing::new(Vec::new());
     reader.read_to_end(&mut decrypted).map_err(|e| AgeError::Decryption(e.to_string()))?;
     Ok(decrypted)
 }
@@ -202,14 +218,14 @@ mod tests {
         assert_ne!(&ciphertext[..], &plaintext[..]);
 
         let decrypted = decrypt_payload(&ciphertext, &identity).unwrap();
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(&decrypted[..], &plaintext[..]);
     }
 
     #[test]
     fn identity_string_starts_with_age_secret_key() {
         let identity = AgeIdentity::generate();
         let s = identity.to_secret_string();
-        assert!(s.starts_with("AGE-SECRET-KEY-1"), "got: {s}");
+        assert!(s.starts_with("AGE-SECRET-KEY-1"), "got: {}", s.as_str());
     }
 
     #[test]
@@ -217,7 +233,7 @@ mod tests {
         let identity = AgeIdentity::generate();
         let bytes = identity.to_hardened_bytes().unwrap();
         let restored = AgeIdentity::from_hardened_bytes(&bytes).unwrap();
-        assert_eq!(identity.to_secret_string(), restored.to_secret_string());
+        assert_eq!(identity.to_secret_string().as_str(), restored.to_secret_string().as_str());
     }
 
     #[test]
@@ -230,8 +246,10 @@ mod tests {
         let ciphertext = encrypt_payload(plaintext, &recipients).unwrap();
 
         // Both identities can decrypt.
-        assert_eq!(decrypt_payload(&ciphertext, &id1).unwrap(), plaintext);
-        assert_eq!(decrypt_payload(&ciphertext, &id2).unwrap(), plaintext);
+        let d1 = decrypt_payload(&ciphertext, &id1).unwrap();
+        let d2 = decrypt_payload(&ciphertext, &id2).unwrap();
+        assert_eq!(&d1[..], &plaintext[..]);
+        assert_eq!(&d2[..], &plaintext[..]);
     }
 
     #[test]
@@ -280,7 +298,7 @@ mod tests {
         let encrypted = encrypt_with_pinned_work_factor(passphrase, plaintext);
 
         let decrypted = decrypt_with_passphrase(&encrypted, passphrase).unwrap();
-        assert_eq!(decrypted, plaintext);
+        assert_eq!(&decrypted[..], &plaintext[..]);
     }
 
     #[test]

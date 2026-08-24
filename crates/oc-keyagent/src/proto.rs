@@ -610,7 +610,7 @@ mod tests {
     #[test]
     fn empty_encodes_to_zero_bytes() {
         let empty = Empty {};
-        assert!(empty.encode_to_vec().is_empty());
+        assert_eq!(empty.encode_to_vec().len(), 0);
         let decoded: Empty = Message::decode(&[][..]).unwrap();
         assert_eq!(empty, decoded);
     }

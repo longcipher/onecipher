@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 //! Web UI approval surface for OneCipher daemon.
 //!
 //! Provides a locally-served browser-based approval flow for signing requests
@@ -6,7 +8,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::{io, net::SocketAddr, path::PathBuf};
+use std::{
+    io,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use axum::{middleware::from_fn_with_state, response::IntoResponse};
 use oc_core::{
@@ -280,27 +286,83 @@ async fn health_handler() -> axum::Json<serde_json::Value> {
 ///
 /// If the requested path matches a file in the dist directory, serve it.
 /// Otherwise, serve `index.html` for SPA client-side routing.
+///
+/// Request paths are strictly validated before any filesystem access: they
+/// must be relative, slash-separated, and free of traversal segments (`..`),
+/// backslashes, and NUL bytes; after canonicalization the candidate must stay
+/// inside the dist root (C-03 path-traversal hardening).
 async fn spa_fallback(
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
-) -> impl axum::response::IntoResponse {
-    let path = uri.path().trim_start_matches('/');
+) -> axum::response::Response {
     let dist = find_frontend_dist();
+    serve_spa_path(&dist, uri.path()).await
+}
 
-    // Try to serve the exact file from the dist directory.
-    if !path.is_empty() {
-        let file_path = dist.join(path);
-        if file_path.is_file() {
-            return serve_file(&file_path).await;
+/// Outcome of validating a static file request path.
+enum StaticPath {
+    /// Serve this exact (canonicalized) file from the dist directory.
+    File(PathBuf),
+    /// Safe path that does not name an existing file — SPA index fallback.
+    Fallback,
+    /// Malformed or traversing path — reject without touching the disk.
+    Reject,
+}
+
+/// Validate a raw request path against the dist root.
+fn resolve_static_path(dist: &std::path::Path, request_path: &str) -> StaticPath {
+    let trimmed = request_path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return StaticPath::Fallback;
+    }
+
+    // Percent-decode first so encoded separators/traversal cannot slip past
+    // the segment checks below.
+    let Some(decoded) = percent_decode(trimmed) else {
+        return StaticPath::Reject;
+    };
+
+    // Reject backslashes (Windows separator tricks), NUL bytes, absolute
+    // paths, and any path with non-normal components (`..`, leading `.`).
+    if decoded.contains('\\') || decoded.contains('\0') {
+        return StaticPath::Reject;
+    }
+    let rel = Path::new(&decoded);
+    if rel.is_absolute() || !rel.components().all(|c| matches!(c, std::path::Component::Normal(_)))
+    {
+        return StaticPath::Reject;
+    }
+
+    let candidate = dist.join(rel);
+    if !candidate.is_file() {
+        return StaticPath::Fallback;
+    }
+
+    // Defense in depth: resolve symlinks on both sides and require the
+    // candidate to remain inside the canonicalized dist root.
+    let (Ok(canon_file), Ok(canon_root)) = (candidate.canonicalize(), dist.canonicalize()) else {
+        return StaticPath::Reject;
+    };
+    if canon_file.starts_with(&canon_root) {
+        StaticPath::File(canon_file)
+    } else {
+        StaticPath::Reject
+    }
+}
+
+/// Serve a request path from the SPA dist directory.
+async fn serve_spa_path(dist: &std::path::Path, request_path: &str) -> axum::response::Response {
+    match resolve_static_path(dist, request_path) {
+        StaticPath::File(file) => serve_file(&file).await,
+        StaticPath::Reject => axum::http::StatusCode::NOT_FOUND.into_response(),
+        StaticPath::Fallback => {
+            let index = dist.join("index.html");
+            if index.is_file() { serve_file(&index).await } else { frontend_not_built_response() }
         }
     }
+}
 
-    // SPA fallback: serve index.html for any non-file route.
-    let index = dist.join("index.html");
-    if index.is_file() {
-        return serve_file(&index).await;
-    }
-
-    // No frontend built — return a helpful message.
+/// Helpful message shown when the SPA has not been built yet.
+fn frontend_not_built_response() -> axum::response::Response {
     (
         axum::http::StatusCode::NOT_FOUND,
         axum::response::Html(
@@ -312,6 +374,32 @@ async fn spa_fallback(
         ),
     )
         .into_response()
+}
+
+/// Percent-decode a URL path string.
+///
+/// Returns `None` for malformed escapes (`%` not followed by two hex digits)
+/// or non-UTF-8 output.
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' => {
+                let hex = bytes.get(i + 1..i + 3)?;
+                let hi = char::from(hex[0]).to_digit(16)?;
+                let lo = char::from(hex[1]).to_digit(16)?;
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Serve a single file with the correct content type.
@@ -373,6 +461,8 @@ fn find_frontend_dist() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use tower::ServiceExt;
+
     use super::*;
 
     #[tokio::test]
@@ -425,5 +515,94 @@ mod tests {
         assert_eq!(body["ok"], true);
 
         _handle.abort();
+    }
+
+    // -----------------------------------------------------------------------
+    // SPA static fallback (C-03 path traversal hardening)
+    // -----------------------------------------------------------------------
+
+    /// Build a test SPA app rooted at a temporary dist directory containing
+    /// `index.html` and `assets/app.js`.
+    fn spa_app() -> (tempfile::TempDir, axum::Router) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+        std::fs::write(dir.path().join("index.html"), "<html>index</html>").unwrap();
+        std::fs::write(dir.path().join("assets").join("app.js"), "// js").unwrap();
+        let dist = dir.path().to_path_buf();
+        let app = axum::Router::new().fallback(
+            move |axum::extract::OriginalUri(uri): axum::extract::OriginalUri| {
+                let dist = dist.clone();
+                async move { serve_spa_path(&dist, uri.path()).await }
+            },
+        );
+        (dir, app)
+    }
+
+    async fn get(app: axum::Router, path: &str) -> (axum::http::StatusCode, String) {
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder().uri(path).body(axum::body::Body::empty()).unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        (status, String::from_utf8_lossy(&body).into_owned())
+    }
+
+    #[tokio::test]
+    async fn spa_blocks_parent_traversal() {
+        let (_dir, app) = spa_app();
+        let (status, _) = get(app, "/../../etc/passwd").await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn spa_blocks_percent_encoded_traversal() {
+        let (_dir, app) = spa_app();
+        let (status, _) = get(app, "/..%2f..%2fetc%2fpasswd").await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn spa_blocks_traversal_into_real_file() {
+        let (_dir, app) = spa_app();
+        // Even when the traversal target exists outside dist (Cargo.toml at
+        // the workspace root), it must be rejected.
+        let (status, _) = get(app, "/assets/../../Cargo.toml").await;
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn spa_blocks_backslash_and_nul_paths() {
+        let (_dir, app) = spa_app();
+        for path in ["/..%5C..%5Cetc%5Cpasswd", "/foo%00bar"] {
+            let (status, _) = get(app.clone(), path).await;
+            assert_eq!(status, axum::http::StatusCode::NOT_FOUND, "path: {path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn spa_serves_valid_asset() {
+        let (_dir, app) = spa_app();
+        let (status, body) = get(app, "/assets/app.js").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body, "// js");
+    }
+
+    #[tokio::test]
+    async fn spa_root_serves_index() {
+        let (_dir, app) = spa_app();
+        let (status, body) = get(app, "/").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body, "<html>index</html>");
+    }
+
+    #[tokio::test]
+    async fn spa_unknown_route_falls_back_to_index() {
+        let (_dir, app) = spa_app();
+        let (status, body) = get(app, "/approvals/some-id").await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(body, "<html>index</html>");
     }
 }

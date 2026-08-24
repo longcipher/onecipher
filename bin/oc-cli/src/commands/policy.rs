@@ -44,13 +44,17 @@ pub(crate) fn list() -> Result<(), CliError> {
 
 /// Show detailed information about a policy.
 pub(crate) fn show(id: &str) -> Result<(), CliError> {
-    let policy = oc_wallet::policy_store::load_policy(id, None)?;
+    // load_policy returns a SignedPolicy wrapper and fails closed on an
+    // invalid signature sidecar; surface the verification status to the user.
+    let signed = oc_wallet::policy_store::load_policy(id, None)?;
+    let policy = &signed.policy;
 
     println!("ID:         {}", policy.id);
     println!("Name:       {}", policy.name);
     println!("Version:    {}", policy.version);
     println!("Created:    {}", policy.created_at);
     println!("Action:     {:?}", policy.action);
+    println!("Signed:     {}", if signed.signature_verified { "yes" } else { "no" });
     println!();
 
     if policy.rules.is_empty() {
@@ -91,9 +95,9 @@ pub(crate) fn delete(id: &str, confirm: bool) -> Result<(), CliError> {
         return Err(CliError::InvalidArgs("--confirm is required to delete a policy".into()));
     }
 
-    let policy = oc_wallet::policy_store::load_policy(id, None)?;
+    let signed = oc_wallet::policy_store::load_policy(id, None)?;
     oc_wallet::policy_store::delete_policy(id, None)?;
 
-    println!("Policy deleted: {} ({})", policy.id, policy.name);
+    println!("Policy deleted: {} ({})", signed.policy.id, signed.policy.name);
     Ok(())
 }

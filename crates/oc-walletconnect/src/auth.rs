@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn request_params_serde_roundtrip() {
-        let json = serde_json::to_value(&sample_params()).unwrap();
+        let json = serde_json::to_value(sample_params()).unwrap();
         let parsed: AuthRequestParams = serde_json::from_value(json).unwrap();
         assert_eq!(parsed, sample_params());
     }
@@ -371,7 +371,7 @@ mod tests {
         let parsed: AuthRequestParams = serde_json::from_value(json).unwrap();
         assert_eq!(parsed.r#type, AuthType::Eip4361);
         assert_eq!(parsed.version, "1");
-        assert!(parsed.statement.is_empty());
+        assert_eq!(parsed.statement.len(), 0);
     }
 
     #[test]

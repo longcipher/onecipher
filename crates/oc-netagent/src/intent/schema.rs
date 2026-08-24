@@ -127,12 +127,20 @@ pub enum IntentStatus {
 }
 
 /// Result of simulating an intent before execution.
+///
+/// USD figures are `Option<f64>`: `None` means "unknown" (native token price
+/// feed unavailable per H-05, or an amount with no human-readable magnitude
+/// per M-08). Unknown is never rendered as a silent zero.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntentSummary {
     pub intent_id: Uuid,
     pub human_readable: String,
-    pub gas_estimate_usd: f64,
-    pub total_cost_usd: f64,
+    /// Estimated gas cost in USD; `None` when the native token price is
+    /// unavailable.
+    pub gas_estimate_usd: Option<f64>,
+    /// Total cost (gas + transferred amount) in USD; `None` when either
+    /// component is unknown.
+    pub total_cost_usd: Option<f64>,
     pub warnings: Vec<String>,
     pub simulation_tx_hash: Option<String>,
 }

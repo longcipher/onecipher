@@ -229,6 +229,7 @@ pub(crate) fn run_submit(
     session_key_id: &str,
     yes: bool,
     rpc_url: Option<&str>,
+    from_address: Option<&str>,
 ) -> Result<(), CliError> {
     let kind = parse_intent_kind(json)?;
     let intent = Intent::new(kind, chain_id.to_string(), session_key_id.to_string());
@@ -240,11 +241,13 @@ pub(crate) fn run_submit(
 
         // 2. Prompt for confirmation (unless --yes)
         if !yes {
+            // H-05/M-08: cost estimates are Option<f64>; render `None` as
+            // "unknown" instead of a misleading $0.00.
             let confirmed = prompt_yes_no(&format!(
-                "{}\n  gas: ${:.4}, total: ${:.2}\n  warnings: {}\nConfirm?",
+                "{}\n  gas: {}, total: {}\n  warnings: {}\nConfirm?",
                 summary.human_readable,
-                summary.gas_estimate_usd,
-                summary.total_cost_usd,
+                format_usd(summary.gas_estimate_usd, 4),
+                format_usd(summary.total_cost_usd, 2),
                 if summary.warnings.is_empty() {
                     "none".to_string()
                 } else {
@@ -274,7 +277,7 @@ pub(crate) fn run_submit(
         }
 
         // 3. Execute
-        let result = run_execution(&intent, &*rpc).await?;
+        let result = run_execution(&intent, &*rpc, from_address.unwrap_or("")).await?;
 
         // 4. Print result
         print_result(&result);
@@ -311,13 +314,14 @@ pub(crate) fn run_execute(
     chain_id: &str,
     session_key_id: &str,
     rpc_url: Option<&str>,
+    from_address: Option<&str>,
 ) -> Result<(), CliError> {
     let kind = parse_intent_kind(json)?;
     let intent = Intent::new(kind, chain_id.to_string(), session_key_id.to_string());
     let rpc = build_rpc_client(chain_id, rpc_url);
 
     crate::shared_runtime().block_on(async move {
-        let result = run_execution(&intent, &*rpc).await?;
+        let result = run_execution(&intent, &*rpc, from_address.unwrap_or("")).await?;
         print_result(&result);
         Ok(())
     })
@@ -331,7 +335,11 @@ async fn run_simulation(intent: &Intent, rpc: &dyn RpcClient) -> Result<IntentSu
     simulate_intent(intent, rpc).await.map_err(map_intent_error)
 }
 
-async fn run_execution(intent: &Intent, rpc: &dyn RpcClient) -> Result<IntentResult, CliError> {
+async fn run_execution(
+    intent: &Intent,
+    rpc: &dyn RpcClient,
+    from_address: &str,
+) -> Result<IntentResult, CliError> {
     // TODO: wire the signer to the Key-Agent over UDS (see oc-netagent /
     // oc-keyagent). For now we return the unsigned tx bytes unchanged so the
     // build stays green and the MockRpcClient (which does not validate
@@ -341,7 +349,19 @@ async fn run_execution(intent: &Intent, rpc: &dyn RpcClient) -> Result<IntentRes
         |_key: &oc_netagent::intent::SigningKeyRef,
          tx_bytes: &[u8]|
          -> Result<Vec<u8>, oc_netagent::intent::IntentError> { Ok(tx_bytes.to_vec()) };
-    execute_intent(intent, rpc, signer).await.map_err(map_intent_error)
+    // M-04a: `from_address` is required by execute_intent so the real pending
+    // nonce can be fetched; an empty address fails closed for broadcastable
+    // intents (Pay / CrossChainTransfer).
+    execute_intent(intent, rpc, from_address, signer).await.map_err(map_intent_error)
+}
+
+/// Format a USD estimate for display. `None` renders as "unknown" (H-05/M-08):
+/// a missing estimate must never be shown as $0.
+fn format_usd(value: Option<f64>, decimals: usize) -> String {
+    match value {
+        Some(v) => format!("${v:.decimals$}"),
+        None => "unknown".to_string(),
+    }
 }
 
 fn map_intent_error(e: IntentError) -> CliError {
@@ -509,7 +529,8 @@ mod tests {
 
     #[test]
     fn run_simulate_pay_intent_prints_summary() {
-        let json = r#"{"type":"Pay","amount":"10.5 USDC","recipient":"0xabc"}"#;
+        // M-08: native Pay amounts use the strict parser — hex wei only.
+        let json = r#"{"type":"Pay","amount":"0x0de0b6b3a7640000","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
         let result = run_simulate(json, "eip155:8453", "sk-test", None);
         assert!(result.is_ok(), "run_simulate should succeed");
     }
@@ -531,16 +552,40 @@ mod tests {
     fn run_execute_pay_intent_succeeds_with_mock_rpc() {
         // Native Pay amount must be a hex wei string (1 * 10^18 wei = 1 token).
         // `build_unsigned_eip1559_tx` rejects human-readable amounts (e.g.
-        // "1 USDC") rather than silently encoding 0 wei.
+        // "1 USDC") rather than silently encoding 0 wei. M-04a: a sender
+        // address is required so the nonce can be fetched.
         let json = r#"{"type":"Pay","amount":"0x0de0b6b3a7640000","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
-        let result = run_execute(json, "eip155:8453", "sk-test", None);
+        let result = run_execute(
+            json,
+            "eip155:8453",
+            "sk-test",
+            None,
+            Some("0x1111111111111111111111111111111111111111"),
+        );
         assert!(result.is_ok(), "run_execute should succeed with mock RPC");
+    }
+
+    #[test]
+    fn run_execute_pay_without_from_fails_closed() {
+        // M-04a: without a sender address the nonce cannot be fetched; the
+        // execution must fail with a clear error instead of guessing nonce 0.
+        let json = r#"{"type":"Pay","amount":"0x0de0b6b3a7640000","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
+        let result = run_execute(json, "eip155:8453", "sk-test", None, None);
+        match result {
+            Err(CliError::InvalidArgs(msg)) => {
+                assert!(
+                    msg.contains("sender address"),
+                    "error must mention the missing sender address, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidArgs, got {other:?}"),
+        }
     }
 
     #[test]
     fn run_execute_sign_transaction_intent() {
         let json = r#"{"type":"SignTransaction","tx_hex":"0xdeadbeef","chain_id":"eip155:1"}"#;
-        let result = run_execute(json, "eip155:1", "sk-test", None);
+        let result = run_execute(json, "eip155:1", "sk-test", None, None);
         assert!(result.is_ok());
     }
 
@@ -549,7 +594,14 @@ mod tests {
         // --yes skips the interactive prompt, so this should succeed even
         // in non-interactive test contexts. Native Pay amount is hex wei.
         let json = r#"{"type":"Pay","amount":"0x0de0b6b3a7640000","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
-        let result = run_submit(json, "eip155:8453", "sk-test", true, None);
+        let result = run_submit(
+            json,
+            "eip155:8453",
+            "sk-test",
+            true,
+            None,
+            Some("0x1111111111111111111111111111111111111111"),
+        );
         assert!(result.is_ok(), "run_submit --yes should succeed");
     }
 
@@ -557,13 +609,18 @@ mod tests {
     fn run_submit_without_yes_in_noninteractive_cancels_gracefully() {
         // In test context stdin is not a terminal, so prompt returns false.
         // The function should return Ok(()) with "cancelled" message.
-        let json = r#"{"type":"Pay","amount":"1 USDC","recipient":"0xabc"}"#;
-        let result = run_submit(json, "eip155:8453", "sk-test", false, None);
+        // M-08: native Pay amounts use the strict parser — hex wei only.
+        let json = r#"{"type":"Pay","amount":"0x0de0b6b3a7640000","recipient":"0xabcabcabcabcabcabcabcabcabcabcabca"}"#;
+        let result = run_submit(json, "eip155:8453", "sk-test", false, None, None);
         assert!(result.is_ok(), "cancelled submit should return Ok(())");
     }
 
     #[test]
-    fn run_submit_cross_chain_transfer_with_yes() {
+    fn run_submit_cross_chain_transfer_fails_closed() {
+        // M-04b regression: CrossChainTransfer must fail closed — signing a
+        // zero-value no-op transfer while the user approved an asset move is
+        // a trust violation. The CLI surfaces the Unsupported error as
+        // InvalidArgs instead of executing anything.
         let json = r#"{
             "type":"CrossChainTransfer",
             "amount":"100 USDC",
@@ -572,8 +629,18 @@ mod tests {
             "to_chain":"eip155:42161",
             "recipient":"0xdefdefdefdefdefdefdefdefdefdefdefdef"
         }"#;
-        let result = run_submit(json, "eip155:8453", "sk-test", true, None);
-        assert!(result.is_ok());
+        let result = run_submit(
+            json,
+            "eip155:8453",
+            "sk-test",
+            true,
+            None,
+            Some("0x1111111111111111111111111111111111111111"),
+        );
+        assert!(
+            matches!(result, Err(CliError::InvalidArgs(_))),
+            "cross-chain transfer must be rejected (fail-closed)"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -595,12 +662,20 @@ mod tests {
         let summary = IntentSummary {
             intent_id: uuid::Uuid::new_v4(),
             human_readable: "test".to_string(),
-            gas_estimate_usd: 0.01,
-            total_cost_usd: 10.51,
+            gas_estimate_usd: Some(0.01),
+            total_cost_usd: Some(10.51),
             warnings: vec![],
             simulation_tx_hash: None,
         };
         print_summary(&summary);
+    }
+
+    #[test]
+    fn format_usd_renders_unknown_for_none() {
+        // H-05/M-08: a missing estimate must display as "unknown", never $0.
+        assert_eq!(format_usd(None, 4), "unknown");
+        assert_eq!(format_usd(Some(0.0), 2), "$0.00");
+        assert_eq!(format_usd(Some(10.51), 2), "$10.51");
     }
 
     #[test]

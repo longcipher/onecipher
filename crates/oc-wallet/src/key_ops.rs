@@ -410,7 +410,9 @@ fn load_policies_for_key(
 ) -> Result<Vec<oc_core::Policy>, OcWalletError> {
     let mut policies = Vec::with_capacity(key_file.policy_ids.len());
     for pid in &key_file.policy_ids {
-        policies.push(policy_store::load_policy(pid, vault_path)?);
+        // Fail-closed: a policy whose signature sidecar is present but invalid
+        // aborts the whole evaluation (SignatureInvalid propagates via `?`).
+        policies.push(policy_store::load_policy(pid, vault_path)?.policy);
     }
     Ok(policies)
 }
@@ -657,7 +659,7 @@ mod tests {
         // The signing should succeed (policy allows eip155:8453)
         assert!(result.is_ok(), "sign_with_api_key failed: {:?}", result.err());
         let sign_result = result.unwrap();
-        assert!(!sign_result.signature.is_empty());
+        assert_ne!(sign_result.signature.len(), 0);
     }
 
     #[test]
@@ -693,7 +695,7 @@ mod tests {
         let tx_result =
             sign_with_api_key(&token, "imported-wallet", &chain, &tx_bytes, None, Some(&vault));
         assert!(tx_result.is_ok(), "sign_with_api_key failed: {:?}", tx_result.err());
-        assert!(!tx_result.unwrap().signature.is_empty());
+        assert_ne!(tx_result.unwrap().signature.len(), 0);
 
         let msg_result = sign_message_with_api_key(
             &token,
@@ -704,7 +706,7 @@ mod tests {
             Some(&vault),
         );
         assert!(msg_result.is_ok(), "sign_message_with_api_key failed: {:?}", msg_result.err());
-        assert!(!msg_result.unwrap().signature.is_empty());
+        assert_ne!(msg_result.unwrap().signature.len(), 0);
     }
 
     #[test]
@@ -908,7 +910,7 @@ mod tests {
         );
         assert!(result.is_ok(), "sign_typed_data_with_api_key failed: {:?}", result.err());
         let sign_result = result.unwrap();
-        assert!(!sign_result.signature.is_empty());
+        assert_ne!(sign_result.signature.len(), 0);
         let v = sign_result.recovery_id.unwrap();
         assert!(v == 27 || v == 28, "unexpected v value: {v}");
     }

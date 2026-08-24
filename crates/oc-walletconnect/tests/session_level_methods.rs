@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Wallet-server handling of WC v2 **session-level** methods and the Auth
 //! protocol request, driven through the mock relay.
 //!
@@ -131,7 +133,7 @@ async fn session_delete_removes_the_session_and_acknowledges() {
 }
 
 #[tokio::test]
-async fn session_update_refreshes_namespaces_and_methods() {
+async fn session_update_subset_is_accepted_and_narrows_scope() {
     let relay = Arc::new(MockRelay::new());
     let cfg = WcWalletConfig {
         relay_url: "mock://upd".into(),
@@ -142,17 +144,75 @@ async fn session_update_refreshes_namespaces_and_methods() {
     let mut server = WcWalletServer::new(cfg, handler);
     server.attach_mock_relay(relay.clone());
     let topic = "update-topic".to_string();
-    server.insert_session(settled_session(&topic, &"ef".repeat(32))).await;
+    // Negotiated scope: two methods on eip155:1.
+    let mut s = WcSession::new_pairing(topic.clone(), "ef".repeat(32), u64::MAX);
+    s.settle(
+        topic.clone(),
+        vec!["eip155:1".into()],
+        vec!["personal_sign".into(), "eth_signTypedData_v4".into()],
+    );
+    server.insert_session(s).await;
     let table = server.session_table();
 
     let server_task = spawn_server_pump(server, topic.clone(), 2);
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Update the session: add a new namespace + method not in the original set.
+    // A SUBSET update (drop eth_signTypedData_v4) must be accepted.
     let update = json!({
         "namespaces": {
             "eip155": {
-                "methods": ["personal_sign", "eth_signTypedData_v4"],
+                "methods": ["personal_sign"],
+                "chains": ["eip155:1"]
+            }
+        }
+    });
+    let resp = roundtrip(&relay, &topic, JsonRpcRequest::new(SESSION_UPDATE, update, 3)).await;
+    assert!(resp.error.is_none(), "subset update must not error: {:?}", resp.error);
+    assert_eq!(resp.result, Some(json!({ "acknowledged": true })));
+
+    // The dropped method must no longer be dispatched to the handler.
+    let resp = roundtrip(
+        &relay,
+        &topic,
+        JsonRpcRequest::new("eth_signTypedData_v4", json!({"data": "0x1"}), 4),
+    )
+    .await;
+    assert_eq!(
+        resp.error.map(|e| e.code),
+        Some(oc_walletconnect::JsonRpcErrorCode::UnsupportedMethod as i64),
+        "dropped method must be rejected after narrowing update",
+    );
+    server_task.await.unwrap();
+
+    let guard = table.lock().await;
+    let s = guard.get(&topic).expect("session still present");
+    assert!(s.is_method_allowed("personal_sign"));
+    assert!(!s.is_method_allowed("eth_signTypedData_v4"));
+}
+
+#[tokio::test]
+async fn session_update_superset_is_rejected_and_scope_unchanged() {
+    let relay = Arc::new(MockRelay::new());
+    let cfg = WcWalletConfig {
+        relay_url: "mock://upd2".into(),
+        relay_protocol: "irn".into(),
+        trusted_origins: vec![],
+    };
+    let handler = EchoHandler::default();
+    let mut server = WcWalletServer::new(cfg, handler);
+    server.attach_mock_relay(relay.clone());
+    let topic = "update-superset-topic".to_string();
+    server.insert_session(settled_session(&topic, &"ab".repeat(32))).await;
+    let table = server.session_table();
+
+    let server_task = spawn_server_pump(server, topic.clone(), 2);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // A SUPERSET update (new chain + new method) must be rejected.
+    let update = json!({
+        "namespaces": {
+            "eip155": {
+                "methods": ["personal_sign"],
                 "chains": ["eip155:1"]
             },
             "solana": {
@@ -162,24 +222,63 @@ async fn session_update_refreshes_namespaces_and_methods() {
         }
     });
     let resp = roundtrip(&relay, &topic, JsonRpcRequest::new(SESSION_UPDATE, update, 3)).await;
-    assert!(resp.error.is_none(), "update must not error: {:?}", resp.error);
-    assert_eq!(resp.result, Some(json!({ "acknowledged": true })));
+    assert_eq!(
+        resp.error.map(|e| e.code),
+        Some(oc_walletconnect::JsonRpcErrorCode::Unauthorized as i64),
+        "superset update must be rejected with Unauthorized",
+    );
 
-    // The previously-unauthorized method must now be dispatched to the handler.
-    let resp = roundtrip(
-        &relay,
-        &topic,
-        JsonRpcRequest::new("eth_signTypedData_v4", json!({"data": "0x1"}), 4),
-    )
-    .await;
-    assert!(resp.error.is_none(), "updated method must be allowed: {:?}", resp.error);
+    // The never-negotiated method must still be rejected afterwards.
+    let resp =
+        roundtrip(&relay, &topic, JsonRpcRequest::new("solana_signMessage", json!({}), 4)).await;
+    assert_eq!(
+        resp.error.map(|e| e.code),
+        Some(oc_walletconnect::JsonRpcErrorCode::UnsupportedMethod as i64),
+    );
     server_task.await.unwrap();
 
+    // The negotiated scope is unchanged by the rejected update.
     let guard = table.lock().await;
     let s = guard.get(&topic).expect("session still present");
-    assert!(s.is_method_allowed("eth_signTypedData_v4"));
-    assert!(s.is_method_allowed("solana_signMessage"));
-    assert!(s.is_chain_allowed("solana:mainnet"));
+    assert_eq!(s.namespaces, vec!["eip155:1".to_string()]);
+    assert_eq!(s.methods, vec!["personal_sign".to_string()]);
+}
+
+#[tokio::test]
+async fn cross_chain_session_request_is_rejected() {
+    let relay = Arc::new(MockRelay::new());
+    let cfg = WcWalletConfig {
+        relay_url: "mock://chain".into(),
+        relay_protocol: "irn".into(),
+        trusted_origins: vec![],
+    };
+    let handler = EchoHandler::default();
+    let seen = handler.seen.clone();
+    let mut server = WcWalletServer::new(cfg, handler);
+    server.attach_mock_relay(relay.clone());
+    let topic = "cross-chain-topic".to_string();
+    server.insert_session(settled_session(&topic, &"cd".repeat(32))).await;
+
+    let server_task = spawn_server_pump(server, topic.clone(), 2);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Request for a chain OUTSIDE the negotiated namespaces → Unauthorized,
+    // and the handler must never see it.
+    let params = json!({ "chainId": "eip155:42", "data": "0xdead" });
+    let resp = roundtrip(&relay, &topic, JsonRpcRequest::new("personal_sign", params, 5)).await;
+    assert_eq!(
+        resp.error.map(|e| e.code),
+        Some(oc_walletconnect::JsonRpcErrorCode::Unauthorized as i64),
+        "cross-chain request must be rejected",
+    );
+    assert!(seen.lock().unwrap().is_empty(), "handler must not run for cross-chain requests");
+
+    // Same method on the negotiated chain → reaches the handler.
+    let params = json!({ "chainId": "eip155:1", "data": "0xdead" });
+    let resp = roundtrip(&relay, &topic, JsonRpcRequest::new("personal_sign", params, 6)).await;
+    assert!(resp.error.is_none(), "in-scope request must pass: {:?}", resp.error);
+    server_task.await.unwrap();
+    assert_eq!(seen.lock().unwrap().as_slice(), &["personal_sign".to_string()]);
 }
 
 #[tokio::test]

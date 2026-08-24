@@ -38,6 +38,7 @@ pub(crate) mod uninstall;
 pub(crate) mod update;
 pub(crate) mod vanity;
 pub(crate) mod vault;
+pub(crate) mod verify;
 pub(crate) mod wallet;
 pub(crate) mod wallet_rpc;
 pub(crate) mod wc;

@@ -46,11 +46,18 @@ pub(crate) fn require_authorization(state: &SignerState, params: &Value) -> Resu
         .map_err(|e| RpcError::new(-32602, format!("passkey authorization failed: {e}")))?;
     let configured_wallet_id =
         state.configured_wallet_id().map_err(|e| RpcError::new(-32603, e))?;
-    let store = PasskeyPubkeyStore::open_default()
-        .map_err(|e| RpcError::new(-32603, format!("passkey store: {e}")))?;
+    // L-07: store open/read failures may embed filesystem paths — log the
+    // detail and return a generic message to the client.
+    let store = PasskeyPubkeyStore::open_default().map_err(|e| {
+        tracing::warn!(error = %e, "wallet-rpc: failed to open passkey store");
+        RpcError::new(-32603, "internal error")
+    })?;
     let stored = store
         .get(&auth.credential_id)
-        .map_err(|e| RpcError::new(-32603, format!("passkey store: {e}")))?
+        .map_err(|e| {
+            tracing::warn!(error = %e, "wallet-rpc: failed to read passkey store");
+            RpcError::new(-32603, "internal error")
+        })?
         .ok_or_else(|| RpcError::new(-32602, "passkey not registered"))?;
     if stored.wallet_id != configured_wallet_id {
         return Err(RpcError::new(-32602, "passkey is not bound to configured wallet"));

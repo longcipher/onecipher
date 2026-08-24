@@ -82,19 +82,27 @@ impl KeyPair {
     }
 
     /// Serialize to JSON bytes for encryption.
-    fn to_json_bytes(&self) -> Vec<u8> {
+    ///
+    /// Returns [`SecretBytes`] so the hex-encoded private keys never live in
+    /// an un-hardened heap buffer; the intermediate `Vec` produced by
+    /// `serde_json::to_vec` is zeroized when it is moved into the hardened
+    /// buffer.
+    fn to_json_bytes(&self) -> Result<SecretBytes, OcWalletError> {
         let obj = serde_json::json!({
             "secp256k1": hex::encode(self.secp256k1.expose()),
             "ed25519": hex::encode(self.ed25519.expose()),
         });
-        obj.to_string().into_bytes()
+        let raw = serde_json::to_vec(&obj)?;
+        Ok(SecretBytes::from_vec(raw).map_err(CryptoError::from)?)
     }
 
     /// Deserialize from JSON bytes after decryption.
+    ///
+    /// Parses directly from the slice — no un-hardened `String` copy of the
+    /// key-bearing JSON is created. The hex-decoded key vectors are moved
+    /// into [`SecretBytes`] via `from_vec`, which zeroizes each source buffer.
     fn from_json_bytes(bytes: &[u8]) -> Result<Self, OcWalletError> {
-        let s = String::from_utf8(bytes.to_vec())
-            .map_err(|_| OcWalletError::InvalidInput("invalid key pair data".into()))?;
-        let obj: serde_json::Value = serde_json::from_str(&s)?;
+        let obj: serde_json::Value = serde_json::from_slice(bytes)?;
         let secp = obj["secp256k1"]
             .as_str()
             .ok_or_else(|| OcWalletError::InvalidInput("missing secp256k1 key".into()))?;
@@ -165,7 +173,13 @@ pub(crate) fn secret_to_signing_key(
 }
 
 /// Generate a new BIP-39 mnemonic phrase.
-pub fn generate_mnemonic(words: u32) -> Result<String, OcWalletError> {
+///
+/// Returns the phrase as UTF-8 bytes inside [`SecretBytes`] (mlocked +
+/// `MADV_DONTDUMP` + zeroized on drop), matching [`export_wallet`]. Callers
+/// that need a `&str` should use `std::str::from_utf8(secret.expose())` and
+/// handle the UTF-8 error; the phrase is never copied into a plain `String`
+/// inside this crate.
+pub fn generate_mnemonic(words: u32) -> Result<SecretBytes, OcWalletError> {
     let strength = match words {
         12 => MnemonicStrength::Words12,
         15 => MnemonicStrength::Words15,
@@ -176,19 +190,38 @@ pub fn generate_mnemonic(words: u32) -> Result<String, OcWalletError> {
     };
 
     let mnemonic = Mnemonic::generate(strength)?;
-    let phrase = mnemonic.phrase()?;
-    String::from_utf8(phrase.expose().to_vec())
-        .map_err(|e| OcWalletError::InvalidInput(format!("invalid UTF-8 in mnemonic: {e}")))
+    // `Mnemonic::phrase` already returns SecretBytes — hand it back directly
+    // instead of copying into an un-hardened String.
+    mnemonic.phrase().map_err(OcWalletError::from)
 }
 
 /// Derive an address from a mnemonic phrase for the given chain.
+///
+/// # Security note (argv exposure)
+///
+/// `mnemonic_phrase` is a `&str` because callers typically obtain it from CLI
+/// argv or stdin, where it necessarily exists in un-hardened caller-owned
+/// memory before this function is reached. This function copies it into a
+/// hardened [`SecretBytes`] buffer immediately at entry and performs all
+/// internal handling against that copy only; no further un-hardened copies
+/// are made here. The caller-side argv exposure cannot be eliminated at this
+/// layer.
 pub fn derive_address(
     mnemonic_phrase: &str,
     chain: &str,
     index: Option<u32>,
 ) -> Result<String, OcWalletError> {
     let chain = parse_chain(chain)?;
-    let mnemonic = Mnemonic::from_phrase(mnemonic_phrase)?;
+    // Copy into hardened memory immediately; everything below borrows only
+    // from the hardened copy.
+    let hardened =
+        SecretBytes::from_slice(mnemonic_phrase.as_bytes()).map_err(CryptoError::from)?;
+    // The bytes came from a `&str`, so UTF-8 validity is guaranteed by
+    // construction; the map_err arm is unreachable in practice but keeps the
+    // conversion total without unwrap().
+    let phrase = std::str::from_utf8(hardened.expose())
+        .map_err(|_| OcWalletError::InvalidInput("invalid UTF-8 in mnemonic".into()))?;
+    let mnemonic = Mnemonic::from_phrase(phrase)?;
     let signer = signer_for_chain(chain.chain_type);
     let path = signer.default_derivation_path(index.unwrap_or(0));
     let curve = signer.curve();
@@ -238,6 +271,16 @@ pub fn create_wallet(
 }
 
 /// Import a wallet from a mnemonic phrase. Derives addresses for all chains.
+///
+/// # Security note (argv exposure)
+///
+/// `mnemonic_phrase` is a `&str` because callers typically obtain it from CLI
+/// argv or stdin, where it necessarily exists in un-hardened caller-owned
+/// memory before this function is reached. This function copies it into a
+/// hardened [`SecretBytes`] buffer immediately at entry and performs all
+/// internal handling against that copy only; no further un-hardened copies
+/// are made here. The caller-side argv exposure cannot be eliminated at this
+/// layer.
 pub fn import_wallet_mnemonic(
     name: &str,
     mnemonic_phrase: &str,
@@ -252,7 +295,16 @@ pub fn import_wallet_mnemonic(
         return Err(OcWalletError::WalletNameExists(name.to_string()));
     }
 
-    let mnemonic = Mnemonic::from_phrase(mnemonic_phrase)?;
+    // Copy into hardened memory immediately; everything below borrows only
+    // from the hardened copy.
+    let hardened =
+        SecretBytes::from_slice(mnemonic_phrase.as_bytes()).map_err(CryptoError::from)?;
+    // The bytes came from a `&str`, so UTF-8 validity is guaranteed by
+    // construction; the map_err arm is unreachable in practice but keeps the
+    // conversion total without unwrap().
+    let phrase_str = std::str::from_utf8(hardened.expose())
+        .map_err(|_| OcWalletError::InvalidInput("invalid UTF-8 in mnemonic".into()))?;
+    let mnemonic = Mnemonic::from_phrase(phrase_str)?;
     let accounts = derive_all_accounts(&mnemonic, index)?;
 
     let phrase = mnemonic.phrase()?;
@@ -348,8 +400,8 @@ pub fn import_wallet_private_key(
 
     let accounts = derive_all_accounts_from_keys(&keys)?;
 
-    let payload = keys.to_json_bytes();
-    let crypto_envelope = encrypt(&payload, passphrase.as_bytes())?;
+    let payload = keys.to_json_bytes()?;
+    let crypto_envelope = encrypt(payload.expose(), passphrase.as_bytes())?;
     let crypto_json = serde_json::to_value(&crypto_envelope)?;
 
     let wallet_id = uuid::Uuid::new_v4().to_string();
@@ -717,8 +769,8 @@ mod tests {
             ed25519: SecretBytes::from_vec(ed_key).unwrap(),
         };
         let accounts = derive_all_accounts_from_keys(&keys).unwrap();
-        let payload = keys.to_json_bytes();
-        let crypto_envelope = encrypt(&payload, passphrase.as_bytes()).unwrap();
+        let payload = keys.to_json_bytes().unwrap();
+        let crypto_envelope = encrypt(payload.expose(), passphrase.as_bytes()).unwrap();
         let crypto_json = serde_json::to_value(&crypto_envelope).unwrap();
         let wallet = EncryptedWallet::new(
             uuid::Uuid::new_v4().to_string(),
@@ -752,15 +804,22 @@ mod tests {
     // 1. MNEMONIC GENERATION
     // ================================================================
 
+    /// Test helper: `generate_mnemonic` as a plain `String` for assertions
+    /// and `&str`-taking APIs. (Test code only — production callers must
+    /// keep the SecretBytes.)
+    fn gen_phrase(words: u32) -> String {
+        String::from_utf8(generate_mnemonic(words).unwrap().expose().to_vec()).unwrap()
+    }
+
     #[test]
     fn mnemonic_12_words() {
-        let phrase = generate_mnemonic(12).unwrap();
+        let phrase = gen_phrase(12);
         assert_eq!(phrase.split_whitespace().count(), 12);
     }
 
     #[test]
     fn mnemonic_24_words() {
-        let phrase = generate_mnemonic(24).unwrap();
+        let phrase = gen_phrase(24);
         assert_eq!(phrase.split_whitespace().count(), 24);
     }
 
@@ -776,7 +835,7 @@ mod tests {
     fn mnemonic_is_unique_each_call() {
         let a = generate_mnemonic(12).unwrap();
         let b = generate_mnemonic(12).unwrap();
-        assert_ne!(a, b, "two generated mnemonics should differ");
+        assert_ne!(a.expose(), b.expose(), "two generated mnemonics should differ");
     }
 
     // ================================================================
@@ -785,7 +844,7 @@ mod tests {
 
     #[test]
     fn derive_address_all_chains() {
-        let phrase = generate_mnemonic(12).unwrap();
+        let phrase = gen_phrase(12);
         let chains =
             ["evm", "solana", "bitcoin", "cosmos", "tron", "ton", "sui", "xrpl", "nano", "near"];
         for chain in &chains {
@@ -796,7 +855,7 @@ mod tests {
 
     #[test]
     fn derive_address_evm_format() {
-        let phrase = generate_mnemonic(12).unwrap();
+        let phrase = gen_phrase(12);
         let addr = derive_address(&phrase, "evm", None).unwrap();
         assert!(addr.starts_with("0x"), "EVM address should start with 0x");
         assert_eq!(addr.len(), 42, "EVM address should be 42 chars");
@@ -804,7 +863,7 @@ mod tests {
 
     #[test]
     fn derive_address_deterministic() {
-        let phrase = generate_mnemonic(12).unwrap();
+        let phrase = gen_phrase(12);
         let a = derive_address(&phrase, "evm", None).unwrap();
         let b = derive_address(&phrase, "evm", None).unwrap();
         assert_eq!(a, b, "same mnemonic should produce same address");
@@ -812,7 +871,7 @@ mod tests {
 
     #[test]
     fn derive_address_different_index() {
-        let phrase = generate_mnemonic(12).unwrap();
+        let phrase = gen_phrase(12);
         let a = derive_address(&phrase, "evm", Some(0)).unwrap();
         let b = derive_address(&phrase, "evm", Some(1)).unwrap();
         assert_ne!(a, b, "different indices should produce different addresses");
@@ -820,7 +879,7 @@ mod tests {
 
     #[test]
     fn derive_address_invalid_chain() {
-        let phrase = generate_mnemonic(12).unwrap();
+        let phrase = gen_phrase(12);
         assert!(derive_address(&phrase, "nonexistent", None).is_err());
     }
 
@@ -840,7 +899,7 @@ mod tests {
 
         // Create
         let w1 = create_wallet("w1", None, None, Some(v1.path())).unwrap();
-        assert!(!w1.accounts.is_empty());
+        assert_ne!(w1.accounts.len(), 0);
 
         // Export mnemonic
         let phrase_bytes = export_wallet("w1", None, Some(v1.path())).unwrap();
@@ -950,7 +1009,7 @@ mod tests {
 
         let sig =
             sign_message("pk-sign", "evm", "hello", None, None, None, Some(dir.path())).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
         assert!(sig.recovery_id.is_some());
     }
 
@@ -961,7 +1020,7 @@ mod tests {
 
         let tx = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let sig = sign_transaction("pk-tx", "evm", tx, None, None, Some(dir.path())).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
     }
 
     #[test]
@@ -1025,7 +1084,7 @@ mod tests {
 
         // Should be able to sign
         let sig = sign_message("pk-api", "evm", "hello", None, None, None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
 
         // Export should return JSON key pair with original key
         let exported = export_wallet("pk-api", None, Some(vault)).unwrap();
@@ -1065,12 +1124,12 @@ mod tests {
 
         // Sign on EVM (secp256k1)
         let sig = sign_message("pk-both", "evm", "hello", None, None, None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
 
         // Sign on Solana (ed25519)
         let sig =
             sign_message("pk-both", "solana", "hello", None, None, None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
 
         // Export should return both keys
         let exported = export_wallet("pk-both", None, Some(vault)).unwrap();
@@ -1094,7 +1153,7 @@ mod tests {
         // Sign with correct passphrase
         let sig = sign_message("pass-mn", "evm", "hello", Some("s3cret"), None, None, Some(vault))
             .unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
 
         // Export with correct passphrase
         let phrase_bytes = export_wallet("pass-mn", Some("s3cret"), Some(vault)).unwrap();
@@ -1121,7 +1180,7 @@ mod tests {
         let sig =
             sign_message("pass-pk", "evm", "hello", Some("mypass"), None, None, Some(dir.path()))
                 .unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
 
         let exported = export_wallet("pass-pk", Some("mypass"), Some(dir.path())).unwrap();
         let exported_str = std::str::from_utf8(exported.expose()).unwrap();
@@ -1255,7 +1314,7 @@ mod tests {
     fn list_wallets_empty_vault() {
         let dir = tempfile::tempdir().unwrap();
         let wallets = list_wallets(Some(dir.path())).unwrap();
-        assert!(wallets.is_empty());
+        assert_eq!(wallets.len(), 0);
     }
 
     #[test]
@@ -1318,7 +1377,7 @@ mod tests {
         let sig =
             sign_message("hex-enc", "evm", "68656c6c6f", None, Some("hex"), None, Some(vault))
                 .unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
 
         // Should match utf8 encoding of the same bytes
         let sig2 =
@@ -1456,7 +1515,7 @@ mod tests {
         let tx = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let sig =
             sign_transaction("char-pass-tx", "evm", tx, Some("secret"), None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
         assert!(sig.recovery_id.is_some());
     }
 
@@ -1469,7 +1528,7 @@ mod tests {
         let tx = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let sig =
             sign_transaction("char-empty-tx", "evm", tx, Some(""), None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
     }
 
     #[test]
@@ -1482,7 +1541,7 @@ mod tests {
 
         let tx = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let sig = sign_transaction("char-none-none", "evm", tx, None, None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
         assert!(sig.recovery_id.is_some());
     }
 
@@ -1494,7 +1553,7 @@ mod tests {
 
         let sig =
             sign_message("char-none-msg", "evm", "hello", None, None, None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
     }
 
     #[test]
@@ -1560,7 +1619,7 @@ mod tests {
 
         let tx = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let sig = sign_transaction("char-some-none", "evm", tx, None, None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
     }
 
     #[test]
@@ -1663,7 +1722,7 @@ mod tests {
 
         // Sign with original name
         let sig1 = sign_message("orig-name", "evm", "test", None, None, None, Some(vault)).unwrap();
-        assert!(!sig1.signature.is_empty());
+        assert_ne!(sig1.signature.len(), 0);
 
         // Rename
         rename_wallet("orig-name", "new-name", Some(vault)).unwrap();
@@ -1688,7 +1747,7 @@ mod tests {
         // Sign succeeds
         let sig =
             sign_message("del-me-char", "evm", "test", None, None, None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
 
         // Delete
         delete_wallet("del-me-char", Some(vault)).unwrap();
@@ -1759,7 +1818,7 @@ mod tests {
         .unwrap();
 
         let sig = sign_transaction("char-pk", "evm", "deadbeef", None, None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
         assert!(sig.recovery_id.is_some());
     }
 
@@ -1900,7 +1959,7 @@ mod tests {
         let vault = dir.path();
 
         let info = create_wallet("char-24w", Some(24), None, Some(vault)).unwrap();
-        assert!(!info.accounts.is_empty());
+        assert_ne!(info.accounts.len(), 0);
 
         // Export → verify 24 words
         let phrase_bytes = export_wallet("char-24w", None, Some(vault)).unwrap();
@@ -1910,7 +1969,7 @@ mod tests {
         // Sign transaction
         let tx = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let sig = sign_transaction("char-24w", "evm", tx, None, None, Some(vault)).unwrap();
-        assert!(!sig.signature.is_empty());
+        assert_ne!(sig.signature.len(), 0);
 
         // Sign message on multiple chains
         for chain in &["evm", "solana", "bitcoin", "cosmos"] {
@@ -2426,7 +2485,7 @@ mod tests {
         let auth_result =
             sign_authorization(&wallet.id, "base", address, nonce, Some(&token), None, Some(vault))
                 .unwrap();
-        assert!(!auth_result.signature.is_empty());
+        assert_ne!(auth_result.signature.len(), 0);
 
         let hash = oc_signer::chains::EvmSigner.authorization_hash("8453", address, nonce).unwrap();
         let err =

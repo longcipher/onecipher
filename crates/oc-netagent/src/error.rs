@@ -8,6 +8,11 @@ pub enum NetAgentError {
     /// I/O error (UDS bind/connect, frame read/write).
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// An operation exceeded its I/O deadline (L-03): a hung Key-Agent or a
+    /// stalled socket must surface as a typed timeout instead of blocking the
+    /// WC handler forever.
+    #[error("operation timed out")]
+    Timeout,
     /// prost decode failure (Key-Agent response payload or wire frame).
     #[error("prost decode error: {0}")]
     ProstDecode(#[from] prost::DecodeError),

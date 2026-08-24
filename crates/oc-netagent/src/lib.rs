@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 //! Network-Agent library crate.
 //!
 //! v0.4: The ConnectRPC-over-UDS server has been abolished. The sole external
@@ -309,6 +311,6 @@ mod tests {
     #[test]
     fn empty_trusted_origins_reach_wc_wallet_config() {
         let cfg = wc_wallet_config("wss://relay.walletconnect.com", vec![]);
-        assert!(cfg.trusted_origins.is_empty());
+        assert_eq!(cfg.trusted_origins.len(), 0);
     }
 }

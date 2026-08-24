@@ -29,7 +29,7 @@ mod tests {
     #[test]
     fn test_wallet_id_generates_uuid() {
         let id = WalletId::new();
-        assert!(!id.0.is_empty());
+        assert_ne!(id.0.len(), 0);
         assert!(uuid::Uuid::parse_str(&id.0).is_ok());
     }
 

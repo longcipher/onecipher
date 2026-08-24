@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oc_walletconnect::session::{WcSession, WcSessionState, WcSessionTable};

@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 pub mod chains;
 pub mod crypto;
 pub mod curve;
@@ -69,7 +71,7 @@ mod integration_tests {
         let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
         let address = derive_address_for_chain(&mnemonic, ChainType::Solana);
         // Base58 encoded ed25519 pubkey
-        assert!(!address.is_empty());
+        assert_ne!(address.len(), 0);
         let decoded = bs58::decode(&address).into_vec().unwrap();
         assert_eq!(decoded.len(), 32);
     }
@@ -233,7 +235,7 @@ mod integration_tests {
             // Create a dummy 32-byte hash
             let hash = sha2::Sha256::digest(b"test transaction data");
             let result = signer.sign(key.expose(), &hash).unwrap();
-            assert!(!result.signature.is_empty());
+            assert_ne!(result.signature.len(), 0);
             assert!(result.recovery_id.is_some());
         }
     }

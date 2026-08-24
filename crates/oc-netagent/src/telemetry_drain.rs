@@ -358,7 +358,7 @@ mod tests {
         spawn_mock(sock.clone(), vec![ok_response(&TelemetryBatch::default())]).await;
 
         let got = drain_once(&KeyAgentClient::new(&sock), 16).await.expect("drain");
-        assert!(got.is_empty());
+        assert_eq!(got, TelemetryBatch::default());
     }
 
     #[tokio::test]
@@ -449,7 +449,7 @@ mod tests {
 
         assert_eq!(stats.failures, 1);
         assert_eq!(stats.exported, 0);
-        assert!(sink.records().is_empty());
+        assert_eq!(sink.records().len(), 0);
     }
 
     #[test]

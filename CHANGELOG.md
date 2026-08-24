@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 2026-08-24
+
+### Added
+
+- Daemon graceful shutdown: SIGTERM/SIGINT/SIGHUP/SIGQUIT feed the shutdown select loop with a bounded grace period and conventional death-by-signal exit status
+- Signed policy store: policies are Ed25519-signed on save with a `.sig` sidecar; load verifies fail-closed (legacy unsigned files load with a loud warning)
+- EIP-712 typed-data verification in `onecipher verify` (`--typed-data` / `--typed-data-file`, hashed per EIP-712 and verified against the raw digest)
+- Real pending nonce fetch via `eth_getTransactionCount` in intent execution
+- Persistent backup lockout and backup version validation
+- Keyfile version upper bound check
+
+### Changed
+
+- Atomic private writes for backups, age identities, and port files
+- MADV_WIPEONFORK applied to locked key memory
+- Zeroizing hardening across oc-secret
+- UDS and RPC timeouts
+- wallet-rpc handlers moved to spawn_blocking with error sanitization
+
+### Fixed
+
+- Policy engine rejects NaN/negative amounts (`InvalidAmount`), persist race fixed, v3 rule-tree depth/size caps
+- Web UI path-traversal fix, approval expiry enforcement, bounded WebAuthn challenges
+- WalletConnect per-message error containment, sessionUpdate subset enforcement, chain-allowlist dispatch, replay dedup
+- `CrossChainTransfer` intents fail closed as unsupported until bridge integration lands
+
 ## [0.1.0] - 2026-07-24
 
 ### Added

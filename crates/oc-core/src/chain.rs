@@ -182,7 +182,9 @@ pub fn parse_chain(s: &str) -> Result<Chain, String> {
             "warning: '--chain evm' is deprecated; use '--chain ethereum' \
              or a specific chain name (base, arbitrum, polygon, ...)"
         );
-        return Ok(*KNOWN_CHAINS.iter().find(|c| c.name == "ethereum").unwrap());
+        // Delegate to the friendly-name path so the registry lookup and its
+        // error handling stay in one place.
+        return parse_chain("ethereum");
     }
 
     // Try friendly name match
@@ -238,7 +240,11 @@ pub fn parse_chain(s: &str) -> Result<Chain, String> {
 }
 
 /// Returns the default `Chain` for a given `ChainType` (first match in registry).
+///
+/// Infallible by invariant: every `ChainType` variant has at least one entry
+/// in `KNOWN_CHAINS`, enforced by `test_default_chain_for_type` below.
 pub fn default_chain_for_type(ct: ChainType) -> Chain {
+    #[allow(clippy::unwrap_used)] // static registry completeness invariant, see test below
     *KNOWN_CHAINS.iter().find(|c| c.chain_type == ct).unwrap()
 }
 
@@ -628,6 +634,12 @@ mod tests {
         let chain = default_chain_for_type(ChainType::Evm);
         assert_eq!(chain.name, "ethereum");
         assert_eq!(chain.chain_id, "eip155:1");
+
+        // Completeness invariant: EVERY chain type must resolve to a default
+        // chain, so `default_chain_for_type` can never fail in production.
+        for ct in ALL_CHAIN_TYPES {
+            let _ = default_chain_for_type(ct);
+        }
     }
 
     /// Regression: `parse_chain` used to `Box::leak` on every call for an

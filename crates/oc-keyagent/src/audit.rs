@@ -194,7 +194,7 @@ impl AuditLog {
             // skipping lines that don't deserialize to the current schema.
             // This keeps the chain hash continuous after an upgrade.
             if let Ok(entry) = serde_json::from_str::<AuditEntry>(&line) {
-                last_hash = hash_entry(&entry);
+                last_hash = hash_entry(&entry)?;
                 last_seq = entry.seq;
             }
         }
@@ -228,7 +228,7 @@ impl AuditLog {
         // Canonical bytes (device_sig = "") used for BOTH signing and
         // chain hashing. The `prev_hash` field IS included in the signed
         // bytes so that chain integrity is itself signed.
-        let canonical = canonical_bytes(&entry);
+        let canonical = canonical_bytes(&entry)?;
         let signature: Signature = self.device_key.sign(&canonical);
         let mut signed_entry = entry;
         signed_entry.device_sig = hex::encode(signature.to_bytes());
@@ -241,7 +241,7 @@ impl AuditLog {
         file.sync_all()?;
 
         // Update in-memory tail state.
-        self.last_hash = hash_entry(&signed_entry);
+        self.last_hash = hash_entry(&signed_entry)?;
         self.last_seq = seq;
 
         Ok(seq)
@@ -276,7 +276,7 @@ impl AuditLog {
             // 2) Signature check: the stored device_sig must verify against the canonical bytes
             //    (entry with device_sig = ""). Any field mutation (timestamp, payload, prev_hash,
             //    event_type, etc.) changes the canonical bytes and breaks the signature.
-            let canonical = canonical_bytes(&entry);
+            let canonical = canonical_bytes(&entry)?;
             let sig_bytes =
                 hex::decode(&entry.device_sig).map_err(|e| AuditError::Signature(e.to_string()))?;
             if sig_bytes.len() != 64 {
@@ -293,7 +293,7 @@ impl AuditLog {
                 .verify(&canonical, &signature)
                 .map_err(|_| AuditError::Tampered(entry.seq))?;
 
-            prev_hash = hash_entry(&entry);
+            prev_hash = hash_entry(&entry)?;
         }
 
         Ok(())
@@ -362,7 +362,7 @@ impl AuditLog {
         oc_core::paths::write_atomic_private(output, &merged)?;
 
         let (last_hash, last_seq, device_id) = if let Some(last) = all_entries.last() {
-            (hash_entry(last), last.seq, last.device_id.clone())
+            (hash_entry(last)?, last.seq, last.device_id.clone())
         } else {
             (String::new(), 0, String::new())
         };
@@ -573,19 +573,20 @@ fn default_device_key_path() -> Result<PathBuf, AuditError> {
 /// Compute the canonical bytes of an entry: the entry serialized with
 /// `device_sig = ""` using `serde_json::to_vec` (compact, NOT pretty).
 /// Used for BOTH signing and chain hashing — same bytes, same hash.
-fn canonical_bytes(entry: &AuditEntry) -> Vec<u8> {
+fn canonical_bytes(entry: &AuditEntry) -> Result<Vec<u8>, AuditError> {
     let mut copy = entry.clone();
     copy.device_sig = String::new();
-    // AuditEntry is always JSON-serializable (no custom Serialize impls,
-    // no NaN/Infinity possible in serde_json::Value::Number).
-    serde_json::to_vec(&copy).expect("AuditEntry is always JSON-serializable")
+    // AuditEntry contains only JSON-native types (no custom Serialize impls,
+    // no NaN/Infinity possible in serde_json::Value::Number), so serialization
+    // cannot fail in practice — errors are still propagated, never panicked.
+    Ok(serde_json::to_vec(&copy)?)
 }
 
 /// Compute `SHA-256(canonical_bytes(entry))` as a lowercase hex string.
-fn hash_entry(entry: &AuditEntry) -> String {
+fn hash_entry(entry: &AuditEntry) -> Result<String, AuditError> {
     let mut hasher = Sha256::new();
-    hasher.update(canonical_bytes(entry));
-    hex::encode(hasher.finalize())
+    hasher.update(canonical_bytes(entry)?);
+    Ok(hex::encode(hasher.finalize()))
 }
 
 #[cfg(test)]
@@ -649,7 +650,7 @@ mod tests {
             prev_hash: String::new(),
             device_sig: "deadbeef".into(),
         };
-        let canonical = canonical_bytes(&entry);
+        let canonical = canonical_bytes(&entry).unwrap();
         let s = String::from_utf8(canonical).unwrap();
         // device_sig in canonical form is empty string.
         assert!(
@@ -672,7 +673,7 @@ mod tests {
             prev_hash: String::new(),
             device_sig: String::new(),
         };
-        let h = hash_entry(&entry);
+        let h = hash_entry(&entry).unwrap();
         assert_eq!(h.len(), 64, "SHA-256 hex is 64 chars");
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
     }

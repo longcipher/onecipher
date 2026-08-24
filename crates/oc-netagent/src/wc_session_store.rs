@@ -30,7 +30,7 @@ impl SessionStore {
     }
 
     pub fn load(&self) -> Result<Vec<WcSession>, SessionStoreError> {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(v) = &*cache {
             // Serve from the in-memory index (clone so callers can't mutate it).
             return Ok(v.clone());
@@ -52,13 +52,14 @@ impl SessionStore {
         // world-readable the way `fs::write` + `set_permissions` left them.
         oc_core::paths::write_atomic_private(&self.path, &bytes)?;
         // Keep the in-memory index coherent with what was just written.
-        *self.cache.lock().unwrap() = Some(sessions.to_vec());
+        *self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(sessions.to_vec());
         Ok(())
     }
 
     /// Lock the cache, lazily loading it from disk (or an empty vec) on first use.
     fn cached(&self) -> std::sync::MutexGuard<'_, Option<Vec<WcSession>>> {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if cache.is_none() {
             let v = if self.path.exists() {
                 let bytes = std::fs::read(&self.path).unwrap_or_default();
@@ -80,7 +81,9 @@ impl SessionStore {
     /// under concurrent pairing injection.
     pub fn upsert(&self, session: &WcSession) -> Result<(), SessionStoreError> {
         let mut cache = self.cached();
-        let all = cache.as_mut().expect("cached() always populates the cache");
+        // `cached()` always populates the cache; get_or_insert_with keeps this
+        // total (no panic path) even if that invariant ever regresses.
+        let all = cache.get_or_insert_with(Vec::new);
         if let Some(existing) = all.iter_mut().find(|s| s.topic == session.topic) {
             *existing = session.clone();
         } else {
@@ -133,7 +136,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::open(dir.path().to_str().unwrap()).unwrap();
         let sessions = store.load().unwrap();
-        assert!(sessions.is_empty());
+        assert_eq!(sessions.len(), 0);
     }
 
     #[test]

@@ -613,39 +613,52 @@ impl App {
     pub(crate) fn submit_form(&mut self) {
         let Some(form) = &self.form else { return };
 
+        // Snapshot the form fields up front so the mutable borrows used for
+        // inline error reporting below cannot alias the form borrow.
+        let name = form.name.trim().to_string();
+        let secret = form.secret.clone();
+        let notes = form.notes.clone();
+        let item_type = form.selected_type();
+        let metadata = form_metadata(form);
+        let editing_name = form.editing_name.clone();
+
         // Validate.
-        if form.name.trim().is_empty() {
-            self.form.as_mut().unwrap().error = Some("Name is required".into());
+        if name.is_empty() {
+            if let Some(f) = self.form.as_mut() {
+                f.error = Some("Name is required".into());
+            }
             return;
         }
-        let is_edit = form.editing_name.is_some();
-        if !is_edit && form.secret.is_empty() {
-            self.form.as_mut().unwrap().error = Some("Secret value is required".into());
+        let is_edit = editing_name.is_some();
+        if !is_edit && secret.is_empty() {
+            if let Some(f) = self.form.as_mut() {
+                f.error = Some("Secret value is required".into());
+            }
             return;
         }
         // Editing must be able to decrypt to preserve unchanged fields.
         if is_edit && self.identity.is_none() {
-            self.form.as_mut().unwrap().error =
-                Some("Editing requires an age identity (set ONECIPHER_AGE_IDENTITY)".into());
+            if let Some(f) = self.form.as_mut() {
+                f.error =
+                    Some("Editing requires an age identity (set ONECIPHER_AGE_IDENTITY)".into());
+            }
             return;
         }
-
-        let name = form.name.trim().to_string();
-        let item_type = form.selected_type();
-        let metadata = form_metadata(form);
-        let editing_name = form.editing_name.clone();
 
         // Load recipients.
         let recipients = match crate::commands::load_recipients() {
             Ok(r) => r,
             Err(e) => {
-                self.form.as_mut().unwrap().error = Some(format!("Recipients error: {e}"));
+                if let Some(f) = self.form.as_mut() {
+                    f.error = Some(format!("Recipients error: {e}"));
+                }
                 return;
             }
         };
         if recipients.is_empty() {
-            self.form.as_mut().unwrap().error =
-                Some("No recipients found — run `onecipher age init` first".into());
+            if let Some(f) = self.form.as_mut() {
+                f.error = Some("No recipients found — run `onecipher age init` first".into());
+            }
             return;
         }
 
@@ -653,8 +666,8 @@ impl App {
             None => {
                 // ---- Create ----
                 let payload = SecretPayload {
-                    secret: form.secret.clone(),
-                    notes: if form.notes.is_empty() { None } else { Some(form.notes.clone()) },
+                    secret,
+                    notes: if notes.is_empty() { None } else { Some(notes) },
                     extra: None,
                 };
                 let entry = match oc_secret::SecretEntry::new(
@@ -666,12 +679,16 @@ impl App {
                 ) {
                     Ok(e) => e,
                     Err(e) => {
-                        self.form.as_mut().unwrap().error = Some(format!("Create failed: {e}"));
+                        if let Some(f) = self.form.as_mut() {
+                            f.error = Some(format!("Create failed: {e}"));
+                        }
                         return;
                     }
                 };
                 if let Err(e) = self.store.put(&entry) {
-                    self.form.as_mut().unwrap().error = Some(format!("Save failed: {e}"));
+                    if let Some(f) = self.form.as_mut() {
+                        f.error = Some(format!("Save failed: {e}"));
+                    }
                     return;
                 }
                 self.form = None;
@@ -704,15 +721,11 @@ impl App {
 
                     // Preserve stored values when the corresponding field is empty.
                     let payload = SecretPayload {
-                        secret: if form.secret.is_empty() {
-                            old_payload.secret.clone()
-                        } else {
-                            form.secret.clone()
-                        },
-                        notes: if form.notes.is_empty() {
+                        secret: if secret.is_empty() { old_payload.secret.clone() } else { secret },
+                        notes: if notes.is_empty() {
                             old_payload.notes.clone()
                         } else {
-                            Some(form.notes.clone())
+                            Some(notes)
                         },
                         extra: old_payload.extra.clone(),
                     };
@@ -741,7 +754,9 @@ impl App {
                         self.set_message(&format!("Secret updated: {name}"));
                     }
                     Err(e) => {
-                        self.form.as_mut().unwrap().error = Some(e);
+                        if let Some(f) = self.form.as_mut() {
+                            f.error = Some(e);
+                        }
                     }
                 }
             }
@@ -947,7 +962,7 @@ mod tests {
         assert_eq!(form.issuer, "GitHub");
         assert_eq!(form.account, "octocat");
         // The secret must never be pre-filled into the form.
-        assert!(form.secret.is_empty());
+        assert_eq!(form.secret.len(), 0);
     }
 
     #[test]

@@ -18,6 +18,16 @@
 //! [`PasskeyPubkey`] the Key-Agent stores. R31: any boolean in the IPC
 //! envelope is ignored entirely — only the cryptographic signature matters.
 //!
+//! ## Challenge lifecycle (bounded + TTL)
+//!
+//! Pending challenges live in a bounded map (`nonce -> expiry_unix`) with a
+//! 120 s TTL enforced at consumption time: an expired challenge is equivalent
+//! to an unknown one and fails closed with [`PasskeyError::Replay`]. Expired
+//! entries are swept lazily on insert/consume, and the map is hard-capped at
+//! 256 pending challenges — at capacity [`PasskeyVerifier::generate_challenge`]
+//! rejects with [`PasskeyError::RateLimited`] instead of growing memory
+//! unboundedly (M-13).
+//!
 //! ## Simplified protocol (not full WebAuthn)
 //!
 //! Per design.md §Detailed Design (PasskeyAuthorization): the signed message
@@ -25,16 +35,27 @@
 //! simpler than full WebAuthn authenticator data (R30 — Phase 1 scope).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::proto::PasskeyAuthorization;
+
+/// Time-to-live for a pending challenge, in seconds. A challenge older than
+/// this is treated as unknown at consumption time (fail-closed `Replay`).
+const CHALLENGE_TTL_SECS: u64 = 120;
+
+/// Hard cap on concurrently pending challenges per verifier. Once reached
+/// (after sweeping expired entries), [`PasskeyVerifier::generate_challenge`]
+/// rejects with [`PasskeyError::RateLimited`] instead of growing memory
+/// unboundedly (M-13).
+const MAX_PENDING_CHALLENGES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PasskeyError {
@@ -43,7 +64,8 @@ pub enum PasskeyError {
     #[error("passkey signature forged")]
     Forged,
     /// The challenge was not present in `pending_challenges` — either it was
-    /// never issued by this Key-Agent, or it was already consumed (replay).
+    /// never issued by this Key-Agent, it was already consumed (replay), or
+    /// its TTL had elapsed at consumption time (expired ≡ unknown).
     #[error("passkey challenge replayed")]
     Replay,
     /// The `PasskeyAuthorization` was structurally incomplete: challenge was
@@ -54,6 +76,12 @@ pub enum PasskeyError {
     /// to the stored Passkey public key at registration time.
     #[error("passkey credential ID mismatch")]
     CredentialMismatch,
+    /// Too many unconsumed challenges are pending for this verifier (hard cap
+    /// of [`MAX_PENDING_CHALLENGES`] reached after sweeping expired entries).
+    /// The client must wait for outstanding challenges to be consumed or to
+    /// expire before requesting new ones (M-13 DoS guard).
+    #[error("passkey challenge rate limited")]
+    RateLimited,
 }
 
 /// Stored Passkey public key. The algorithm is fixed at registration time.
@@ -78,18 +106,27 @@ pub enum PasskeyPubkey {
 /// ```
 /// # use oc_keyagent::passkey::{PasskeyVerifier, PasskeyPubkey, PasskeyError};
 /// # use oc_keyagent::proto::PasskeyAuthorization;
-/// # fn mk(verifier: &mut PasskeyVerifier, auth: PasskeyAuthorization) {
+/// # fn mk(verifier: &mut PasskeyVerifier, auth: PasskeyAuthorization) -> Result<(), PasskeyError> {
 /// // Generate a fresh challenge before sending the request to the UI.
-/// let _challenge = verifier.generate_challenge();
+/// let _challenge = verifier.generate_challenge()?;
 /// // ... UI signs and returns a PasskeyAuthorization ...
 /// // Key-Agent verifies the signature itself — never trusts a boolean.
-/// let _: Result<(), PasskeyError> = verifier.verify(&auth);
+/// verifier.verify(&auth)?;
+/// # Ok(())
 /// # }
 /// ```
 pub struct PasskeyVerifier {
     stored_pubkey: PasskeyPubkey,
     stored_credential_id: Vec<u8>,
-    pending_challenges: HashSet<[u8; 32]>,
+    /// Pending challenges keyed by nonce, valued by expiry unix time
+    /// (seconds). Bounded at [`MAX_PENDING_CHALLENGES`]; entries older than
+    /// [`CHALLENGE_TTL_SECS`] are swept lazily on insert/consume.
+    pending_challenges: HashMap<[u8; 32], u64>,
+}
+
+/// Current unix timestamp in seconds (`0` if the clock is before the epoch).
+fn now_unix() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 impl PasskeyVerifier {
@@ -101,8 +138,14 @@ impl PasskeyVerifier {
         Self {
             stored_pubkey: pubkey,
             stored_credential_id: credential_id,
-            pending_challenges: HashSet::new(),
+            pending_challenges: HashMap::new(),
         }
+    }
+
+    /// Drop pending challenges whose TTL has elapsed (lazy sweep, M-13).
+    fn sweep_expired(&mut self) {
+        let now = now_unix();
+        self.pending_challenges.retain(|_, &mut expiry| expiry > now);
     }
 
     /// Generate a fresh 32-byte challenge nonce. NEVER repeats (cryptographic RNG).
@@ -110,19 +153,28 @@ impl PasskeyVerifier {
     /// Per R30 / `passkey_authorization.feature` "fresh 32-byte nonce": each
     /// call returns 32 bytes of cryptographically random data drawn from
     /// [`rand::rngs::OsRng`] (the kernel CSPRNG), inserted into
-    /// `pending_challenges`. The nonce is single-use: it is removed from the
-    /// set after a successful [`Self::verify`].
-    pub fn generate_challenge(&mut self) -> [u8; 32] {
-        let mut nonce = [0u8; 32];
+    /// `pending_challenges` with a [`CHALLENGE_TTL_SECS`] expiry. The nonce is
+    /// single-use: it is removed from the map after a successful
+    /// [`Self::verify`].
+    ///
+    /// Fallible (M-13): expired entries are swept first; if the map is still
+    /// at [`MAX_PENDING_CHALLENGES`] pending challenges, returns
+    /// [`PasskeyError::RateLimited`] instead of growing memory unboundedly.
+    pub fn generate_challenge(&mut self) -> Result<[u8; 32], PasskeyError> {
+        self.sweep_expired();
+        if self.pending_challenges.len() >= MAX_PENDING_CHALLENGES {
+            return Err(PasskeyError::RateLimited);
+        }
+        let expires_at = now_unix() + CHALLENGE_TTL_SECS;
         loop {
+            let mut nonce = [0u8; 32];
             // OsRng is the kernel CSPRNG (getrandom / BoringSSL) — never fails.
             rand::rng().fill(&mut nonce);
-            if self.pending_challenges.insert(nonce) {
-                break;
+            if self.pending_challenges.insert(nonce, expires_at).is_none() {
+                return Ok(nonce);
             }
             // Astronomically unlikely collision — regenerate.
         }
-        nonce
     }
 
     /// Verify a [`PasskeyAuthorization`] against the stored pubkey + pending challenge.
@@ -137,8 +189,9 @@ impl PasskeyVerifier {
     ///    forgery attempt, not a missing-auth case.)
     /// 2. **credential_id match** — `auth.credential_id` must equal the stored one. Otherwise →
     ///    [`PasskeyError::CredentialMismatch`].
-    /// 3. **Challenge presence** — `auth.challenge` must be in `pending_challenges`. Otherwise →
-    ///    [`PasskeyError::Replay`].
+    /// 3. **Challenge presence + TTL** — `auth.challenge` must be in `pending_challenges` AND not
+    ///    past its expiry. Expired ≡ unknown (fail-closed): otherwise → [`PasskeyError::Replay`].
+    ///    Expired entries are swept lazily here (M-13).
     /// 4. **Signature verification** — signature over `challenge || credential_id` must verify
     ///    against the stored pubkey. Otherwise → [`PasskeyError::Forged`].
     /// 5. **Consume the challenge** — on success, the challenge is removed from
@@ -155,11 +208,15 @@ impl PasskeyVerifier {
             return Err(PasskeyError::CredentialMismatch);
         }
 
-        // 3. Challenge presence (single-use, replay protection).
+        // 3. Challenge presence + TTL (single-use, replay protection). An expired challenge is
+        //    equivalent to an unknown one — fail closed as Replay rather than accepting a stale
+        //    nonce.
+        self.sweep_expired();
         let mut challenge = [0u8; 32];
         challenge.copy_from_slice(&auth.challenge);
-        if !self.pending_challenges.contains(&challenge) {
-            return Err(PasskeyError::Replay);
+        match self.pending_challenges.get(&challenge) {
+            Some(&expiry) if expiry > now_unix() => {}
+            _ => return Err(PasskeyError::Replay),
         }
 
         // 4. Signature verification over (challenge || credential_id). OneCipher simplified
@@ -405,5 +462,108 @@ mod tests {
         let mut store_mut = store;
         let err = store_mut.register("cred", sample()).unwrap_err();
         assert!(matches!(err, PasskeyStoreError::Corrupt { .. }), "got: {err:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // M-13: bounded + TTL pending-challenge store.
+    // -----------------------------------------------------------------------
+
+    /// An Ed25519 verifier with a real keypair so signatures can be produced.
+    fn ed_verifier() -> (ed25519_dalek::SigningKey, PasskeyVerifier) {
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rng());
+        let vk = sk.verifying_key();
+        let verifier = PasskeyVerifier::new(PasskeyPubkey::Ed25519(vk), CRED.as_bytes().to_vec());
+        (sk, verifier)
+    }
+
+    const CRED: &str = "cred-m13";
+
+    /// Build an auth over `challenge || credential_id` signed by `sk`.
+    fn signed_auth(sk: &ed25519_dalek::SigningKey, challenge: &[u8; 32]) -> PasskeyAuthorization {
+        use ed25519_dalek::Signer;
+        let mut message = Vec::with_capacity(32 + CRED.len());
+        message.extend_from_slice(challenge);
+        message.extend_from_slice(CRED.as_bytes());
+        PasskeyAuthorization {
+            challenge: challenge.to_vec(),
+            signature: sk.sign(&message).to_bytes().to_vec(),
+            credential_id: CRED.to_string(),
+        }
+    }
+
+    #[test]
+    fn expired_challenge_fails_closed_as_replay() {
+        let (sk, mut verifier) = ed_verifier();
+
+        // Plant a challenge whose TTL has already elapsed (direct map access
+        // avoids sleeping out the real 120 s TTL).
+        let nonce = [7u8; 32];
+        verifier.pending_challenges.insert(nonce, now_unix().saturating_sub(1));
+
+        let auth = signed_auth(&sk, &nonce);
+        // Expired ≡ unknown: fail closed as Replay, never accept a stale nonce.
+        assert_eq!(verifier.verify(&auth), Err(PasskeyError::Replay));
+        // The sweep on consume removed the stale entry.
+        assert_eq!(verifier.pending_count(), 0);
+    }
+
+    #[test]
+    fn cap_rejects_generate_challenge_with_rate_limited() {
+        let (_, mut verifier) = ed_verifier();
+
+        // Fill the map to the hard cap with live (unexpired) challenges.
+        for i in 0..MAX_PENDING_CHALLENGES {
+            let mut nonce = [0u8; 32];
+            nonce[0] = i as u8;
+            nonce[1] = (i >> 8) as u8;
+            verifier.pending_challenges.insert(nonce, now_unix() + CHALLENGE_TTL_SECS);
+        }
+        assert_eq!(verifier.pending_count(), MAX_PENDING_CHALLENGES);
+
+        // At capacity (after sweep) generation must be rejected, not grow.
+        assert_eq!(verifier.generate_challenge(), Err(PasskeyError::RateLimited));
+        assert_eq!(verifier.pending_count(), MAX_PENDING_CHALLENGES);
+    }
+
+    #[test]
+    fn sweep_on_insert_frees_capacity() {
+        let (_, mut verifier) = ed_verifier();
+
+        // Fill the cap entirely with EXPIRED entries.
+        for i in 0..MAX_PENDING_CHALLENGES {
+            let mut nonce = [0u8; 32];
+            nonce[0] = i as u8;
+            nonce[1] = (i >> 8) as u8;
+            verifier.pending_challenges.insert(nonce, now_unix().saturating_sub(1));
+        }
+        assert_eq!(verifier.pending_count(), MAX_PENDING_CHALLENGES);
+
+        // Lazy sweep on insert frees every slot and issuance succeeds again.
+        let ch = verifier.generate_challenge().expect("sweep must free capacity");
+        assert_eq!(verifier.pending_count(), 1);
+        assert_ne!(ch, [0u8; 32]);
+    }
+
+    #[test]
+    fn single_use_consume_semantics_intact() {
+        let (sk, mut verifier) = ed_verifier();
+
+        let challenge = verifier.generate_challenge().expect("challenge");
+        assert_eq!(verifier.pending_count(), 1);
+
+        // First verify succeeds and consumes the challenge.
+        let auth = signed_auth(&sk, &challenge);
+        assert_eq!(verifier.verify(&auth), Ok(()));
+        assert_eq!(verifier.pending_count(), 0);
+
+        // Replaying the same auth fails closed (single-use).
+        assert_eq!(verifier.verify(&auth), Err(PasskeyError::Replay));
+
+        // A failed (forged) verify does NOT consume a live challenge.
+        let challenge2 = verifier.generate_challenge().expect("challenge2");
+        let mut forged = signed_auth(&sk, &challenge2);
+        forged.signature.reverse();
+        assert_eq!(verifier.verify(&forged), Err(PasskeyError::Forged));
+        assert_eq!(verifier.pending_count(), 1);
     }
 }

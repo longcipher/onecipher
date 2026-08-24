@@ -38,7 +38,7 @@ use tokio::sync::Mutex;
 
 use crate::auth::{
     BootstrapToken, SessionStore,
-    webauthn::{StoredCredential, WebAuthnManager},
+    webauthn::{ChallengeError, StoredCredential, WebAuthnError, WebAuthnManager},
 };
 
 /// A callback the daemon installs to forward a newly registered browser
@@ -180,6 +180,11 @@ pub async fn register_begin(
             "user_id": user_id.to_string(),
         }))
         .into_response(),
+        Err(WebAuthnError::Challenge(ChallengeError::StoreFull)) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "too many pending registration challenges"})),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("register begin failed: {e}")})),
@@ -263,6 +268,11 @@ pub async fn login_begin(State(state): State<AuthState>) -> Response {
             "challenge_id": challenge_id.to_string(),
         }))
         .into_response(),
+        Err(WebAuthnError::Challenge(ChallengeError::StoreFull)) => (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": "too many pending login challenges"})),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": format!("login begin failed: {e}")})),
@@ -436,7 +446,7 @@ mod tests {
             dual_register: None,
             auto_lock_at: Arc::new(Mutex::new(None)),
         };
-        let _clone = state.clone();
+        let _clone = state;
     }
 
     #[tokio::test]

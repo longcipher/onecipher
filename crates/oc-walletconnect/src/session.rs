@@ -131,8 +131,17 @@ impl WcSession {
         self.methods.iter().any(|m| m == method)
     }
 
+    /// Whether `caip2` is covered by the session's approved namespaces.
+    ///
+    /// Entries match exactly; an entry ending in `*` (e.g. `eip155:*`) acts as
+    /// a family wildcard covering any chain id in that namespace (`eip155:1`,
+    /// `eip155:137`, ...). Wildcards are produced when a session proposal
+    /// declares a namespace without an explicit `chains` array.
     pub fn is_chain_allowed(&self, caip2: &str) -> bool {
-        self.namespaces.iter().any(|n| n == caip2)
+        self.namespaces.iter().any(|n| match n.strip_suffix('*') {
+            Some(family) => caip2.starts_with(family),
+            None => n == caip2,
+        })
     }
 
     pub fn ensure_active(&self) -> WcResult<()> {
@@ -185,8 +194,29 @@ impl WcSessionTable {
     }
 }
 
+/// Lowest Unix timestamp considered plausible (2001-09-09). Readings below
+/// this are treated as a corrupted clock rather than trusted.
+pub const MIN_PLAUSIBLE_UNIX_SECS: u64 = 1_000_000_000;
+
+/// Map a raw seconds reading to the fail-closed clock value (L-08).
+///
+/// A corrupted system clock previously yielded `0`, which made every expired
+/// session look active (`0 < expiry_unix`) and defeated `purge_expired`.
+/// Instead, implausible readings map to `u64::MAX`: every time comparison
+/// (`is_active`, `needs_relay`, `purge_expired`) then treats sessions as
+/// EXPIRED until the clock reports a sane value again.
+fn sanitize_unix_secs(raw: u64) -> u64 {
+    if raw >= MIN_PLAUSIBLE_UNIX_SECS { raw } else { u64::MAX }
+}
+
+/// Current Unix timestamp in seconds, fail-closed on clock errors.
+///
+/// Mirrors the Net-Agent router's fail-closed `now_unix_secs`
+/// (`oc-netagent::wc_method_router`); that helper returns a `Result` keyed to
+/// JSON-RPC error types and cannot be reused here because
+/// `oc-walletconnect` must not depend on `oc-netagent`.
 pub fn now_unix() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    sanitize_unix_secs(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs()))
 }
 
 /// Current UTC time as an RFC 3339 string (used for EIP-4361 `Issued At`).
@@ -223,4 +253,43 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m as u32, d as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn now_unix_fails_closed_on_implausible_clock() {
+        assert_eq!(sanitize_unix_secs(0), u64::MAX);
+        assert_eq!(sanitize_unix_secs(999_999_999), u64::MAX);
+        assert_eq!(sanitize_unix_secs(MIN_PLAUSIBLE_UNIX_SECS), MIN_PLAUSIBLE_UNIX_SECS);
+        assert_eq!(sanitize_unix_secs(1_700_000_000), 1_700_000_000);
+        // The live clock is sane in the test environment.
+        assert!(now_unix() >= MIN_PLAUSIBLE_UNIX_SECS);
+        assert_ne!(now_unix(), u64::MAX);
+    }
+
+    #[test]
+    fn fail_closed_clock_reading_treats_sessions_as_expired() {
+        // A pre-epoch reading maps to u64::MAX, so every expiry lands in the
+        // "past" under the same `<` comparison used by is_active/needs_relay.
+        let broken_now = sanitize_unix_secs(0);
+        let expiry = u64::MAX - 60;
+        assert!(broken_now >= expiry);
+        // The identical session is active under a sane reading.
+        let sane_now = sanitize_unix_secs(1_700_000_000);
+        assert!(sane_now < expiry);
+    }
+
+    #[test]
+    fn chain_allowlist_supports_exact_and_wildcard_entries() {
+        let mut s = WcSession::new_pairing("t".into(), "ab".repeat(32), u64::MAX);
+        s.settle("t".into(), vec!["eip155:1".into(), "solana:*".into()], vec![]);
+        assert!(s.is_chain_allowed("eip155:1"));
+        assert!(!s.is_chain_allowed("eip155:137"));
+        assert!(s.is_chain_allowed("solana:mainnet"));
+        assert!(s.is_chain_allowed("solana:devnet"));
+        assert!(!s.is_chain_allowed("bitcoin:mainnet"));
+    }
 }

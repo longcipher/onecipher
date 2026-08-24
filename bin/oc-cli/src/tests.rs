@@ -601,7 +601,8 @@ fn test_sign_message_and_verify_roundtrip() {
     // Sign a message (utf8). Uses empty passphrase via resolve_signing_key.
     run_ok(&[
         "onecipher",
-        "sign-message",
+        "sign",
+        "message",
         "--chain",
         "evm",
         "--wallet",
@@ -632,7 +633,8 @@ fn test_sign_message_bad_encoding() {
     run_ok(&["onecipher", "wallet", "create", "--name", "s2", "--words", "12"]);
     let res = run_cli(&[
         "onecipher",
-        "sign-message",
+        "sign",
+        "message",
         "--chain",
         "evm",
         "--wallet",
@@ -655,7 +657,8 @@ fn test_sign_message_bad_typed_data() {
     run_ok(&["onecipher", "wallet", "create", "--name", "s3", "--words", "12"]);
     let res = run_cli(&[
         "onecipher",
-        "sign-message",
+        "sign",
+        "message",
         "--chain",
         "evm",
         "--wallet",
@@ -716,6 +719,91 @@ fn test_verify_bad_signature_hex() {
         "zzzz",
     ]);
     assert!(res.is_err(), "verify must reject bad signature hex");
+}
+
+// -----------------------------------------------------------------------
+// 36b. verify --typed-data is wired to EIP-712 (H-01)
+// -----------------------------------------------------------------------
+
+/// Minimal valid EIP-712 payload (mail example from EIP-712 spec).
+const TYPED_DATA_JSON: &str = r#"{
+    "types": {
+        "EIP712Domain": [
+            {"name": "name", "type": "string"},
+            {"name": "version", "type": "string"},
+            {"name": "chainId", "type": "uint256"},
+            {"name": "verifyingContract", "type": "address"}
+        ],
+        "Mail": [
+            {"name": "from", "type": "Person"},
+            {"name": "contents", "type": "string"}
+        ],
+        "Person": [
+            {"name": "name", "type": "string"},
+            {"name": "wallet", "type": "address"}
+        ]
+    },
+    "primaryType": "Mail",
+    "domain": {
+        "name": "Ether Mail",
+        "version": "1",
+        "chainId": 1,
+        "verifyingContract": "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"
+    },
+    "message": {
+        "from": {"name": "Cow", "wallet": "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826"},
+        "contents": "Hello, Bob!"
+    }
+}"#;
+
+#[test]
+fn test_verify_typed_data_rejects_garbage_signature() {
+    // H-01 regression: --typed-data must reach the EIP-712 pipeline instead
+    // of being silently discarded. A syntactically valid payload with a
+    // garbage signature fails verification (not argument parsing).
+    let res = run_cli(&[
+        "onecipher",
+        "verify",
+        "--address",
+        "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826",
+        "--typed-data",
+        TYPED_DATA_JSON,
+        "--signature",
+        &format!("0x{}", "00".repeat(65)),
+    ]);
+    assert!(res.is_err(), "typed-data verify with garbage signature must fail");
+}
+
+#[test]
+fn test_verify_typed_data_rejects_malformed_json() {
+    let res = run_cli(&[
+        "onecipher",
+        "verify",
+        "--address",
+        "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826",
+        "--typed-data",
+        "{ not json }",
+        "--signature",
+        &format!("0x{}", "11".repeat(65)),
+    ]);
+    let err = res.expect_err("malformed typed data must be rejected");
+    assert!(err.to_string().contains("EIP-712"), "error must mention EIP-712, got: {err}");
+}
+
+#[test]
+fn test_verify_typed_data_file_missing() {
+    let res = run_cli(&[
+        "onecipher",
+        "verify",
+        "--address",
+        "0xCD2a3d9F938E13CD947Ec05AbC7FE734Df8DD826",
+        "--typed-data-file",
+        "/nonexistent/typed-data.json",
+        "--signature",
+        &format!("0x{}", "22".repeat(65)),
+    ]);
+    let err = res.expect_err("missing typed-data file must be rejected");
+    assert!(err.to_string().contains("typed-data file"), "error must mention the file, got: {err}");
 }
 
 // -----------------------------------------------------------------------
@@ -2057,7 +2145,8 @@ fn test_intent_submit_simulate_execute_lifecycle_mock() {
         "sk-mock",
     ]);
 
-    // submit --yes → Ok (skip prompt, mock execution)
+    // submit --yes → Ok (skip prompt, mock execution). M-04a: a sender
+    // address is required so execute_intent can fetch the pending nonce.
     run_ok(&[
         "onecipher",
         "intent",
@@ -2068,6 +2157,8 @@ fn test_intent_submit_simulate_execute_lifecycle_mock() {
         "eip155:8453",
         "--session-key",
         "sk-mock",
+        "--from",
+        "0x1111111111111111111111111111111111111111",
         "--yes",
     ]);
 
@@ -2082,6 +2173,8 @@ fn test_intent_submit_simulate_execute_lifecycle_mock() {
         "eip155:8453",
         "--session-key",
         "sk-mock",
+        "--from",
+        "0x1111111111111111111111111111111111111111",
     ]);
 
     // SignMessage intent (default utf8)

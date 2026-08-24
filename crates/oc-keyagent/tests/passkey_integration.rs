@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `oc_keyagent::passkey::PasskeyVerifier` (T15).
 //!
 //! Covers every scenario from `specs/.../features/passkey_authorization.feature`:
@@ -88,7 +90,7 @@ fn test_valid_auth_returns_ok() {
     let vk = p256::ecdsa::VerifyingKey::from(&sk);
     let mut verifier = PasskeyVerifier::new(PasskeyPubkey::P256(vk), CRED_ID.as_bytes().to_vec());
 
-    let challenge = verifier.generate_challenge();
+    let challenge = verifier.generate_challenge().expect("generate challenge");
     let message = message_for(&challenge, CRED_ID);
     let sig: p256::ecdsa::Signature = sk.sign(&message);
 
@@ -113,7 +115,7 @@ fn test_reused_challenge_returns_replay() {
     let vk = p256::ecdsa::VerifyingKey::from(&sk);
     let mut verifier = PasskeyVerifier::new(PasskeyPubkey::P256(vk), CRED_ID.as_bytes().to_vec());
 
-    let challenge = verifier.generate_challenge();
+    let challenge = verifier.generate_challenge().expect("generate challenge");
     let message = message_for(&challenge, CRED_ID);
     let sig: p256::ecdsa::Signature = sk.sign(&message);
     let sig_bytes = sig.to_bytes().to_vec();
@@ -141,7 +143,7 @@ fn test_forged_signature_returns_forged() {
     let mut verifier =
         PasskeyVerifier::new(PasskeyPubkey::P256(vk_real), CRED_ID.as_bytes().to_vec());
 
-    let challenge = verifier.generate_challenge();
+    let challenge = verifier.generate_challenge().expect("generate challenge");
     let message = message_for(&challenge, CRED_ID);
     // Sign with a DIFFERENT private key — verify against `vk_real` must fail.
     let (_, wrong_sig) = sign_p256(&message);
@@ -170,7 +172,7 @@ fn test_boolean_only_returns_forged() {
     // R31: a tampered UI sends "authorized=true" with no signature bytes.
     // The proto has no boolean field; we simulate the attack by sending an
     // empty signature with valid challenge + credential_id.
-    let challenge = verifier.generate_challenge();
+    let challenge = verifier.generate_challenge().expect("generate challenge");
     let empty_sig = PasskeyAuthorization {
         challenge: challenge.to_vec(),
         signature: vec![],
@@ -180,7 +182,7 @@ fn test_boolean_only_returns_forged() {
 
     // Garbage signature bytes (boolean-only attack where the UI fakes a
     // signature without holding the private key) — also Forged.
-    let challenge2 = verifier.generate_challenge();
+    let challenge2 = verifier.generate_challenge().expect("generate challenge");
     let garbage_sig = PasskeyAuthorization {
         challenge: challenge2.to_vec(),
         signature: vec![0xAA; 64], // well-formed length but wrong content
@@ -198,7 +200,7 @@ fn test_credential_id_mismatch() {
     let (vk, _) = sign_p256(b"init-only");
     let mut verifier = PasskeyVerifier::new(PasskeyPubkey::P256(vk), CRED_ID.as_bytes().to_vec());
 
-    let challenge = verifier.generate_challenge();
+    let challenge = verifier.generate_challenge().expect("generate challenge");
     // Sign with WRONG credential_id (so the signature is well-formed over
     // the wrong message; the verifier should reject on credential_id first).
     let wrong_cred = "cred-WRONG-98765";
@@ -224,7 +226,7 @@ fn test_p256_signature_verify() {
     let vk = p256::ecdsa::VerifyingKey::from(&sk);
     let mut verifier = PasskeyVerifier::new(PasskeyPubkey::P256(vk), CRED_ID.as_bytes().to_vec());
 
-    let challenge = verifier.generate_challenge();
+    let challenge = verifier.generate_challenge().expect("generate challenge");
     let message = message_for(&challenge, CRED_ID);
     let sig: p256::ecdsa::Signature = sk.sign(&message);
 
@@ -249,7 +251,7 @@ fn test_ed25519_signature_verify() {
     let mut verifier =
         PasskeyVerifier::new(PasskeyPubkey::Ed25519(vk), CRED_ID.as_bytes().to_vec());
 
-    let challenge = verifier.generate_challenge();
+    let challenge = verifier.generate_challenge().expect("generate challenge");
     let message = message_for(&challenge, CRED_ID);
     let sig: ed25519_dalek::Signature = sk.sign(&message);
 
@@ -273,7 +275,7 @@ fn test_generate_challenge_uniqueness() {
 
     let mut seen = std::collections::HashSet::new();
     for i in 0..100 {
-        let ch = verifier.generate_challenge();
+        let ch = verifier.generate_challenge().expect("generate challenge");
         assert!(seen.insert(ch), "challenge collision within 100 calls (iteration {i})");
     }
     assert_eq!(seen.len(), 100, "exactly 100 distinct challenges expected");

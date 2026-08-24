@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration test: WC v2 wallet ↔ dApp via mock relay.
 //!
 //! Replaces the old ConnectRPC-over-UDS integration test.

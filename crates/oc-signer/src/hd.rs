@@ -122,6 +122,17 @@ impl HdDeriver {
         Ok(())
     }
 
+    /// Initialize an HMAC-SHA512 instance for SLIP-10 derivation.
+    ///
+    /// RFC 2104 allows keys of arbitrary length (oversized keys are hashed
+    /// rather than rejected), so `new_from_slice` cannot fail for any input;
+    /// the error arm maps that unreachable case into a typed error instead
+    /// of panicking.
+    fn hmac_sha512(key: &[u8]) -> Result<Hmac<Sha512>, HdError> {
+        Hmac::<Sha512>::new_from_slice(key)
+            .map_err(|e| HdError::DerivationFailed(format!("HMAC-SHA512 init failed: {e}")))
+    }
+
     /// BIP-32 derivation for secp256k1 using coins-bip32.
     fn derive_secp256k1(seed: &[u8], path: &str) -> Result<SecretBytes, HdError> {
         use std::str::FromStr;
@@ -170,9 +181,7 @@ impl HdDeriver {
         };
 
         // SLIP-10: Master key generation
-        type HmacSha512 = Hmac<Sha512>;
-        let mut mac =
-            HmacSha512::new_from_slice(b"ed25519 seed").expect("HMAC can take key of any size");
+        let mut mac = Self::hmac_sha512(b"ed25519 seed")?;
         mac.update(seed);
         let mut result = mac.finalize().into_bytes();
 
@@ -189,8 +198,7 @@ impl HdDeriver {
             data.extend_from_slice(&key);
             data.extend_from_slice(&(index + 0x80000000u32).to_be_bytes());
 
-            let mut mac =
-                HmacSha512::new_from_slice(&chain_code).expect("HMAC can take key of any size");
+            let mut mac = Self::hmac_sha512(&chain_code)?;
             mac.update(&data);
             let mut derived = mac.finalize().into_bytes();
 

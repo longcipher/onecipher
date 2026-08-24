@@ -22,11 +22,16 @@ static WALLET_RT: OnceLock<Runtime> = OnceLock::new();
 ///
 /// Created at most once via [`OnceLock`]. Use [`Runtime::block_on`] for
 /// one-shot async calls; do NOT store the [`Runtime`] long-term.
+#[allow(clippy::expect_used)] // process-wide singleton; see invariant note below
 pub(crate) fn blocking_runtime() -> &'static Runtime {
     WALLET_RT.get_or_init(|| {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
+            // Infallible in practice: runtime construction only fails on
+            // thread/resource exhaustion, which is unrecoverable for a
+            // process-wide singleton. Propagating a Result through every
+            // sync-to-async bridge would distort the whole oc-wallet API.
             .expect("failed to build oc-wallet blocking runtime")
     })
 }

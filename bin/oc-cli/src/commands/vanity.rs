@@ -67,7 +67,9 @@ pub(crate) fn run(
         };
         existing.extend(results);
         let json = serde_json::to_string_pretty(&existing)?;
-        std::fs::write(path, json)?;
+        // H-02: the results contain raw private keys — atomic private write
+        // so the file is 0600 from creation and never observed torn.
+        oc_core::paths::write_atomic_private(path, json.as_bytes())?;
         eprintln!("Results saved to {}", path.display());
     }
 
@@ -147,7 +149,8 @@ fn find_vanity_address(
                         {
                             let privkey_hex = hex::encode(signing_key.to_bytes());
                             let address = format!("0x{}", eip55_checksum(&address_hex));
-                            *result.lock().unwrap() = Some((privkey_hex, address));
+                            *result.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some((privkey_hex, address));
                         }
                         return;
                     }
@@ -161,7 +164,11 @@ fn find_vanity_address(
         Ok(())
     })?;
 
-    result.lock().unwrap().take().ok_or_else(|| CliError::InvalidArgs("search interrupted".into()))
+    result
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+        .ok_or_else(|| CliError::InvalidArgs("search interrupted".into()))
 }
 
 fn eip55_checksum(address_hex: &str) -> String {

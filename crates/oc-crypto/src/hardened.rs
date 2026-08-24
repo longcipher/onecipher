@@ -8,6 +8,20 @@ use zeroize::Zeroize;
 
 use crate::{MemGuardError, page_guard};
 
+/// Apply `WIPEONFORK` best-effort after a successful lock + DONTDUMP.
+///
+/// Fork protection is defense-in-depth on top of `mlock`; a failure here
+/// (e.g. kernel < 4.14) leaves the lock intact, so it is logged and ignored.
+fn wipe_on_fork_best_effort(ptr: *const u8, len: usize) {
+    if let Err(e) = page_guard::wipe_on_fork(ptr, len) {
+        tracing::warn!(
+            len,
+            error = %e,
+            "MADV_WIPEONFORK failed; locked key pages will be inherited (not wiped) by forked children"
+        );
+    }
+}
+
 /// Zeroize a `Vec` (including spare capacity semantics of the buffer's live
 /// bytes) immediately before it is dropped.
 fn wipe(mut v: Vec<u8>) {
@@ -38,6 +52,7 @@ impl HardenedBytes {
             page_guard::unlock(ptr, len);
             return Err(e);
         }
+        wipe_on_fork_best_effort(ptr, len);
         Ok(Self { inner })
     }
 
@@ -90,6 +105,7 @@ impl HardenedBytes {
             page_guard::unlock(ptr, len);
             return Err(e);
         }
+        wipe_on_fork_best_effort(ptr, len);
         Ok(Self { inner })
     }
 
@@ -106,7 +122,14 @@ impl HardenedBytes {
         }
         match Self::from_slice(data) {
             Ok(hb) => hb,
-            Err(_) => Self { inner: data.to_vec().into_boxed_slice() },
+            Err(e) => {
+                tracing::warn!(
+                    len = data.len(),
+                    error = %e,
+                    "HardenedBytes fell back to UNLOCKED memory (mlock/DONTDUMP failed); bytes remain zeroized-on-drop"
+                );
+                Self { inner: data.to_vec().into_boxed_slice() }
+            }
         }
     }
 
@@ -126,8 +149,20 @@ impl Clone for HardenedBytes {
     /// clone, we fall back to an *unlocked* copy — the bytes are still
     /// zeroized on `Drop`, just not pinned in RAM. This matches the
     /// historical `SecretBytes::clone` behavior (best-effort mlock).
+    /// Degradation is logged at `debug` level to avoid noise on hot paths
+    /// (direct best-effort construction warns instead).
     fn clone(&self) -> Self {
-        Self::from_slice_best_effort(&self.inner)
+        match Self::from_slice(&self.inner) {
+            Ok(hb) => hb,
+            Err(e) => {
+                tracing::debug!(
+                    len = self.inner.len(),
+                    error = %e,
+                    "HardenedBytes clone degraded to unlocked memory"
+                );
+                Self { inner: self.inner.to_vec().into_boxed_slice() }
+            }
+        }
     }
 }
 
@@ -301,6 +336,33 @@ mod tests {
         let cloned = original.clone();
         drop(original);
         drop(cloned);
+    }
+
+    #[test]
+    fn odd_lengths_construct_without_panic() {
+        for &len in &[1usize, 3, 7, 511, 1023, 4097] {
+            let hb = HardenedBytes::new(len).unwrap();
+            assert_eq!(hb.len(), len);
+        }
+    }
+
+    #[test]
+    fn from_slice_best_effort_odd_lengths_no_panic() {
+        for &len in &[1usize, 3, 17, 4097] {
+            let data = vec![0x5Au8; len];
+            let hb = HardenedBytes::from_slice_best_effort(&data);
+            assert_eq!(hb.len(), len);
+            assert_eq!(hb.expose(), &data[..]);
+        }
+    }
+
+    #[test]
+    fn clone_odd_lengths_no_panic() {
+        for &len in &[1usize, 3, 2049] {
+            let original = HardenedBytes::from_slice(&vec![0xC3u8; len]).unwrap();
+            let cloned = original.clone();
+            assert_eq!(cloned.expose(), &vec![0xC3u8; len][..]);
+        }
     }
 }
 

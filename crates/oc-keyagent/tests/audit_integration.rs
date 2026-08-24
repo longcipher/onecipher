@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for the oc-keyagent audit log (T14).
 //!
 //! Per R39 / R40 / R75 / AD-03. Covers:

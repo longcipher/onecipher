@@ -3,9 +3,22 @@
 //! Applies OS primitives to reduce the risk of key material leaking via
 //! core dumps, debugger attachment, or memory swapping.
 //!
-//! Also provides signal-based cleanup hooks so that cached key material
-//! is zeroized on SIGTERM, SIGINT, SIGHUP, or SIGQUIT before the process exits.
-//! A panic hook ensures cleanup also runs on Rust panics (covering the SIGABRT path).
+//! # Termination-time cleanup
+//!
+//! Cached key material is zeroized via globally registered cleanup hooks
+//! (see [`register_cleanup`]). Two integration styles are supported:
+//!
+//! 1. **One-shot CLI commands:** call [`install_signal_handlers()`]. A background thread waits for
+//!    SIGTERM/SIGINT/SIGHUP/SIGQUIT, runs the cleanup hooks, and then **terminates the whole
+//!    process** with exit status `128 + signal`. **WARNING:** this bypasses normal unwinding and
+//!    any async runtime shutdown machinery. It is intended for short-lived commands only; do NOT
+//!    use it in daemons or long-running services.
+//! 2. **Daemons / long-running services:** call [`install_panic_cleanup_hook()`] and
+//!    [`spawn_signal_notifier()`]. The notifier thread runs the cleanup hooks once per received
+//!    signal and forwards the signal number over a channel; the daemon selects on that channel in
+//!    its own shutdown loop and performs a graceful exit. The panic hook additionally runs cleanup
+//!    whenever a Rust panic occurs (covering the SIGABRT path, which cannot be safely intercepted
+//!    via signal handlers).
 
 use std::sync::{Mutex, OnceLock};
 
@@ -33,28 +46,73 @@ fn hooks() -> &'static Mutex<Vec<Box<dyn Fn() + Send>>> {
 /// });
 /// ```
 pub fn register_cleanup(f: impl Fn() + Send + 'static) {
-    hooks().lock().expect("process hardening hooks mutex poisoned").push(Box::new(f));
+    // Poison recovery: the guarded data is a plain list of closures with no
+    // cross-field invariant that a mid-panic unwind could corrupt (precedent:
+    // oc-crypto/src/key_cache.rs), so continue with the recovered lock.
+    let mut hooks = match hooks().lock() {
+        Ok(hooks) => hooks,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    hooks.push(Box::new(f));
 }
 
-/// Run all registered cleanup hooks. Called by the signal handler thread.
+/// Run all registered cleanup hooks. Called by the signal handler thread
+/// and the panic hook.
 fn run_cleanup_hooks() {
-    if let Some(hooks) = CLEANUP_HOOKS.get() &&
-        let Ok(hooks) = hooks.lock()
-    {
+    if let Some(hooks) = CLEANUP_HOOKS.get() {
+        // Poison recovery: see `register_cleanup` — the guarded list has no
+        // cross-field invariant, and skipping cleanup because an earlier hook
+        // panicked would leak key material.
+        let hooks = match hooks.lock() {
+            Ok(hooks) => hooks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         for hook in hooks.iter() {
             hook();
         }
     }
 }
 
+/// Install a panic hook that runs all cleanup hooks before the default hook.
+///
+/// Use this in daemons and long-running services so cached key material is
+/// zeroized even when a panic aborts the process (the primary path to
+/// SIGABRT, which cannot be safely intercepted via signal handlers).
+///
+/// Must be called at most once; subsequent calls are no-ops.
+#[cfg(unix)]
+pub fn install_panic_cleanup_hook() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+    if PANIC_HOOK_INSTALLED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    // Capture the default panic hook so we can chain after cleanup.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        run_cleanup_hooks();
+        default_hook(info);
+    }));
+}
+
+#[cfg(not(unix))]
+pub fn install_panic_cleanup_hook() {}
+
 /// Install signal handlers for SIGTERM, SIGINT, SIGHUP, and SIGQUIT.
 ///
-/// Spawns a background thread that waits for any of these signals,
-/// runs all registered cleanup hooks (zeroizing cached keys), then exits.
+/// Spawns a background thread that waits for the FIRST of these signals,
+/// runs all registered cleanup hooks (zeroizing cached keys), then
+/// terminates the process with exit status `128 + signal`.
 ///
-/// Also installs a panic hook so that cleanup runs on Rust panics
-/// (the primary path to SIGABRT, which cannot be safely intercepted
-/// via signal handlers).
+/// # WARNING
+///
+/// This function **terminates the process**; it is meant for one-shot CLI
+/// commands only. It is NOT for daemons: exiting directly kills the process
+/// before any graceful shutdown can run and races async shutdown handlers
+/// such as `tokio::select!` on `tokio::signal::ctrl_c()`. Daemons should use
+/// [`install_panic_cleanup_hook()`] plus [`spawn_signal_notifier()`] instead.
 ///
 /// Must be called at most once; subsequent calls are no-ops.
 #[cfg(unix)]
@@ -66,17 +124,12 @@ pub fn install_signal_handlers() {
         iterator::Signals,
     };
 
-    static INSTALLED: AtomicBool = AtomicBool::new(false);
-    if INSTALLED.swap(true, Ordering::SeqCst) {
+    install_panic_cleanup_hook();
+
+    static SIGNAL_THREAD_STARTED: AtomicBool = AtomicBool::new(false);
+    if SIGNAL_THREAD_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
-
-    // Capture the default panic hook so we can chain after cleanup.
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        run_cleanup_hooks();
-        default_hook(info);
-    }));
 
     let mut signals = match Signals::new([SIGTERM, SIGINT, SIGHUP, SIGQUIT]) {
         Ok(s) => s,
@@ -100,6 +153,70 @@ pub fn install_signal_handlers() {
 #[cfg(not(unix))]
 pub fn install_signal_handlers() {
     // Signal handling is Unix-only; no-op on other platforms.
+}
+
+/// Spawn a daemon-style signal notifier thread for SIGTERM, SIGINT, SIGHUP,
+/// and SIGQUIT.
+///
+/// Unlike [`install_signal_handlers()`], the notifier never exits the
+/// process. For each received signal it runs the registered cleanup hooks
+/// once and sends the signal number through the returned channel; the
+/// daemon's own shutdown loop receives from that channel and performs a
+/// graceful exit. Pair with [`install_panic_cleanup_hook()`] so panics also
+/// trigger cleanup.
+///
+/// Must be called at most once per process. Returns immediately; if signal
+/// registration fails, an empty channel is returned (no signals will ever be
+/// delivered) and the error is logged.
+#[cfg(unix)]
+pub fn spawn_signal_notifier() -> std::sync::mpsc::Receiver<u32> {
+    use signal_hook::{
+        consts::{SIGHUP, SIGINT, SIGQUIT, SIGTERM},
+        iterator::Signals,
+    };
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let mut signals = match Signals::new([SIGTERM, SIGINT, SIGHUP, SIGQUIT]) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("ows: failed to register signal handlers: {e}");
+            return receiver;
+        }
+    };
+
+    if let Err(e) =
+        std::thread::Builder::new().name("ows-signal-notifier".into()).spawn(move || {
+            signal_notifier_loop(signals.forever(), &sender);
+        })
+    {
+        eprintln!("ows: failed to spawn signal notifier thread: {e}");
+    }
+    receiver
+}
+
+#[cfg(not(unix))]
+pub fn spawn_signal_notifier() -> std::sync::mpsc::Receiver<u32> {
+    // Signal handling is Unix-only; the returned channel never receives.
+    std::sync::mpsc::channel().1
+}
+
+/// Body of the notifier thread, factored out so tests can drive it with a
+/// synthetic signal iterator instead of raising real signals.
+///
+/// For each signal yielded by `signals`, runs the cleanup hooks once and
+/// forwards the signal number to `sender`. Stops as soon as the receiver is
+/// dropped (the daemon has shut down its notifier).
+#[cfg(unix)]
+fn signal_notifier_loop(signals: impl Iterator<Item = i32>, sender: &std::sync::mpsc::Sender<u32>) {
+    for sig in signals {
+        run_cleanup_hooks();
+        // Invariant: signal_hook only yields OS signal numbers, which are
+        // strictly positive, so this conversion cannot lose information.
+        let sig_num = u32::try_from(sig).unwrap_or_default();
+        if sender.send(sig_num).is_err() {
+            break;
+        }
+    }
 }
 
 /// Report of which hardening measures succeeded.
@@ -250,4 +367,95 @@ pub fn clear_env_var(name: &str) -> Option<String> {
         std::env::remove_var(name);
     }
     value
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    use super::*;
+
+    /// Serializes tests that touch the global cleanup-hook registry or the
+    /// process-wide panic hook; cargo runs tests in parallel threads.
+    static HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn notifier_loop_delivers_every_signal_and_runs_hooks_once_per_signal() {
+        let _guard = HOOK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let hook_runs = Arc::new(AtomicUsize::new(0));
+        register_cleanup({
+            let hook_runs = Arc::clone(&hook_runs);
+            move || {
+                hook_runs.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let signals = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT, libc::SIGINT];
+        let (tx, rx) = std::sync::mpsc::channel();
+        signal_notifier_loop(signals.into_iter(), &tx);
+        drop(tx);
+
+        let delivered: Vec<u32> = rx.try_iter().collect();
+        assert_eq!(
+            delivered,
+            signals.iter().map(|sig| u32::try_from(*sig).unwrap_or_default()).collect::<Vec<_>>(),
+            "notifier must deliver every signal number, in order"
+        );
+        assert_eq!(
+            hook_runs.load(Ordering::SeqCst),
+            signals.len(),
+            "cleanup hooks must run exactly once per signal"
+        );
+    }
+
+    #[test]
+    fn notifier_loop_stops_when_receiver_is_dropped() {
+        let _guard = HOOK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let hook_runs = Arc::new(AtomicUsize::new(0));
+        register_cleanup({
+            let hook_runs = Arc::clone(&hook_runs);
+            move || {
+                hook_runs.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let signals = [libc::SIGTERM, libc::SIGINT];
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(rx);
+        signal_notifier_loop(signals.into_iter(), &tx);
+
+        assert_eq!(
+            hook_runs.load(Ordering::SeqCst),
+            1,
+            "loop must stop after the first failed send"
+        );
+    }
+
+    #[test]
+    fn panic_hook_still_chains_cleanup() {
+        let _guard = HOOK_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // Silence the default hook output for the intentional panic below;
+        // install_panic_cleanup_hook chains onto whatever hook is current.
+        std::panic::set_hook(Box::new(|_| {}));
+        install_panic_cleanup_hook();
+
+        let cleaned = Arc::new(AtomicBool::new(false));
+        register_cleanup({
+            let cleaned = Arc::clone(&cleaned);
+            move || cleaned.store(true, Ordering::SeqCst)
+        });
+
+        let result = std::panic::catch_unwind(|| panic!("intentional test panic"));
+        assert!(result.is_err(), "the panic must still propagate as unwinding");
+        assert!(
+            cleaned.load(Ordering::SeqCst),
+            "panic hook must run cleanup hooks before the default hook"
+        );
+    }
 }

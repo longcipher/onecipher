@@ -567,6 +567,10 @@ pub(crate) enum IntentCommands {
         /// Override RPC URL (currently unused; mock RPC is used)
         #[arg(long)]
         rpc_url: Option<String>,
+        /// Sender address used to fetch the transaction nonce (M-04a);
+        /// required for Pay / CrossChainTransfer execution
+        #[arg(long)]
+        from: Option<String>,
     },
     /// Simulate an intent (dry-run — no execution, no signing)
     Simulate {
@@ -597,6 +601,10 @@ pub(crate) enum IntentCommands {
         /// Override RPC URL (currently unused; mock RPC is used)
         #[arg(long)]
         rpc_url: Option<String>,
+        /// Sender address used to fetch the transaction nonce (M-04a);
+        /// required for Pay / CrossChainTransfer execution
+        #[arg(long)]
+        from: Option<String>,
     },
 }
 

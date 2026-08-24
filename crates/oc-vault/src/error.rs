@@ -36,9 +36,15 @@ pub enum OcVaultError {
     #[error("vault is locked due to too many failed passphrase attempts")]
     Locked,
 
+    #[error("too many failed backup passphrase attempts; retry in {retry_after_secs}s")]
+    LockedOut { retry_after_secs: u64 },
+
     #[error("wrong passphrase")]
     WrongPassphrase,
 
     #[error("invalid format: {0}")]
     InvalidFormat(String),
+
+    #[error("unsupported backup container version: found {found}, expected {expected}")]
+    UnsupportedVersion { found: u8, expected: u8 },
 }

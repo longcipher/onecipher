@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for `oc_keyagent::key_ops` + `oc_keyagent::global_key_cache`.
 //!
 //! These tests exercise the full R54 flow end-to-end:

@@ -12,7 +12,7 @@
 //!   X25519 public key; the dApp derives the same key from its private key + the responder's public
 //!   key.
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
@@ -145,6 +145,25 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
     /// back in the same format that was received.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn process_one(&self, topic: &str) -> WcResult<()> {
+        // Containment mirrors the live-relay run loop (C-04): per-message
+        // failures (undecryptable envelope, malformed JSON-RPC) are logged
+        // and dropped so a pump survives garbage input; only infrastructure
+        // failures propagate to the caller.
+        match self.process_one_inner(topic).await {
+            Ok(()) => Ok(()),
+            Err(e) if is_infrastructure_failure(&e) => Err(e),
+            Err(e) => {
+                debug!(
+                    topic = %topic, category = error_category(&e), error = %e,
+                    "contained per-message failure on mock path"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    async fn process_one_inner(&self, topic: &str) -> WcResult<()> {
         let relay = self
             .mock_relay
             .clone()
@@ -248,6 +267,18 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                     .await?;
                     return Ok(());
                 }
+                if let Some(rejection) = cross_chain_rejection(s, &req) {
+                    warn!(topic = %topic, method = %req.method, "rejecting cross-chain session request");
+                    self.publish_response(
+                        &relay,
+                        topic,
+                        &rejection,
+                        outbound_encrypted,
+                        session_key.as_ref(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 if !s.is_method_allowed(&req.method) {
                     debug!(
                         method = %req.method, topic = %topic, methods = ?s.methods, state = ?s.state,
@@ -290,24 +321,34 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                 return Ok(());
             }
             method::SESSION_UPDATE => {
-                let namespaces = req.params.get("namespaces").cloned().unwrap_or_else(|| json!({}));
-                let mut methods = Vec::new();
-                let mut ns: Vec<String> = Vec::new();
-                if let Some(obj) = namespaces.as_object() {
-                    for value in obj.values() {
-                        if let Some(arr) = value.get("chains").and_then(|m| m.as_array()) {
-                            ns.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
-                        }
-                        if let Some(arr) = value.get("methods").and_then(|m| m.as_array()) {
-                            methods.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
+                // M-05a: the peer may only narrow the negotiated scope. An
+                // update proposing chains/methods outside the negotiated sets
+                // is rejected so a compromised dApp cannot grant itself
+                // arbitrary scopes.
+                let (ns, methods) = parse_update_namespaces(&req.params);
+                let mut rejected: Option<String> = None;
+                {
+                    let mut t = self.sessions.lock().await;
+                    if let Some(s) = t.get_mut(topic) {
+                        if let Err(reason) = validate_update_subset(s, &ns, &methods) {
+                            debug!(
+                                topic = %topic, reason = %reason,
+                                "rejecting wc_sessionUpdate outside negotiated scope",
+                            );
+                            rejected = Some(reason);
+                        } else {
+                            s.namespaces = ns;
+                            s.methods = methods;
                         }
                     }
                 }
-                if let Some(s) = self.sessions.lock().await.get_mut(topic) {
-                    s.namespaces = ns;
-                    s.methods = methods;
-                }
-                let resp = JsonRpcResponse::success(req.id, json!({ "acknowledged": true }));
+                let resp = match rejected {
+                    Some(reason) => JsonRpcResponse::error(
+                        req.id,
+                        JsonRpcError::new(JsonRpcErrorCode::Unauthorized, reason),
+                    ),
+                    None => JsonRpcResponse::success(req.id, json!({ "acknowledged": true })),
+                };
                 self.publish_response(
                     &relay,
                     topic,
@@ -438,20 +479,18 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         let approve_resp = JsonRpcResponse::success(req.id, approve_result);
         self.publish_response(relay, pairing_topic, &approve_resp, true, Some(pairing_key)).await?;
 
-        // Insert the new active session.
+        // Insert the new active session. Accepted namespaces are derived from
+        // the proposal's requested chains (M-05b), not hardcoded.
+        let accepted_namespaces =
+            accepted_chains_from_proposal(&propose_params.required_namespaces);
+        let accepted_methods = collect_chains_and_methods(&propose_params.required_namespaces).1;
         let new_session = WcSession {
             topic: session_topic.clone(),
             sym_key: session_key.clone().into(),
             state: WcSessionState::Active,
             expiry_unix: u64::MAX,
-            namespaces: vec!["eip155:1".into()],
-            methods: propose_params
-                .required_namespaces
-                .get("eip155")
-                .and_then(|n| n.get("methods"))
-                .and_then(|m| m.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default(),
+            namespaces: accepted_namespaces,
+            methods: accepted_methods,
             dapp_origin: Some(propose_params.proposer.metadata.url.clone()),
             dapp_name: Some(propose_params.proposer.metadata.name.clone()),
             created_at_unix: crate::session::now_unix(),
@@ -508,6 +547,8 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
 
         let mut relay = RelayClient::connect(relay_cfg).await?;
         let mut req_id: i64 = 1;
+        // M-06: runtime-only bounded replay-dedup window for inbound envelopes.
+        let mut replay_guard = ReplayGuard::new(ReplayGuard::DEFAULT_CAPACITY);
 
         let topics: Vec<String> = {
             let t = self.sessions.lock().await;
@@ -637,61 +678,87 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                 }
             };
 
-            // The message is an encrypted envelope. For a pairing (Propose)
-            // topic, use the pairing symKey; for an active session topic, use
-            // the session symKey (both live in session.sym_key).
-            let Some(sym_key) = session.sym_key.to_sym_key() else {
-                tracing::debug!("failed to decode session sym_key");
-                continue;
-            };
-
-            // Propose phase: handle wc_sessionPropose specially (it may be a
-            // type-1 envelope carrying the proposer's public key).
-            let first_byte = encrypted_bytes.first().copied();
-            if first_byte == Some(crypto::ENVELOPE_TYPE_1) ||
-                first_byte == Some(crypto::ENVELOPE_TYPE_0)
-            {
-                let plaintext = match first_byte {
-                    Some(crypto::ENVELOPE_TYPE_1) => {
-                        // Derive the session key from the proposer's public key.
-                        let (_proposer_pub, pt) = WcCipher::open_type1(&sym_key, &encrypted_bytes)?;
-                        pt
-                    }
-                    _ => WcCipher::open_type0(&sym_key, &encrypted_bytes)?,
-                };
-                if let Ok(req) = serde_json::from_slice::<JsonRpcRequest>(&plaintext) {
-                    if req.method == method::SESSION_PROPOSE {
-                        self.handle_session_propose(
-                            &mut relay,
-                            &req,
-                            topic,
-                            &session,
-                            &mut req_id,
-                            &sym_key,
-                        )
-                        .await?;
-                        continue;
-                    }
-                }
-                // Non-propose request on a pairing topic — treat as regular.
-                let req: JsonRpcRequest = serde_json::from_slice(&plaintext)?;
-                self.dispatch_session_request(
-                    &mut relay,
-                    topic,
-                    &req,
-                    &session,
-                    &sym_key,
-                    &mut req_id,
-                )
-                .await?;
+            // M-06: bounded replay dedup keyed by (topic, envelope nonce).
+            // The relay is unauthenticated on publish, so redeliveries and
+            // attacker-injected duplicates are dropped before any processing.
+            let nonce = envelope_nonce(&encrypted_bytes);
+            if replay_guard.is_replay(topic, &nonce, crate::session::now_unix()) {
+                debug!(topic = %topic, "dropping replayed inbound envelope");
                 continue;
             }
 
-            // Legacy plaintext JSON-RPC over the relay (no envelope).
-            let req: JsonRpcRequest = serde_json::from_slice(&encrypted_bytes)?;
-            self.dispatch_session_request(&mut relay, topic, &req, &session, &sym_key, &mut req_id)
-                .await?;
+            // C-04: per-message containment. Decryption, parsing, and
+            // dispatch failures affect only the offending message — a single
+            // garbage publish from the unauthenticated relay must never kill
+            // the whole network agent. Only infrastructure failures (relay
+            // disconnect, socket I/O) terminate the loop.
+            if let Err(e) = self
+                .process_inbound_message(&mut relay, topic, &session, &encrypted_bytes, &mut req_id)
+                .await
+            {
+                if is_infrastructure_failure(&e) {
+                    return Err(e);
+                }
+                warn!(
+                    topic = %topic,
+                    category = error_category(&e),
+                    error = %e,
+                    "contained per-message failure; WC server loop continuing"
+                );
+            }
         }
+    }
+
+    /// Process exactly one inbound relay message for `topic`.
+    ///
+    /// Errors returned by this function are PER-MESSAGE failures
+    /// (undecryptable envelope, malformed JSON-RPC, rejected update); the run
+    /// loop contains them via [`Self::run`]'s containment match. Infrastructure
+    /// errors from the relay/socket propagate unchanged.
+    async fn process_inbound_message(
+        &mut self,
+        relay: &mut RelayClient,
+        topic: &str,
+        session: &WcSession,
+        encrypted_bytes: &[u8],
+        req_id: &mut i64,
+    ) -> WcResult<()> {
+        let sym_key = session
+            .sym_key
+            .to_sym_key()
+            .ok_or_else(|| WcError::Crypto("failed to decode session sym_key".into()))?;
+
+        // Propose phase: handle wc_sessionPropose specially (it may be a
+        // type-1 envelope carrying the proposer's public key).
+        let first_byte = encrypted_bytes.first().copied();
+        if first_byte == Some(crypto::ENVELOPE_TYPE_1) ||
+            first_byte == Some(crypto::ENVELOPE_TYPE_0)
+        {
+            let plaintext = match first_byte {
+                Some(crypto::ENVELOPE_TYPE_1) => {
+                    // Derive the session key from the proposer's public key.
+                    let (_proposer_pub, pt) = WcCipher::open_type1(&sym_key, encrypted_bytes)?;
+                    pt
+                }
+                _ => WcCipher::open_type0(&sym_key, encrypted_bytes)?,
+            };
+            if let Ok(req) = serde_json::from_slice::<JsonRpcRequest>(&plaintext) {
+                if req.method == method::SESSION_PROPOSE {
+                    return self
+                        .handle_session_propose(relay, &req, topic, session, req_id, &sym_key)
+                        .await;
+                }
+            }
+            // Non-propose request on a pairing topic — treat as regular.
+            let req: JsonRpcRequest = serde_json::from_slice(&plaintext)?;
+            return self
+                .dispatch_session_request(relay, topic, &req, session, &sym_key, req_id)
+                .await;
+        }
+
+        // Legacy plaintext JSON-RPC over the relay (no envelope).
+        let req: JsonRpcRequest = serde_json::from_slice(encrypted_bytes)?;
+        self.dispatch_session_request(relay, topic, &req, session, &sym_key, req_id).await
     }
 
     /// Dispatch a session JSON-RPC request (encrypted response, type-0 envelope).
@@ -723,28 +790,27 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                 JsonRpcResponse::success(req.id, json!({ "acknowledged": true }))
             }
             method::SESSION_UPDATE => {
-                // Update namespaces/methods from the params object. The
-                // session's `namespaces` field holds CAIP-2 chain ids (per the
-                // existing convention), so each namespace's `chains` array is
-                // collected; `methods` is the union of all `methods` arrays.
-                let namespaces = req.params.get("namespaces").cloned().unwrap_or_else(|| json!({}));
-                let mut methods = Vec::new();
-                let mut ns: Vec<String> = Vec::new();
-                if let Some(obj) = namespaces.as_object() {
-                    for value in obj.values() {
-                        if let Some(arr) = value.get("chains").and_then(|m| m.as_array()) {
-                            ns.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
-                        }
-                        if let Some(arr) = value.get("methods").and_then(|m| m.as_array()) {
-                            methods.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
-                        }
+                // M-05a: the peer may only narrow the negotiated scope. An
+                // update proposing chains/methods outside the negotiated sets
+                // is rejected so a compromised dApp cannot grant itself
+                // arbitrary scopes.
+                let (ns, methods) = parse_update_namespaces(&req.params);
+                if let Err(reason) = validate_update_subset(session, &ns, &methods) {
+                    warn!(
+                        topic = %topic, reason = %reason,
+                        "rejecting wc_sessionUpdate outside negotiated scope",
+                    );
+                    JsonRpcResponse::error(
+                        req.id,
+                        JsonRpcError::new(JsonRpcErrorCode::Unauthorized, reason),
+                    )
+                } else {
+                    if let Some(s) = self.sessions.lock().await.get_mut(topic) {
+                        s.namespaces = ns;
+                        s.methods = methods;
                     }
+                    JsonRpcResponse::success(req.id, json!({ "acknowledged": true }))
                 }
-                if let Some(s) = self.sessions.lock().await.get_mut(topic) {
-                    s.namespaces = ns;
-                    s.methods = methods;
-                }
-                JsonRpcResponse::success(req.id, json!({ "acknowledged": true }))
             }
             method::SESSION_PING => {
                 JsonRpcResponse::success(req.id, json!({ "acknowledged": true }))
@@ -776,7 +842,19 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             _ => {
                 let t = self.sessions.lock().await;
                 if let Some(s) = t.get(topic) {
-                    if s.is_method_allowed(&req.method) {
+                    // M-05c: enforce the negotiated chain scope. Requests
+                    // carrying a `chainId` (WC v2 wire convention:
+                    // top-level in wc_sessionRequest params) must stay within
+                    // the session's approved namespaces; requests without one
+                    // fall back to the topic-level (session-level) gates.
+                    if let Some(rejection) = cross_chain_rejection(s, req) {
+                        drop(t);
+                        warn!(
+                            topic = %topic, method = %req.method,
+                            "rejecting cross-chain session request",
+                        );
+                        rejection
+                    } else if s.is_method_allowed(&req.method) {
                         drop(t);
                         match self
                             .handler
@@ -811,8 +889,6 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                 }
             }
         };
-        let _ = session;
-        let _ = sym_key;
 
         let resp_bytes = serde_json::to_vec(&resp)?;
         debug!(resp_len = resp_bytes.len(), "sending session response");
@@ -916,19 +992,18 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         });
         relay.send_text(serde_json::to_string(&sub_msg)?).await?;
 
+        // Accepted namespaces are derived from the proposal's requested
+        // chains (M-05b), not hardcoded to eip155:1.
+        let accepted_namespaces =
+            accepted_chains_from_proposal(&propose_params.required_namespaces);
+        let accepted_methods = collect_chains_and_methods(&propose_params.required_namespaces).1;
         let new_session = WcSession {
             topic: session_topic.clone(),
             sym_key: session_key.clone().into(),
             state: WcSessionState::Active,
             expiry_unix: session.expiry_unix,
-            namespaces: vec!["eip155:1".into()],
-            methods: propose_params
-                .required_namespaces
-                .get("eip155")
-                .and_then(|n| n.get("methods"))
-                .and_then(|m| m.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                .unwrap_or_default(),
+            namespaces: accepted_namespaces,
+            methods: accepted_methods,
             dapp_origin: Some(propose_params.proposer.metadata.url.clone()),
             dapp_name: Some(propose_params.proposer.metadata.name.clone()),
             created_at_unix: crate::session::now_unix(),
@@ -1010,6 +1085,217 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
 /// Returns `None` when unset (the common case — attestation is optional).
 fn attestation_env() -> Option<String> {
     std::env::var("OC_WC_ATTESTATION").ok().filter(|s| !s.is_empty())
+}
+
+// ---------------------------------------------------------------------------
+// Per-message containment helpers (C-04)
+// ---------------------------------------------------------------------------
+
+/// Coarse error category for containment logs (never logs payloads).
+fn error_category(err: &WcError) -> &'static str {
+    match err {
+        WcError::InvalidUri(_) | WcError::InvalidMessage(_) => "invalid_message",
+        WcError::Crypto(_) => "crypto",
+        WcError::Json(_) => "json",
+        WcError::JsonRpc { .. } => "json_rpc",
+        WcError::SessionNotFound(_) | WcError::SessionExpired(_) => "session_state",
+        WcError::MethodNotAuthorized(_) | WcError::PairingRejected => "unauthorized",
+        WcError::Relay(_) | WcError::RelayTimeout(_) => "relay",
+        WcError::Io(_) => "io",
+        WcError::WebSocket(_) => "websocket",
+    }
+}
+
+/// Whether an error must terminate the run loop (infrastructure failure:
+/// relay disconnect, socket I/O) rather than just drop one inbound message.
+///
+/// [`WcError::RelayTimeout`] is deliberately NOT infrastructure: a receive
+/// timeout means the socket is still healthy and must never kill the loop.
+fn is_infrastructure_failure(err: &WcError) -> bool {
+    matches!(err, WcError::Relay(_) | WcError::WebSocket(_) | WcError::Io(_))
+}
+
+// ---------------------------------------------------------------------------
+// Replay dedup (M-06)
+// ---------------------------------------------------------------------------
+
+/// Extract the per-message nonce bytes used as the replay-dedup key.
+///
+/// Envelope layouts (see `crate::crypto`):
+/// - type-0: `[0x00 ‖ iv(12) ‖ ciphertext ‖ tag]`
+/// - type-1: `[0x01 ‖ senderPubKey(32) ‖ iv(12) ‖ ciphertext]`
+///
+/// Anything else (legacy plaintext JSON-RPC, truncated envelopes) falls back
+/// to the full payload as the key material.
+fn envelope_nonce(envelope: &[u8]) -> Vec<u8> {
+    let iv_range = match envelope.first().copied() {
+        Some(crypto::ENVELOPE_TYPE_0) => Some(1..1 + crypto::IV_LENGTH),
+        Some(crypto::ENVELOPE_TYPE_1) => {
+            Some((1 + crypto::KEY_LENGTH)..(1 + crypto::KEY_LENGTH + crypto::IV_LENGTH))
+        }
+        _ => None,
+    };
+    match iv_range.and_then(|r| envelope.get(r)) {
+        Some(iv) => iv.to_vec(),
+        None => envelope.to_vec(),
+    }
+}
+
+/// Runtime-only bounded replay-dedup set for inbound relay envelopes.
+///
+/// Keys are `(topic, envelope nonce)` pairs; values are the Unix time of
+/// first sight. Entries older than [`ReplayGuard::RETENTION_SECS`] are swept
+/// on insert, so a message redelivered after the retention window is accepted
+/// again. The window matches the 300-second TTL this wallet uses for its own
+/// outbound publishes; relay-level per-envelope TTL fields (not present in
+/// the current wire structs) are approximated by this fixed window.
+struct ReplayGuard {
+    seen: HashMap<(String, Vec<u8>), u64>,
+    capacity: usize,
+}
+
+impl ReplayGuard {
+    /// Default bound on tracked envelopes (>= 1024 required by design).
+    const DEFAULT_CAPACITY: usize = 4096;
+    /// Retention window for dedup entries, in seconds.
+    const RETENTION_SECS: u64 = 300;
+
+    fn new(capacity: usize) -> Self {
+        Self { seen: HashMap::new(), capacity: capacity.max(1) }
+    }
+
+    /// Returns `true` when `(topic, nonce)` was already seen inside the
+    /// retention window (a replay — caller must drop the message). First
+    /// sightings are recorded and return `false`.
+    ///
+    /// Under a fail-closed clock (`now == u64::MAX`) entries simply never age
+    /// out until the clock recovers; capacity still bounds memory.
+    fn is_replay(&mut self, topic: &str, nonce: &[u8], now: u64) -> bool {
+        self.seen.retain(|_, first_seen| now.saturating_sub(*first_seen) < Self::RETENTION_SECS);
+        let key = (topic.to_string(), nonce.to_vec());
+        if let Some(first_seen) = self.seen.get(&key) {
+            if now.saturating_sub(*first_seen) < Self::RETENTION_SECS {
+                return true;
+            }
+        }
+        if self.seen.len() >= self.capacity {
+            self.evict_oldest();
+        }
+        self.seen.insert(key, now);
+        false
+    }
+
+    /// Evict least-recently-seen entries until below capacity.
+    fn evict_oldest(&mut self) {
+        while self.seen.len() >= self.capacity {
+            let oldest = self.seen.iter().min_by_key(|(_, ts)| **ts).map(|(k, _)| k.clone());
+            match oldest {
+                Some(k) => {
+                    self.seen.remove(&k);
+                }
+                None => break,
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Namespace / scope helpers (M-05)
+// ---------------------------------------------------------------------------
+
+/// Union the `chains` and `methods` arrays across a WC namespaces object
+/// (`requiredNamespaces` in proposals, `namespaces` in updates).
+fn collect_chains_and_methods(namespaces: &Value) -> (Vec<String>, Vec<String>) {
+    let mut chains = Vec::new();
+    let mut methods = Vec::new();
+    if let Some(obj) = namespaces.as_object() {
+        for value in obj.values() {
+            if let Some(arr) = value.get("chains").and_then(|m| m.as_array()) {
+                chains.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
+            }
+            if let Some(arr) = value.get("methods").and_then(|m| m.as_array()) {
+                methods.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
+            }
+        }
+    }
+    (chains, methods)
+}
+
+/// Parse the `namespaces` object of a `wc_sessionUpdate` params value into
+/// `(chains, methods)` unions (existing wire convention).
+fn parse_update_namespaces(params: &Value) -> (Vec<String>, Vec<String>) {
+    match params.get("namespaces") {
+        Some(ns) => collect_chains_and_methods(ns),
+        None => (Vec::new(), Vec::new()),
+    }
+}
+
+/// Derive the wallet-accepted CAIP-2 chain list from a proposal's
+/// `requiredNamespaces` object (M-05b).
+///
+/// Each namespace's explicit `chains` array contributes verbatim; a namespace
+/// entry without a `chains` array contributes the family wildcard `<ns>:*`.
+/// There is no wallet-supported-chain registry in this crate, so proposal
+/// chains are accepted verbatim (per-request risk stays gated by the policy
+/// engine above this layer).
+fn accepted_chains_from_proposal(required_namespaces: &Value) -> Vec<String> {
+    let mut chains = Vec::new();
+    if let Some(obj) = required_namespaces.as_object() {
+        for (ns, value) in obj {
+            match value.get("chains").and_then(|c| c.as_array()) {
+                Some(arr) => {
+                    chains.extend(arr.iter().filter_map(|v| v.as_str().map(String::from)));
+                }
+                None => chains.push(format!("{ns}:*")),
+            }
+        }
+    }
+    chains
+}
+
+/// Validate that a proposed `wc_sessionUpdate` only ever narrows the
+/// negotiated session scope (M-05a): both the proposed chains and methods
+/// must be subsets of the session's current sets. Returns a human-readable
+/// reason on the first violation.
+fn validate_update_subset(
+    session: &WcSession,
+    proposed_ns: &[String],
+    proposed_methods: &[String],
+) -> Result<(), String> {
+    for ns in proposed_ns {
+        if !session.namespaces.iter().any(|a| a == ns) {
+            return Err(format!("chain {ns} was not negotiated for this session"));
+        }
+    }
+    for method in proposed_methods {
+        if !session.methods.iter().any(|a| a == method) {
+            return Err(format!("method {method} was not negotiated for this session"));
+        }
+    }
+    Ok(())
+}
+
+/// Extract the CAIP-2 chain id from request params (WC v2 wire convention:
+/// top-level `chainId`, e.g. in `wc_sessionRequest`).
+fn request_chain_id(params: &Value) -> Option<&str> {
+    params.get("chainId").and_then(Value::as_str)
+}
+
+/// Build the Unauthorized response when `req` carries a `chainId` outside the
+/// session's negotiated namespaces (M-05c). `None` means allowed — either the
+/// chain is covered or no chainId is present (the topic-level gates apply).
+fn cross_chain_rejection(session: &WcSession, req: &JsonRpcRequest) -> Option<JsonRpcResponse> {
+    let chain = request_chain_id(&req.params)?;
+    if session.is_chain_allowed(chain) {
+        return None;
+    }
+    Some(JsonRpcResponse::error(
+        req.id,
+        JsonRpcError::new(
+            JsonRpcErrorCode::Unauthorized,
+            format!("chain {chain} not authorized for this session"),
+        ),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1161,5 +1447,122 @@ mod tests {
     fn raw_host_without_scheme_matches() {
         assert!(origin_matches_trusted("localhost:3000", &origins(&["localhost"])));
         assert!(origin_matches_trusted("127.0.0.1", &origins(&["127.0.0.1"])));
+    }
+
+    #[test]
+    fn infrastructure_errors_are_classified_for_containment() {
+        assert!(is_infrastructure_failure(&WcError::Relay("disconnect".into())));
+        assert!(is_infrastructure_failure(&WcError::WebSocket("closed".into())));
+        assert!(is_infrastructure_failure(&WcError::Io(std::io::Error::other("disk"))));
+        // Per-message failures must never terminate the loop.
+        assert!(!is_infrastructure_failure(&WcError::Crypto("bad tag".into())));
+        assert!(!is_infrastructure_failure(&WcError::Json(
+            serde_json::from_str::<Value>("not json").unwrap_err()
+        )));
+        assert!(!is_infrastructure_failure(&WcError::InvalidMessage("junk".into())));
+        assert_eq!(error_category(&WcError::Crypto("x".into())), "crypto");
+        assert_eq!(error_category(&WcError::InvalidMessage("x".into())), "invalid_message");
+    }
+
+    #[test]
+    fn envelope_nonce_extracts_iv_per_envelope_type() {
+        let key = WcSymKey::from_random();
+        let env0 = WcCipher::seal_type0(&key, b"hello").unwrap();
+        assert_eq!(envelope_nonce(&env0), env0[1..=crypto::IV_LENGTH].to_vec());
+        let sender = [7u8; 32];
+        let env1 = WcCipher::seal_type1(&key, &sender, b"hello").unwrap();
+        assert_eq!(
+            envelope_nonce(&env1),
+            env1[1 + crypto::KEY_LENGTH..1 + crypto::KEY_LENGTH + crypto::IV_LENGTH].to_vec()
+        );
+        // Legacy plaintext falls back to the whole payload.
+        assert_eq!(envelope_nonce(b"not-an-envelope"), b"not-an-envelope".to_vec());
+        // Truncated envelopes fall back safely instead of panicking.
+        assert_eq!(
+            envelope_nonce(&[crypto::ENVELOPE_TYPE_0, 1, 2]),
+            vec![crypto::ENVELOPE_TYPE_0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn replay_guard_dedups_identical_nonce_within_window() {
+        let mut g = ReplayGuard::new(1024);
+        assert!(!g.is_replay("t", b"n1", 1_000));
+        assert!(g.is_replay("t", b"n1", 1_100));
+        assert!(!g.is_replay("t", b"n2", 1_100));
+        // Same nonce on a different topic is NOT a replay.
+        assert!(!g.is_replay("other", b"n1", 1_100));
+    }
+
+    #[test]
+    fn replay_guard_accepts_redelivery_after_retention_window() {
+        let mut g = ReplayGuard::new(1024);
+        assert!(!g.is_replay("t", b"n1", 0));
+        assert!(g.is_replay("t", b"n1", ReplayGuard::RETENTION_SECS - 1));
+        assert!(!g.is_replay("t", b"n1", ReplayGuard::RETENTION_SECS));
+    }
+
+    #[test]
+    fn replay_guard_stays_bounded_at_capacity() {
+        let mut g = ReplayGuard::new(64);
+        for i in 0..256u32 {
+            assert!(!g.is_replay("t", &i.to_le_bytes(), 1_000));
+        }
+        assert!(g.seen.len() <= g.capacity);
+    }
+
+    #[test]
+    fn accepted_chains_derived_from_proposal() {
+        let explicit = json!({ "eip155": { "chains": ["eip155:1", "eip155:137"], "methods": [] } });
+        assert_eq!(
+            accepted_chains_from_proposal(&explicit),
+            vec!["eip155:1".to_string(), "eip155:137".to_string()]
+        );
+        // Namespace without an explicit chains array gets the family wildcard.
+        let implicit = json!({
+            "eip155": { "methods": ["personal_sign"] },
+            "solana": { "chains": ["solana:mainnet"] }
+        });
+        assert_eq!(
+            accepted_chains_from_proposal(&implicit),
+            vec!["eip155:*".to_string(), "solana:mainnet".to_string()]
+        );
+        assert_eq!(accepted_chains_from_proposal(&json!({})).len(), 0);
+    }
+
+    #[test]
+    fn session_update_must_be_subset_of_negotiated_scope() {
+        let mut s = WcSession::new_pairing("t".into(), "ab".repeat(32), u64::MAX);
+        s.settle("t".into(), vec!["eip155:1".into()], vec!["personal_sign".into()]);
+        // Identical scope is fine; narrowing is fine.
+        assert!(
+            validate_update_subset(&s, &["eip155:1".into()], &["personal_sign".into()]).is_ok()
+        );
+        assert!(validate_update_subset(&s, &[], &[]).is_ok());
+        // Adding a chain is rejected.
+        let err =
+            validate_update_subset(&s, &["eip155:1".into(), "eip155:137".into()], &[]).unwrap_err();
+        assert!(err.contains("eip155:137"), "reason mentions the offending chain: {err}");
+        // Adding a method is rejected.
+        let err = validate_update_subset(&s, &[], &["eth_sign".into()]).unwrap_err();
+        assert!(err.contains("eth_sign"), "reason mentions the offending method: {err}");
+    }
+
+    #[test]
+    fn cross_chain_requests_are_detected_via_chain_id_param() {
+        let mut s = WcSession::new_pairing("t".into(), "ab".repeat(32), u64::MAX);
+        s.settle("t".into(), vec!["eip155:1".into()], vec!["personal_sign".into()]);
+        let ok_req = JsonRpcRequest::new("personal_sign", json!({ "chainId": "eip155:1" }), 1);
+        assert!(cross_chain_rejection(&s, &ok_req).is_none());
+        let bad_req = JsonRpcRequest::new("personal_sign", json!({ "chainId": "eip155:42" }), 2);
+        let rejection = cross_chain_rejection(&s, &bad_req).expect("cross-chain must be rejected");
+        assert_eq!(rejection.error.expect("error set").code, JsonRpcErrorCode::Unauthorized as i64);
+        // No chainId → falls back to the topic-level gate (no rejection here).
+        let no_chain = JsonRpcRequest::new("personal_sign", json!({}), 3);
+        assert!(cross_chain_rejection(&s, &no_chain).is_none());
+        // Wildcard-negotiated families admit any chain id in the family.
+        let mut w = WcSession::new_pairing("w".into(), "cd".repeat(32), u64::MAX);
+        w.settle("w".into(), vec!["eip155:*".into()], vec!["personal_sign".into()]);
+        assert!(cross_chain_rejection(&w, &bad_req).is_none());
     }
 }

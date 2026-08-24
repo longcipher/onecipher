@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 //! oc-crypto — minimal crypto + memory hardening + post-quantum primitives for OneCipher.
 //!
 //! Per R51/R52: zero I/O, zero network deps. Owns `HardenedBytes` (mlock + madvise DONTDUMP),

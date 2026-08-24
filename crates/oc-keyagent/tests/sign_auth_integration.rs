@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Integration tests for the `SignAuth` request (auth-class signing, no
 //! passkey gate).
 //!
@@ -71,7 +73,8 @@ fn create_device_bound_wallet(wallet_id: &str) -> Vec<u8> {
 /// Dispatch a `SignAuth` request and decode the response payload.
 fn dispatch_sign_auth(wallet_id: &str, message: &[u8]) -> SignAuthResponse {
     let agent_token = vec![0xAB; 32];
-    oc_keyagent::handler::set_sign_auth_internal_token(Some(agent_token.clone()));
+    oc_keyagent::handler::set_sign_auth_internal_token(Some(agent_token.clone()))
+        .expect("set sign-auth internal token");
     let req = KeyAgentRequest {
         kind: Some(KeyAgentRequestKind::SignAuth(SignAuthRequest {
             wallet_id: wallet_id.to_string(),

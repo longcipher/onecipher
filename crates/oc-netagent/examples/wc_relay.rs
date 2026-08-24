@@ -41,7 +41,7 @@ struct RelayState {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let port: u16 = std::env::args()
         .nth(1)
         .and_then(|s| s.strip_prefix("--port=").map(str::to_owned))
@@ -54,9 +54,10 @@ async fn main() {
         .layer(middleware::from_fn(compat_ws_headers))
         .with_state(state);
     let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
     println!("mock WC relay listening on ws://{addr}");
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
 /// Cloudflare Tunnel forwards WebSocket upgrades over HTTP/2 (CONNECT +

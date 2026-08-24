@@ -3,6 +3,14 @@
 //! - `lock`   : `mlock` on Unix, `VirtualLock` on Windows.
 //! - `unlock` : `munlock` on Unix, `VirtualUnlock` on Windows (best-effort).
 //! - `dont_dump`: `madvise(MADV_DONTDUMP)` on Linux; no-op elsewhere (returns Ok).
+//! - `wipe_on_fork`: `madvise(MADV_WIPEONFORK)` on Linux; no-op elsewhere (returns Ok).
+//!
+//! `MADV_WIPEONFORK` (Linux 4.14+) asks the kernel to zero the covered pages
+//! in the child address space after `fork(2)`. Without it, a forked child
+//! inherits private copies of mlocked pages — including any key material they
+//! hold. With it, the child observes zero-filled pages instead, closing the
+//! fork-inheritance gap for locked key memory. Failure is non-fatal (the
+//! `mlock` swap protection is unaffected) but is reported so callers can log it.
 //!
 //! All `unsafe` in `oc-crypto` is confined to this module. The crate root uses
 //! `#![deny(unsafe_code)]` (see `lib.rs` for why we did not use `forbid`); the
@@ -60,6 +68,41 @@ pub fn lock(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
     }
 }
 
+/// Apply an `madvise(2)` advice to the pages covering `[addr, addr+len)`.
+///
+/// `madvise(2)` (unlike `mlock`) requires the address to be **page-aligned**
+/// on all current kernels; unaligned heap pointers (a plain `Box<[u8]>` is
+/// only aligned to its element type) are rejected with EINVAL. Round the
+/// range down to the containing page and extend the length to the end of the
+/// original range — the kernel rounds down internally anyway, so this is
+/// semantically identical on kernels that accept unaligned addresses.
+#[cfg(target_os = "linux")]
+fn madvise_pages(addr: *const u8, len: usize, advice: libc::c_int) -> Result<(), MemGuardError> {
+    let page_size = unsafe {
+        // SAFETY: `sysconf(_SC_PAGESIZE)` takes no pointer arguments and
+        // always succeeds on Linux; the cast to `usize` is lossless.
+        libc::sysconf(libc::_SC_PAGESIZE)
+    } as usize;
+    let page_mask = page_size - 1;
+    let base = (addr as usize) & !page_mask;
+    let end = (addr as usize).saturating_add(len);
+    let aligned_len = end.saturating_sub(base);
+    // SAFETY: `base` is page-aligned by construction and `[base,
+    // base+aligned_len)` is a superset of the caller's `[addr, addr+len)`
+    // region. The extra leading/trailing bytes may belong to *neighbouring*
+    // allocator chunks (e.g. when `addr` points into a sub-page `Box<[u8]>`)
+    // rather than to the same Rust-owned allocation — but this is harmless:
+    // `madvise` never dereferences memory, it only flips per-mapping kernel
+    // flags, and every touched page is part of a live mapping of this
+    // process. Applying DONTDUMP/WIPEONFORK to those neighbouring pages is
+    // therefore merely over-broad, not unsound.
+    let ret = unsafe { libc::madvise(base as *mut libc::c_void, aligned_len, advice) };
+    if ret != 0 {
+        return Err(MemGuardError::MadviseFailed(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
 /// Mark a region of memory as non-dumpable in core files.
 ///
 /// - Linux: `madvise(MADV_DONTDUMP)`.
@@ -70,34 +113,7 @@ pub fn dont_dump(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
     }
     #[cfg(target_os = "linux")]
     {
-        // `madvise(2)` (unlike `mlock`) requires the address to be
-        // **page-aligned** on all current kernels; unaligned heap pointers
-        // (a plain `Box<[u8]>` is only aligned to its element type) are
-        // rejected with EINVAL. Round the range down to the containing page
-        // and extend the length to the end of the original range — the
-        // kernel rounds down internally anyway, so this is semantically
-        // identical on kernels that accept unaligned addresses.
-        let page_size = unsafe {
-            // SAFETY: `sysconf(_SC_PAGESIZE)` takes no pointer arguments and
-            // always succeeds on Linux; the cast to `usize` is lossless.
-            libc::sysconf(libc::_SC_PAGESIZE)
-        } as usize;
-        let page_mask = page_size - 1;
-        let base = (addr as usize) & !page_mask;
-        let end = (addr as usize).saturating_add(len);
-        let aligned_len = end.saturating_sub(base);
-        // SAFETY: `base` is page-aligned by construction. The range
-        // `[base, base+aligned_len)` is a superset of the originally-locked
-        // `[addr, addr+len)` region; the surrounding bytes belong to the same
-        // Rust-owned allocation (a `Box<[u8]>` backed by a single heap chunk),
-        // so the kernel-owned pages are valid and mapped. `MADV_DONTDUMP` only
-        // changes core-dump behaviour and does not dereference the memory.
-        let ret =
-            unsafe { libc::madvise(base as *mut libc::c_void, aligned_len, libc::MADV_DONTDUMP) };
-        if ret != 0 {
-            return Err(MemGuardError::MadviseFailed(std::io::Error::last_os_error()));
-        }
-        Ok(())
+        madvise_pages(addr, len, libc::MADV_DONTDUMP)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -106,7 +122,32 @@ pub fn dont_dump(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
     }
 }
 
-/// Unlock a previously locked region of memory. Best-effort: errors are ignored.
+/// Mark locked pages to be wiped in child processes after `fork(2)`.
+///
+/// - Linux: `madvise(MADV_WIPEONFORK)` (requires Linux 4.14+). After a successful call, the kernel
+///   zeroes the covered pages in the child's address space, so mlocked key material is not
+///   inherited across `fork`.
+/// - All other platforms: no-op success (no equivalent primitive).
+///
+/// Failure is non-fatal by design (callers log it): the underlying `mlock`
+/// swap protection is unaffected.
+pub fn wipe_on_fork(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
+    if len == 0 {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        madvise_pages(addr, len, libc::MADV_WIPEONFORK)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = addr;
+        Ok(())
+    }
+}
+
+/// Unlock a previously locked region of memory. Best-effort: failures are
+/// logged via `tracing::warn` and otherwise ignored.
 ///
 /// - Unix: `munlock(2)`.
 /// - Windows: `VirtualUnlock`.
@@ -121,18 +162,71 @@ pub fn unlock(addr: *const u8, len: usize) {
         // SAFETY (best-effort): `addr`/`len` describe a region previously
         // passed to `lock`. If `lock` failed (or this is the fallback path for
         // a `Clone` that could not re-mlock), `munlock` on an unlocked address
-        // returns EPERM/EINVAL, which we deliberately ignore. `addr` remains
-        // Rust-owned memory and is never dereferenced by the syscall.
-        let _ = unsafe { libc::munlock(addr.cast::<libc::c_void>(), len) };
+        // returns EPERM/EINVAL, which we log and otherwise ignore. `addr`
+        // remains Rust-owned memory and is never dereferenced by the syscall.
+        let ret = unsafe { libc::munlock(addr.cast::<libc::c_void>(), len) };
+        if ret != 0 {
+            let err = std::io::Error::last_os_error();
+            tracing::warn!(
+                len,
+                error = %err,
+                "munlock failed; locked-page accounting may drift (check RLIMIT_MEMLOCK)"
+            );
+        }
     }
     #[cfg(windows)]
     {
         // SAFETY (best-effort): same reasoning as the Unix branch; `VirtualUnlock`
         // is a no-op alarm on an address that was never `VirtualLock`ed.
-        let _ = unsafe { windows_sys::Win32::System::Memory::VirtualUnlock(addr as *const _, len) };
+        let ret =
+            unsafe { windows_sys::Win32::System::Memory::VirtualUnlock(addr as *const _, len) };
+        if ret == 0 {
+            let err = std::io::Error::last_os_error();
+            tracing::warn!(
+                len,
+                error = %err,
+                "VirtualUnlock failed; locked-page accounting may drift"
+            );
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
         let _ = addr;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_advise_unlock_roundtrip() {
+        let buf = vec![0u8; 64].into_boxed_slice();
+        let ptr = buf.as_ptr();
+        lock(ptr, 64).expect("mlock");
+        dont_dump(ptr, 64).expect("madvise DONTDUMP");
+        wipe_on_fork(ptr, 64).expect("madvise WIPEONFORK");
+        unlock(ptr, 64);
+    }
+
+    #[test]
+    fn zero_len_is_noop_success() {
+        let buf = [0u8; 1];
+        let ptr = buf.as_ptr();
+        assert!(lock(ptr, 0).is_ok());
+        assert!(dont_dump(ptr, 0).is_ok());
+        assert!(wipe_on_fork(ptr, 0).is_ok());
+        unlock(ptr, 0);
+    }
+
+    #[test]
+    fn wipe_on_fork_unaligned_sub_page_addr_succeeds() {
+        // Deliberately sub-page, unaligned allocation: exercises the
+        // page-rounding path in `madvise_pages`.
+        let buf = vec![0u8; 3].into_boxed_slice();
+        let ptr = buf.as_ptr();
+        lock(ptr, 3).expect("mlock");
+        wipe_on_fork(ptr, 3).expect("WIPEONFORK on unaligned addr");
+        unlock(ptr, 3);
     }
 }

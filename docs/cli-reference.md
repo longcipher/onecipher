@@ -211,7 +211,24 @@ Verify a signature against an address.
 ```bash
 onecipher verify --address 0xab16... --message "hello" --signature 0x...
 onecipher verify --address 0xab16... --typed-data '<json>' --signature 0x...
+onecipher verify --address 0xab16... --typed-data-file order.json --signature 0x...
 onecipher verify --address 0xab16... --hash <32-byte-hex> --no-hash --signature 0x...
+```
+
+`--typed-data` / `--typed-data-file` are fully functional: the EIP-712 typed
+data is hashed per the EIP-712 specification and the signature is verified
+against that raw digest (no EIP-191 `personal_sign` wrapping).
+
+```bash
+onecipher verify --address 0xab16... --signature 0x... --typed-data '{
+  "types": {
+    "EIP712Domain": [{"name":"name","type":"string"}],
+    "Mail": [{"name":"contents","type":"string"}]
+  },
+  "primaryType": "Mail",
+  "domain": {"name": "Ether Mail"},
+  "message": {"contents": "Hello from OneCipher"}
+}'
 ```
 
 | Flag | Description |
@@ -370,8 +387,10 @@ onecipher session-key revoke <session-key-id> \
 ## Intent Commands (Stage 2)
 
 Declarative intents ("pay 10.5 USDC to 0xABC on Base") with
-simulate → confirm → execute lifecycle. Currently exercised against mock RPC
-in the CLI path; see [design notes](design.md) for status.
+simulate → confirm → execute lifecycle. `intent execute` fetches the real
+pending nonce via `eth_getTransactionCount` before building the transaction.
+`CrossChainTransfer` intents are rejected as unsupported (fail-closed) until
+bridge integration lands; see [design notes](design.md) for status.
 
 ```bash
 onecipher intent submit --json '{"type":"Pay","amount":"10.5 USDC","recipient":"0xABC"}' \

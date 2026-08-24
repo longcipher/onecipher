@@ -15,6 +15,7 @@ secrecy = { workspace = true }
 sha2 = { workspace = true }
 subtle = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
 zeroize = { workspace = true, features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]

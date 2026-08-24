@@ -155,12 +155,14 @@ trivially_copy_pass_by_ref = "allow"
 no_effect_underscore_binding = "allow"
 redundant_closure_for_method_calls = "allow"
 
-# Panic safety — `unwrap_used`/`expect_used`/`panic` are allowed because test
-# code legitimately uses them. Production code should still avoid them — code
-# review enforces this.
-unwrap_used = "allow"
-expect_used = "allow"
-panic = "allow"
+# Panic safety — phased policy (L-05 phase 1): `unwrap_used`/`expect_used`/`panic`
+# are "warn" so CI (`just lint` runs clippy with -D warnings) rejects new uses in
+# production code. Test code is carved out via crate-root `cfg_attr(test, allow)`
+# attributes and integration-test inner attributes. After a cleanup window these
+# will be raised to "deny".
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
 allow_attributes = "allow"
 result_large_err = "allow"
 dbg_macro = "deny"

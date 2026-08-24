@@ -3,8 +3,6 @@
 //! `onecipher backup export --out <path>`
 //! `onecipher backup import --in <path>`
 
-use std::os::unix::fs::PermissionsExt;
-
 use oc_vault::BackupContainer;
 
 use crate::CliError;
@@ -23,9 +21,10 @@ pub(crate) fn export(out: &str) -> Result<(), CliError> {
     let container = BackupContainer::export(&payload, &passphrase)?;
     let json = serde_json::to_string_pretty(&container)?;
 
-    std::fs::write(out, json)?;
-    // Enforce 0600 — the backup contains encrypted wallet material.
-    std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o600))?;
+    // H-02: atomic private write — the file is created 0600 from the start
+    // (no world-readable window) and cannot be observed torn. The backup
+    // contains encrypted wallet material.
+    oc_core::paths::write_atomic_private(std::path::Path::new(out), json.as_bytes())?;
 
     eprintln!(
         "backup exported {} wallet(s) to {out} (Argon2id + XChaCha20-Poly1305)",

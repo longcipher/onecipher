@@ -25,7 +25,8 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 │   ├── oc-signer/          # Multi-chain signing
 │   ├── oc-vault/           # Wallet vault (filesystem 700/600, .ocbk backup)
 │   ├── oc-wallet/          # Wallet operations (key store, policy, migration)
-│   └── oc-walletconnect/   # WalletConnect v2 protocol wrapper (relay, crypto)
+│   ├── oc-walletconnect/   # WalletConnect v2 protocol wrapper (relay, crypto)
+│   └── oc-webui/           # Web UI HTTP server (approval queue, WebAuthn auth, static dashboard)
 ├── docs/                   # Specification documents
 └── Cargo.toml              # Workspace root (pure [workspace] declaration)
 ```
@@ -44,10 +45,10 @@ deliberately disjoint — do NOT merge them and do NOT add cross-calls:
 
 | Crate | Owns | Format | Notes |
 |-------|------|--------|-------|
-| `oc-wallet::key_store` | API tokens (`oc_key_…`) | JSON, 0600 | Agent/CLI auth tokens; distinct from user secrets. |
+| `oc-wallet::key_store` | API tokens (`oc_key_…`) | JSON, 0600 | Agent/CLI auth tokens; agent-mode tokens additionally carry HKDF(token)-re-encrypted wallet-key copies (intentional design — NOT user secrets). |
 | `oc-secret` | User secrets (age-encrypted) + TOTP | age ciphertext | Never holds keys; keys live in `oc-vault`. |
 | `oc-vault` | Wallet keyfiles (encrypted mnemonics/keys) | age/JSON, 0700 dir / 0600 file, `.ocbk` backup | The persistence *format*; `oc-wallet::ops` is the *operation* layer that reads/writes it. |
-| `oc-wallet::policy_store` | Signed policy docs | JSON, 0600 | Policy rules only; counters live in `oc-policy` state. |
+| `oc-wallet::policy_store` | Signed policy docs | JSON, 0600 (+ `.sig` sidecar) | Policies are signed on save with a dedicated Ed25519 key (`policy_signing.key`); load verifies the sidecar `.sig` (fail-closed on mismatch; legacy unsigned files load with a loud warning). Counters live in `oc-policy` state. |
 
 Rule of thumb: `oc-vault` = *how* bytes are stored on disk; `oc-wallet` =
 *what* wallet operations do with them; `oc-secret` = *user* secrets (not

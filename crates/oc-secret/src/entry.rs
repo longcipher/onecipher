@@ -3,6 +3,7 @@
 use oc_core::{ItemType, SecretIndexEntry, SecretMetadata, SecretPayload};
 use oc_crypto::HardenedBytes;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::age::{self, AgeError, AgeIdentity};
 
@@ -55,8 +56,9 @@ impl SecretEntry {
         if name.trim().is_empty() {
             return Err(SecretEntryError::InvalidName("name must not be empty".into()));
         }
-        // Serialize payload to JSON, then encrypt with age.
-        let json = serde_json::to_vec(payload)?;
+        // Serialize payload to JSON, then encrypt with age. The plaintext
+        // JSON buffer is zeroized on drop.
+        let json = Zeroizing::new(serde_json::to_vec(payload)?);
         let ciphertext = age::encrypt_payload(&json, recipients)?;
         let now = jiff_now();
         Ok(Self {
@@ -80,7 +82,8 @@ impl SecretEntry {
         new_recipients: &[String],
     ) -> Result<(), SecretEntryError> {
         let payload = self.decrypt(old_identity)?;
-        let json = serde_json::to_vec(&payload)?;
+        // The re-serialized plaintext JSON is zeroized on drop.
+        let json = Zeroizing::new(serde_json::to_vec(&payload)?);
         self.ciphertext = age::encrypt_payload(&json, new_recipients)?;
         self.updated_at = jiff_now();
         Ok(())
@@ -92,12 +95,39 @@ impl SecretEntry {
     /// moment before JSON parsing, so the intermediate buffer is page-locked
     /// and zeroized on drop.
     pub fn decrypt(&self, identity: &AgeIdentity) -> Result<SecretPayload, SecretEntryError> {
-        let plaintext = age::decrypt_payload(&self.ciphertext, identity)?;
-        // Wrap the decrypted bytes in HardenedBytes for the brief moment
-        // before JSON parsing.
-        let hardened = HardenedBytes::from_vec(plaintext).map_err(SecretEntryError::from)?;
+        let mut plaintext = age::decrypt_payload(&self.ciphertext, identity)?;
+        // Transfer ownership into a page-locked buffer for the brief moment
+        // before JSON parsing (`mem::take` leaves an empty buffer in the
+        // guard; `HardenedBytes::from_vec` wipes the source).
+        let hardened = HardenedBytes::from_vec(std::mem::take(&mut *plaintext))
+            .map_err(SecretEntryError::from)?;
         let payload: SecretPayload = serde_json::from_slice(hardened.as_ref())?;
         Ok(payload)
+    }
+
+    /// Decrypt and return only the primary secret field.
+    ///
+    /// Unlike [`decrypt`](Self::decrypt), this never materializes the
+    /// optional `notes`/`extra` fields as plain owning values: the JSON is
+    /// parsed into a minimal view capturing just the `secret` string,
+    /// which is returned wrapped in [`Zeroizing`] (wiped on drop).
+    pub fn decrypt_secret(
+        &self,
+        identity: &AgeIdentity,
+    ) -> Result<Zeroizing<String>, SecretEntryError> {
+        /// Serde view capturing only the primary secret field.
+        #[derive(Deserialize)]
+        struct SecretFieldOnly {
+            secret: String,
+        }
+
+        let mut plaintext = age::decrypt_payload(&self.ciphertext, identity)?;
+        let hardened = HardenedBytes::from_vec(std::mem::take(&mut *plaintext))
+            .map_err(SecretEntryError::from)?;
+        let view: SecretFieldOnly = serde_json::from_slice(hardened.as_ref())?;
+        // Move the secret out of the view (nothing sensitive remains behind)
+        // and wrap it in a zeroizing owner.
+        Ok(Zeroizing::new(view.secret))
     }
 
     /// Build a plaintext [`SecretIndexEntry`] from this entry.
@@ -173,11 +203,32 @@ mod tests {
 
         assert_eq!(entry.name, "GitHub");
         assert_eq!(entry.item_type, ItemType::Password);
-        assert!(!entry.ciphertext.is_empty());
+        assert_ne!(entry.ciphertext.len(), 0);
 
         let decrypted = entry.decrypt(&id).unwrap();
         assert_eq!(decrypted.secret, "hunter2");
         assert_eq!(decrypted.notes.as_deref(), Some("note"));
+    }
+
+    #[test]
+    fn decrypt_secret_returns_only_primary_field() {
+        let (id, recipient_str) = recipient();
+        let payload = SecretPayload {
+            secret: "primary-secret".into(),
+            notes: Some("side note".into()),
+            extra: Some(serde_json::json!({"k": "v"})),
+        };
+        let entry = SecretEntry::new(
+            "hardened-getter",
+            ItemType::Password,
+            &payload,
+            SecretMetadata::default(),
+            &[recipient_str],
+        )
+        .unwrap();
+
+        let secret = entry.decrypt_secret(&id).unwrap();
+        assert_eq!(secret.as_str(), "primary-secret");
     }
 
     #[test]

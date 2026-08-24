@@ -17,7 +17,9 @@ use crate::{
 /// XRPL hash: the first 32 bytes of SHA-512 ("SHA512Half").
 fn sha512_half(data: &[u8]) -> [u8; 32] {
     let hash = Sha512::digest(data);
-    hash[..32].try_into().expect("SHA-512 output is always 64 bytes")
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&hash[..32]);
+    out
 }
 
 /// secp256k1 public key (33 bytes) — XRPL's `SigningPubKey` value.

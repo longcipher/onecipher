@@ -21,11 +21,35 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    OcPolicyError,
     native_strategy::{
         NoHostFacts, RegistryOutcome, StrategyEvalRequest, StrategyHost, StrategyRegistry,
     },
     v2::{Decision, DenyReason, PayRequest, PolicyState},
 };
+
+// ---------------------------------------------------------------------------
+// Resource limits (M-11)
+// ---------------------------------------------------------------------------
+
+/// Maximum accepted JSON input size for [`parse_policy_v3`] (M-11): 256 KiB.
+///
+/// Chosen so the byte cap alone bounds parse memory while still leaving room
+/// for the node-count cap to be the binding constraint on pathological trees
+/// (the smallest serializable condition node is ~28 bytes, so ~9k nodes fit in
+/// 256 KiB — [`MAX_RULE_NODES`] is set below that ceiling).
+pub const MAX_POLICY_JSON_BYTES: usize = 256 * 1024;
+
+/// Maximum number of rule-condition nodes per parsed policy (M-11).
+pub const MAX_RULE_NODES: usize = 8_192;
+
+/// Maximum recursion depth for condition-tree evaluation (M-11).
+///
+/// A tree deeper than this fails closed: the affected rule never matches for
+/// `Permit`, and any rule under evaluation at overflow aborts the whole v3
+/// evaluation with `Deny(Unknown)` so a deep `Forbid` can neither be bypassed
+/// nor blow the stack.
+pub const MAX_CONDITION_DEPTH: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Rule types
@@ -110,6 +134,14 @@ pub struct PolicyV3 {
 /// - If any `Permit` rules exist, at least one must match for the decision to remain `Allow`;
 ///   otherwise the decision is `Deny(Unknown)`.
 ///
+/// **Fail-closed rules (M-11):**
+/// - A condition tree deeper than [`MAX_CONDITION_DEPTH`] aborts evaluation of the whole rule set
+///   with `Deny(Unknown)` — never a stack overflow, never a silent skip of a `Forbid`.
+/// - A numeric comparison whose runtime operand is non-finite evaluates as *not matched* under
+///   `Permit`, but a `Forbid` whose comparison touches such an operand MATCHES (fires). This
+///   asymmetry is deliberate: NaN must never silently disable a prohibition, while it must also
+///   never grant a permission.
+///
 /// # Side effects
 ///
 /// To run the v2 flow, the v2 portion of `policy` is temporarily injected
@@ -129,9 +161,34 @@ pub fn evaluate_v3(policy: &PolicyV3, request: &PayRequest, state: &mut PolicySt
         return Decision::Deny(reason.clone());
     }
 
-    // Any matching Forbid rule overrides to Deny.
+    // Evaluate every rule once. A depth-cap overflow anywhere fails closed for
+    // the entire rule set (M-11).
+    let mut outcomes = Vec::with_capacity(policy.rules.len());
     for rule in &policy.rules {
-        if rule.effect == RuleEffect::Forbid && evaluate_condition(&rule.condition, request) {
+        let outcome = evaluate_condition_outcome(&rule.condition, request, 0);
+        if outcome == CondOutcome::DepthExceeded {
+            tracing::warn!(
+                target: "oc-policy::v3",
+                rule_id = %rule.id,
+                max_depth = MAX_CONDITION_DEPTH,
+                "condition tree exceeded recursion depth cap; failing closed"
+            );
+            return Decision::Deny(DenyReason::Unknown);
+        }
+        outcomes.push(outcome);
+    }
+
+    // Any matching Forbid rule overrides to Deny.
+    for (rule, outcome) in policy.rules.iter().zip(&outcomes) {
+        if rule.effect != RuleEffect::Forbid {
+            continue;
+        }
+        // M-11 fail-closed asymmetry: a Forbid whose numeric comparison reads a
+        // non-finite runtime value fires even though the raw comparison would
+        // evaluate false (NaN ordering/equality is always false).
+        let non_finite_hit = *outcome != CondOutcome::Matched &&
+            condition_touches_non_finite_number(&rule.condition, request);
+        if *outcome == CondOutcome::Matched || non_finite_hit {
             // R80 caps `DenyReason` at exactly 9 variants, so a dedicated
             // Cedar-rule deny reason is unavailable. Preserve the rule
             // identity in the structured log before returning Unknown.
@@ -150,8 +207,8 @@ pub fn evaluate_v3(policy: &PolicyV3, request: &PayRequest, state: &mut PolicySt
         let any_permit_matched = policy
             .rules
             .iter()
-            .filter(|r| r.effect == RuleEffect::Permit)
-            .any(|r| evaluate_condition(&r.condition, request));
+            .zip(&outcomes)
+            .any(|(r, o)| r.effect == RuleEffect::Permit && *o == CondOutcome::Matched);
         if !any_permit_matched {
             // No Permit rule matched. R80 has no Cedar-specific deny reason,
             // so log the context before returning Unknown.
@@ -174,26 +231,112 @@ pub fn evaluate_v3(policy: &PolicyV3, request: &PayRequest, state: &mut PolicySt
     v2_decision
 }
 
-/// Evaluate a condition tree against a request.
-fn evaluate_condition(condition: &RuleCondition, request: &PayRequest) -> bool {
+/// Outcome of evaluating one condition subtree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CondOutcome {
+    /// The condition matched.
+    Matched,
+    /// The condition did not match.
+    NotMatched,
+    /// The recursion-depth cap was hit; callers MUST fail closed.
+    DepthExceeded,
+}
+
+/// Evaluate a condition tree with an explicit recursion-depth budget (M-11).
+///
+/// `depth` counts composite-node nesting; leaves terminate the recursion. When
+/// `depth` reaches [`MAX_CONDITION_DEPTH`] the subtree reports
+/// [`CondOutcome::DepthExceeded`] instead of recursing further, so a hostile
+/// deep tree cannot overflow the stack.
+fn evaluate_condition_outcome(
+    condition: &RuleCondition,
+    request: &PayRequest,
+    depth: usize,
+) -> CondOutcome {
+    if depth >= MAX_CONDITION_DEPTH {
+        return CondOutcome::DepthExceeded;
+    }
     match condition {
-        RuleCondition::Always { value } => *value,
+        RuleCondition::Always { value } => {
+            if *value {
+                CondOutcome::Matched
+            } else {
+                CondOutcome::NotMatched
+            }
+        }
         RuleCondition::Comparison { field, operator, value } => {
             let field_value = get_field(request, field);
-            compare_values(&field_value, operator, value)
+            if compare_values(&field_value, operator, value) {
+                CondOutcome::Matched
+            } else {
+                CondOutcome::NotMatched
+            }
         }
         RuleCondition::Membership { field, values } => {
             let field_value = get_field(request, field);
-            values.iter().any(|v| v == &field_value)
+            if values.iter().any(|v| v == &field_value) {
+                CondOutcome::Matched
+            } else {
+                CondOutcome::NotMatched
+            }
         }
         RuleCondition::All { conditions } => {
-            conditions.iter().all(|c| evaluate_condition(c, request))
+            let mut result = CondOutcome::Matched;
+            for c in conditions {
+                match evaluate_condition_outcome(c, request, depth + 1) {
+                    CondOutcome::DepthExceeded => return CondOutcome::DepthExceeded,
+                    CondOutcome::NotMatched => result = CondOutcome::NotMatched,
+                    CondOutcome::Matched => {}
+                }
+            }
+            result
         }
         RuleCondition::Any { conditions } => {
-            conditions.iter().any(|c| evaluate_condition(c, request))
+            let mut result = CondOutcome::NotMatched;
+            for c in conditions {
+                match evaluate_condition_outcome(c, request, depth + 1) {
+                    CondOutcome::DepthExceeded => return CondOutcome::DepthExceeded,
+                    CondOutcome::Matched => result = CondOutcome::Matched,
+                    CondOutcome::NotMatched => {}
+                }
+            }
+            result
         }
-        RuleCondition::Not { condition } => !evaluate_condition(condition, request),
+        RuleCondition::Not { condition } => {
+            match evaluate_condition_outcome(condition, request, depth + 1) {
+                CondOutcome::DepthExceeded => CondOutcome::DepthExceeded,
+                CondOutcome::Matched => CondOutcome::NotMatched,
+                CondOutcome::NotMatched => CondOutcome::Matched,
+            }
+        }
     }
+}
+
+/// True if any `Comparison` node in the tree reads a numeric request field
+/// whose runtime value is non-finite (M-11).
+///
+/// Iterative walk with the same depth cap as evaluation; a depth overflow here
+/// simply stops the walk (it cannot claim a non-finite hit that was not seen).
+fn condition_touches_non_finite_number(condition: &RuleCondition, request: &PayRequest) -> bool {
+    let mut stack = vec![(condition, 0usize)];
+    while let Some((cond, depth)) = stack.pop() {
+        if depth >= MAX_CONDITION_DEPTH {
+            continue;
+        }
+        match cond {
+            RuleCondition::Comparison { field, .. } => {
+                if field == "amount_usd" && !request.amount_usd.is_finite() {
+                    return true;
+                }
+            }
+            RuleCondition::All { conditions } | RuleCondition::Any { conditions } => {
+                stack.extend(conditions.iter().map(|c| (c, depth + 1)));
+            }
+            RuleCondition::Not { condition } => stack.push((condition.as_ref(), depth + 1)),
+            RuleCondition::Membership { .. } | RuleCondition::Always { .. } => {}
+        }
+    }
+    false
 }
 
 /// Get a field value from a `PayRequest` as a JSON value.
@@ -214,11 +357,34 @@ fn get_field(request: &PayRequest, field: &str) -> serde_json::Value {
     }
 }
 
+/// Absolute tolerance for numeric equality comparisons (M-11).
+const NUM_ABS_EPSILON: f64 = 1e-9;
+
+/// Relative tolerance component for numeric equality comparisons (M-11).
+///
+/// The equality tolerance is `NUM_ABS_EPSILON.max(NUM_REL_EPSILON * max(|a|, |b|))`:
+/// an absolute floor for small magnitudes plus a relative term so large USD
+/// values (where 1 ULP already exceeds any absolute epsilon) still compare
+/// stably.
+const NUM_REL_EPSILON: f64 = 1e-9;
+
+/// Tolerant numeric equality (M-11).
+fn numbers_eq(a: f64, b: f64) -> bool {
+    (a - b).abs() <= NUM_ABS_EPSILON.max(NUM_REL_EPSILON * a.abs().max(b.abs()))
+}
+
 /// Compare two JSON values with the given operator.
 ///
 /// Numeric comparisons use `f64`. String comparisons support `==` / `!=`
 /// only; ordering operators on strings return `false`. Mismatched types
 /// return `false`.
+///
+/// **M-11 semantics:**
+/// - No silent coercion: operands that cannot be represented as `f64` make the comparison *not
+///   matched* instead of being substituted with `0.0`.
+/// - Non-finite operands compare as "not equal": `Eq` and all orderings return `false`, only `Ne`
+///   returns `true`. Rule-level fail-closed handling for `Forbid` lives in [`evaluate_v3`] /
+///   [`condition_touches_non_finite_number`].
 fn compare_values(
     actual: &serde_json::Value,
     op: &ComparisonOp,
@@ -226,11 +392,17 @@ fn compare_values(
 ) -> bool {
     match (actual, expected) {
         (serde_json::Value::Number(a), serde_json::Value::Number(e)) => {
-            let a = a.as_f64().unwrap_or(0.0);
-            let e = e.as_f64().unwrap_or(0.0);
+            // M-11: no fabricated 0.0 on conversion gaps — treat as not matched.
+            let (Some(a), Some(e)) = (a.as_f64(), e.as_f64()) else {
+                return false;
+            };
+            // Non-finite operands never compare equal or ordered ("not equal").
+            if !a.is_finite() || !e.is_finite() {
+                return matches!(op, ComparisonOp::Ne);
+            }
             match op {
-                ComparisonOp::Eq => (a - e).abs() < f64::EPSILON,
-                ComparisonOp::Ne => (a - e).abs() >= f64::EPSILON,
+                ComparisonOp::Eq => numbers_eq(a, e),
+                ComparisonOp::Ne => !numbers_eq(a, e),
                 ComparisonOp::Lt => a < e,
                 ComparisonOp::Le => a <= e,
                 ComparisonOp::Gt => a > e,
@@ -246,13 +418,59 @@ fn compare_values(
     }
 }
 
+/// Count rule-condition nodes across all rules, iteratively (M-11).
+///
+/// The walk is explicitly stack-based so counting a hostile tree cannot
+/// overflow the call stack either; returns early once [`MAX_RULE_NODES`] is
+/// exceeded.
+fn count_condition_nodes<'a>(rules: impl Iterator<Item = &'a PolicyRule>) -> usize {
+    let mut count = 0usize;
+    let mut stack: Vec<&RuleCondition> = rules.map(|r| &r.condition).collect();
+    while let Some(cond) = stack.pop() {
+        count += 1;
+        if count > MAX_RULE_NODES {
+            return count;
+        }
+        match cond {
+            RuleCondition::All { conditions } | RuleCondition::Any { conditions } => {
+                stack.extend(conditions.iter());
+            }
+            RuleCondition::Not { condition } => stack.push(condition.as_ref()),
+            RuleCondition::Comparison { .. } |
+            RuleCondition::Membership { .. } |
+            RuleCondition::Always { .. } => {}
+        }
+    }
+    count
+}
+
 /// Parse a Cedar-like v3 policy from JSON.
+///
+/// **Resource limits (M-11):** input larger than [`MAX_POLICY_JSON_BYTES`] or a
+/// condition tree with more than [`MAX_RULE_NODES`] nodes is rejected with
+/// [`OcPolicyError::InvalidInput`] before evaluation, bounding both parse
+/// memory and evaluation cost. (serde_json's own 128-level recursion limit
+/// already bounds deserialization depth.)
 ///
 /// # Errors
 ///
-/// Returns `serde_json::Error` if `json` is not a valid `PolicyV3`.
-pub fn parse_policy_v3(json: &str) -> Result<PolicyV3, serde_json::Error> {
-    serde_json::from_str(json)
+/// Returns [`OcPolicyError::Serde`] if `json` is not a valid `PolicyV3`, and
+/// [`OcPolicyError::InvalidInput`] if a resource limit is exceeded.
+pub fn parse_policy_v3(json: &str) -> Result<PolicyV3, OcPolicyError> {
+    if json.len() > MAX_POLICY_JSON_BYTES {
+        return Err(OcPolicyError::InvalidInput(format!(
+            "policy JSON exceeds maximum size: {} bytes > {MAX_POLICY_JSON_BYTES}",
+            json.len()
+        )));
+    }
+    let policy: PolicyV3 = serde_json::from_str(json)?;
+    let nodes = count_condition_nodes(policy.rules.iter());
+    if nodes > MAX_RULE_NODES {
+        return Err(OcPolicyError::InvalidInput(format!(
+            "policy exceeds maximum rule-node count: {nodes} > {MAX_RULE_NODES}"
+        )));
+    }
+    Ok(policy)
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +1104,168 @@ mod tests {
         // amount_usd = 5.0 > 4.0 => forbid matches => deny
         let decision = evaluate_v3(&policy, &test_request(), &mut state);
         assert_eq!(decision, Decision::Deny(DenyReason::Unknown));
+    }
+
+    // --- M-11: parse resource limits ----------------------------------------
+
+    #[test]
+    fn parse_rejects_oversized_input() {
+        let oversized = " ".repeat(MAX_POLICY_JSON_BYTES + 1);
+        let err = parse_policy_v3(&oversized).unwrap_err();
+        assert!(
+            matches!(err, OcPolicyError::InvalidInput(ref m) if m.contains("maximum size")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// Build a v3 policy JSON whose single rule is an `All` over `n` leaf
+    /// nodes. Total node count is `n + 1` (the root `All` counts too).
+    fn policy_json_with_nodes(n: usize) -> String {
+        let cond =
+            RuleCondition::All { conditions: vec![RuleCondition::Always { value: true }; n] };
+        let policy = v3_policy(vec![forbid("bulk", cond)]);
+        serde_json::to_string(&policy).unwrap()
+    }
+
+    #[test]
+    fn parse_rejects_excessive_rule_node_count() {
+        // MAX_RULE_NODES + 1 total nodes: ~230 KB, under the byte cap, over
+        // the node cap.
+        let json = policy_json_with_nodes(MAX_RULE_NODES);
+        assert!(json.len() <= MAX_POLICY_JSON_BYTES, "test payload must hit the node cap first");
+        let err = parse_policy_v3(&json).unwrap_err();
+        assert!(
+            matches!(err, OcPolicyError::InvalidInput(ref m) if m.contains("rule-node count")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_policy_at_node_cap_boundary() {
+        // Root All + (MAX_RULE_NODES - 1) leaves == exactly MAX_RULE_NODES.
+        let json = policy_json_with_nodes(MAX_RULE_NODES - 1);
+        let policy = parse_policy_v3(&json).unwrap();
+        assert_eq!(policy.rules.len(), 1);
+    }
+
+    // --- M-11: recursion depth cap -------------------------------------------
+
+    /// Wrap `inner` in `depth` layers of `Not`.
+    fn nest_not(depth: usize, inner: RuleCondition) -> RuleCondition {
+        let mut cond = inner;
+        for _ in 0..depth {
+            cond = RuleCondition::Not { condition: Box::new(cond) };
+        }
+        cond
+    }
+
+    #[test]
+    fn deep_condition_tree_fails_closed_instead_of_overflowing() {
+        // NOT^100(Always(false)): if this were evaluable, 100 even flips yield
+        // false and the forbid would NOT fire (Allow). The depth cap must turn
+        // it into a fail-closed deny instead of a stack overflow.
+        let cond = nest_not(100, RuleCondition::Always { value: false });
+        let policy = v3_policy(vec![forbid("deep", cond)]);
+        let mut state = fresh_state();
+        let decision = evaluate_v3(&policy, &test_request(), &mut state);
+        assert_eq!(decision, Decision::Deny(DenyReason::Unknown));
+    }
+
+    #[test]
+    fn condition_just_under_depth_cap_still_evaluates() {
+        // NOT^10(Always(false)) => false => forbid does not fire => Allow.
+        let cond = nest_not(10, RuleCondition::Always { value: false });
+        let policy = v3_policy(vec![forbid("shallow", cond)]);
+        let mut state = fresh_state();
+        let decision = evaluate_v3(&policy, &test_request(), &mut state);
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn depth_exceeded_propagates_through_composites() {
+        let request = test_request();
+        let deep = || nest_not(MAX_CONDITION_DEPTH + 10, RuleCondition::Always { value: true });
+        // Inside All: any DepthExceeded child poisons the whole All.
+        let all =
+            RuleCondition::All { conditions: vec![RuleCondition::Always { value: true }, deep()] };
+        assert_eq!(evaluate_condition_outcome(&all, &request, 0), CondOutcome::DepthExceeded);
+        // Inside Any.
+        let any =
+            RuleCondition::Any { conditions: vec![RuleCondition::Always { value: false }, deep()] };
+        assert_eq!(evaluate_condition_outcome(&any, &request, 0), CondOutcome::DepthExceeded);
+        // Inside Not.
+        assert_eq!(
+            evaluate_condition_outcome(
+                &RuleCondition::Not { condition: Box::new(deep()) },
+                &request,
+                0
+            ),
+            CondOutcome::DepthExceeded
+        );
+    }
+
+    // --- M-11: non-finite numeric operands fail closed -----------------------
+
+    #[test]
+    fn forbid_touching_non_finite_amount_fires() {
+        let mut req = test_request();
+        req.amount_usd = f64::NAN;
+        let cond = cmp("amount_usd", ComparisonOp::Gt, serde_json::json!(1.0));
+        // Raw comparison is false (NaN field serializes to Null), but the
+        // fail-closed detector flags it, so evaluate_v3's forbid loop fires.
+        assert_eq!(evaluate_condition_outcome(&cond, &req, 0), CondOutcome::NotMatched);
+        assert!(condition_touches_non_finite_number(&cond, &req));
+
+        // Finite amounts are not flagged.
+        let finite_req = test_request();
+        assert!(!condition_touches_non_finite_number(&cond, &finite_req));
+
+        // Non-numeric fields are not flagged even with a NaN amount.
+        let asset_cond = cmp("asset", ComparisonOp::Eq, serde_json::json!("USDC"));
+        assert!(!condition_touches_non_finite_number(&asset_cond, &req));
+    }
+
+    #[test]
+    fn permit_with_non_finite_amount_does_not_match() {
+        // Asymmetry (documented on evaluate_v3): the same non-finite comparison
+        // that fires a Forbid does NOT satisfy a Permit.
+        let mut req = test_request();
+        req.amount_usd = f64::INFINITY;
+        let cond = cmp("amount_usd", ComparisonOp::Gt, serde_json::json!(1.0));
+        assert_eq!(evaluate_condition_outcome(&cond, &req, 0), CondOutcome::NotMatched);
+    }
+
+    // --- M-11: numeric comparison semantics ----------------------------------
+
+    #[test]
+    fn numeric_equality_uses_mixed_absolute_relative_tolerance() {
+        // Within the absolute floor.
+        assert!(numbers_eq(1.0, 1.0 + 5e-10));
+        // Clearly different.
+        assert!(!numbers_eq(1.0, 1.1));
+        // Large magnitudes: relative term covers what f64::EPSILON could not.
+        assert!(numbers_eq(1e12, 1e12 + 0.5));
+        // ...but only up to the tolerance.
+        assert!(!numbers_eq(1e12, 1e12 + 1e4));
+    }
+
+    #[test]
+    fn out_of_range_integers_are_not_coerced_to_zero() {
+        // Old code did `as_f64().unwrap_or(0.0)`; a conversion gap must now be
+        // "not matched" rather than silently comparing against 0.0. Large ints
+        // keep their real magnitude.
+        let big = serde_json::json!(18_446_744_073_709_551_615u64);
+        assert!(compare_values(&big, &ComparisonOp::Ge, &serde_json::json!(1e18)));
+        assert!(!compare_values(&big, &ComparisonOp::Le, &serde_json::json!(1e18)));
+    }
+
+    #[test]
+    fn non_finite_operand_compares_as_not_equal() {
+        // Defensive: serde_json Numbers cannot hold NaN/inf today, but if a
+        // non-finite f64 ever reaches comparison it must behave as "not equal"
+        // (Ne true, everything else false) rather than by accident.
+        assert!(!numbers_eq(f64::NAN, f64::NAN));
+        assert!(!numbers_eq(f64::INFINITY, f64::INFINITY));
     }
 
     // --- Strategy registry integration -------------------------------------

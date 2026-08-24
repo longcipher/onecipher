@@ -627,7 +627,7 @@ mod tests {
         match result {
             Ok(send_result) => {
                 // Unlikely (unfunded) but fine
-                assert!(!send_result.tx_hash.is_empty());
+                assert_ne!(send_result.tx_hash.len(), 0);
             }
             Err(e) => {
                 let err_str = format!("{e}");

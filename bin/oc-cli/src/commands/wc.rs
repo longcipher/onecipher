@@ -112,11 +112,12 @@ pub(crate) fn connect(uri_str: &str) -> Result<(), CliError> {
     let uri = PairingUri::parse(uri_str)
         .map_err(|e| CliError::InvalidArgs(format!("invalid WC pairing URI: {e}")))?;
 
-    // Persist to file (durability — daemon loads on next start if not running now)
+    // Persist to file (durability — daemon loads on next start if not running now).
+    // H-02: the stored pairing carries WC key material — atomic private write.
     let pairing = StoredPairing::from(&uri);
     let path = data_dir()?.join("wc_dapp.json");
     let json = serde_json::to_string_pretty(&pairing)?;
-    fs::write(&path, json)?;
+    oc_core::paths::write_atomic_private(&path, json.as_bytes())?;
 
     // Send to daemon control socket for immediate pairing
     let ctrl_sock = control_socket_path();

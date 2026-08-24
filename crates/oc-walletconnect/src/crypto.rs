@@ -143,7 +143,10 @@ pub fn derive_sym_key(shared_secret: &WcSharedSecret) -> WcSymKey {
     let salt = [0u8; 32];
     let hk = Hkdf::<Sha256>::new(Some(&salt), shared_secret.as_bytes());
     let mut okm = [0u8; KEY_LENGTH];
-    // KEY_LENGTH (32) is within HKDF-SHA256's 255*32 output limit.
+    // KEY_LENGTH (32) is within HKDF-SHA256's 255*32 output limit, so expand
+    // cannot fail (RFC 5869). The signature mirrors the official TS client,
+    // which returns the key directly rather than a Result.
+    #[allow(clippy::expect_used)] // provably infallible per RFC 5869 output-length bound
     hk.expand(&[], &mut okm).expect("hkdf expand to 32 bytes cannot fail");
     WcSymKey::from_bytes(okm)
 }
@@ -344,6 +347,9 @@ impl WcCipher {
 
 /// HMAC-SHA256 — returns 32-byte tag.
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    // HMAC accepts keys of any length (RFC 2104), so new_from_slice cannot
+    // fail here.
+    #[allow(clippy::expect_used)] // provably infallible: HMAC takes arbitrary-length keys
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("hmac accepts any key size");
     mac.update(data);
     mac.finalize().into_bytes().into()

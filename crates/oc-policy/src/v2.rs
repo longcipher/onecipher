@@ -6,7 +6,12 @@
 
 use std::{
     collections::VecDeque,
-    path::Path,
+    io::Write,
+    path::{Path, PathBuf},
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -75,7 +80,15 @@ pub struct BudgetAllocation {
 // Decision + DenyReason (R80)
 // ---------------------------------------------------------------------------
 
-/// Deny reasons (R80 — exactly 9 variants).
+/// Deny reasons (R80 — 9 protocol variants + `InvalidAmount`).
+///
+/// **Deviation note:** R80 originally capped this enum at exactly 9 variants
+/// and the Key-Agent protobuf enum still mirrors those 9. `InvalidAmount`
+/// (C-02) is added as a local, fail-closed input-validation reason: a request
+/// whose `amount_usd` is NaN/±inf/negative must never reach the budget gates,
+/// because NaN fails every f64 comparison and would otherwise evaluate to
+/// ALLOW while poisoning the persisted spend counter. Wire mappers that do not
+/// know the variant fall back to their existing catch-all (`Unknown`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DenyReason {
@@ -88,6 +101,8 @@ pub enum DenyReason {
     PolicyMissing,
     Cooldown,
     Unknown,
+    /// `amount_usd` was non-finite or negative (C-02). Fail-closed.
+    InvalidAmount,
 }
 
 /// Evaluation outcome.
@@ -219,6 +234,28 @@ impl std::fmt::Debug for PolicyState {
     }
 }
 
+/// Process-global lock serializing [`PolicyState::persist`] calls (M-10).
+///
+/// See `PolicyState::persist` for why a process-global lock was chosen over a
+/// per-state mutex.
+static PERSIST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Build a unique temp-file path next to `path` (M-10).
+///
+/// Deterministic names (`path.json.tmp`) collide under concurrent persists and
+/// interleave writes; pid + nanos + a process-local monotonic counter makes
+/// collisions practically impossible even within the same nanosecond.
+fn unique_tmp_path(path: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let mut name = path
+        .file_name()
+        .map_or_else(|| "policy_state.json".to_string(), |n| n.to_string_lossy().into_owned());
+    name.push_str(&format!(".{}.{}.{}.tmp", std::process::id(), nanos, seq));
+    path.with_file_name(name)
+}
+
 impl PolicyState {
     /// Create a fresh state with zero counters and the default `LogAlertSink`.
     pub fn new(session_key_id: String) -> Self {
@@ -286,9 +323,25 @@ impl PolicyState {
 
     /// Persist state to `path` with fsync + atomic rename (AD-04).
     ///
-    /// Writes to a temp file in the same directory, fsyncs, sets 0600 perms,
-    /// then atomically renames to `path`. Parent dirs are created with 0700 perms.
+    /// Writes to a **unique** temp file in the same directory (pid + nanos +
+    /// process-local counter — M-10), created directly with 0600 perms, fsyncs
+    /// the file, atomically renames it onto `path`, then fsyncs the parent
+    /// directory so the rename itself is crash-durable. Parent dirs are created
+    /// with 0700 perms. On any failure after temp-file creation the temp file is
+    /// removed and `path` is left untouched.
+    ///
+    /// **Concurrency:** persists are serialized by a process-global mutex
+    /// ([`PERSIST_LOCK`]). A process-global lock was chosen over a per-state
+    /// `Mutex` because `persist(&self)` takes only `&self` (callers may share a
+    /// state across threads) and because two *distinct* states persisted to the
+    /// same path must also not interleave; the global lock covers both without
+    /// changing any public API shape. Multi-*process* access to the same state
+    /// file still requires external synchronization.
     pub fn persist(&self, path: &Path) -> Result<(), OcPolicyError> {
+        let _guard = PERSIST_LOCK.lock().map_err(|_| {
+            OcPolicyError::InvalidInput("policy state persist lock poisoned".into())
+        })?;
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
             #[cfg(unix)]
@@ -298,29 +351,68 @@ impl PolicyState {
             }
         }
 
-        let tmp = path.with_extension("json.tmp");
+        let tmp = unique_tmp_path(path);
         let json = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&tmp, json)?;
 
-        // fsync the temp file before rename (crash safety)
-        let f = std::fs::File::open(&tmp)?;
-        f.sync_all()?;
-        drop(f);
+        let write_result: Result<(), OcPolicyError> = (|| {
+            // Create the temp file exclusively with 0600 from the start so no
+            // world-readable window exists (M-10).
+            #[cfg(unix)]
+            let mut f = {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?
+            };
+            #[cfg(not(unix))]
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
 
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+            f.write_all(&json)?;
+            // fsync the temp file before rename (crash safety).
+            f.sync_all()?;
+            drop(f);
+
+            std::fs::rename(&tmp, path)?;
+
+            // M-10: fsync the parent directory so the rename is durable across
+            // crashes. Best-effort: after a successful rename the data is
+            // already in place, so a dir-fsync failure is logged, not fatal.
+            if let Some(parent) = path.parent() &&
+                let Ok(dir) = std::fs::File::open(parent)
+            {
+                if let Err(e) = dir.sync_all() {
+                    tracing::warn!(
+                        target: "oc-policy::v2",
+                        error = %e,
+                        "parent dir fsync failed after rename; rename may not be crash-durable"
+                    );
+                }
+            }
+            Ok(())
+        })();
+
+        if write_result.is_err() {
+            // Best-effort cleanup; never mask the original error.
+            let _ = std::fs::remove_file(&tmp);
         }
-
-        std::fs::rename(&tmp, path)?;
-        Ok(())
+        write_result
     }
 
     /// Record an ALLOW decision: increment `local_spent`, push to sliding windows
     /// (minutely/hourly timestamps + daily/monthly (timestamp, amount) pairs),
     /// reset `consecutive_deny_counter` and `last_deny_reasons`.
+    ///
+    /// **C-02 defensive second layer:** a non-finite or negative amount is
+    /// ignored entirely (no spend increment, no window entries) so it can never
+    /// decrease or poison the persisted counters. The 11-step entry point
+    /// already denies such requests before this is reachable.
     pub fn record_allow(&mut self, req: &PayRequest, now_ms: u64) {
+        if !is_valid_amount(req.amount_usd) {
+            tracing::warn!(
+                target: "oc-policy::v2",
+                amount = req.amount_usd,
+                "record_allow called with invalid amount; counters left untouched"
+            );
+            return;
+        }
         self.local_spent_usd += req.amount_usd;
         self.minutely_window.push_back(now_ms);
         self.hourly_window.push_back(now_ms);
@@ -355,7 +447,13 @@ impl PolicyState {
         prior_counter: u32,
         prior_reasons: Vec<DenyReason>,
     ) {
-        self.local_spent_usd = (self.local_spent_usd - req.amount_usd).max(0.0);
+        // C-02: never apply arithmetic with an invalid amount (NaN would poison
+        // the counter; negative would inflate it). The matching window entries
+        // were never pushed by `record_allow` for such amounts, so the pops
+        // below are naturally no-ops.
+        if is_valid_amount(req.amount_usd) {
+            self.local_spent_usd = (self.local_spent_usd - req.amount_usd).max(0.0);
+        }
         if self.minutely_window.back() == Some(&now_ms) {
             self.minutely_window.pop_back();
         }
@@ -461,6 +559,15 @@ fn slide_all_windows(state: &mut PolicyState, now_ms: u64) {
 /// from accumulated rounding errors (M-01).
 const USD_EPSILON: f64 = 1e-9;
 
+/// A payment amount is valid only if finite and non-negative (C-02).
+///
+/// NaN fails every f64 comparison, so an unvalidated NaN amount would pass all
+/// budget gates (fail-open) and poison every counter it touches; negative
+/// amounts would *decrease* spend. Both are rejected before any state mutation.
+fn is_valid_amount(amount: f64) -> bool {
+    amount.is_finite() && amount >= 0.0
+}
+
 // ---------------------------------------------------------------------------
 // 11-step evaluation — each step is a named function (Readability Priorities)
 // ---------------------------------------------------------------------------
@@ -542,11 +649,22 @@ fn step_7_check_rate_limit_hour(state: &PolicyState, policy: &PolicyV2) -> Resul
 }
 
 /// Step 8: Check pessimistic budget. `local_spent + amount > allocated` → `BudgetExceeded`.
+///
+/// **C-02 fail-closed semantics:** a poisoned counter (non-finite or negative
+/// `local_spent_usd`) or a non-finite allocation means available headroom
+/// cannot be proven, so the gate denies instead of trusting the comparison.
+/// This is what keeps a corrupted persisted state from becoming a permanent
+/// unlimited-spend condition.
 fn step_8_check_budget(
     state: &PolicyState,
     policy: &PolicyV2,
     req: &PayRequest,
 ) -> Result<(), DenyReason> {
+    if !is_valid_amount(state.local_spent_usd) ||
+        !policy.budget_allocation.allocated_usd.is_finite()
+    {
+        return Err(DenyReason::BudgetExceeded);
+    }
     if state.local_spent_usd + req.amount_usd > policy.budget_allocation.allocated_usd + USD_EPSILON
     {
         return Err(DenyReason::BudgetExceeded);
@@ -555,13 +673,19 @@ fn step_8_check_budget(
 }
 
 /// Step 8a: Check daily cumulative. `sum(daily_window.amounts) + req.amount > max_daily`
-/// → `BudgetExceeded`.
+/// → `BudgetExceeded`. Poisoned (non-finite/negative) sums or limits deny (C-02).
 fn step_8a_check_daily_cumulative(
     state: &PolicyState,
     policy: &PolicyV2,
     req: &PayRequest,
 ) -> Result<(), DenyReason> {
     let daily_spent: f64 = state.daily_window.iter().map(|(_, a)| a).sum();
+    if !daily_spent.is_finite() ||
+        daily_spent < 0.0 ||
+        !policy.rules.max_daily_amount_usd.is_finite()
+    {
+        return Err(DenyReason::BudgetExceeded);
+    }
     if daily_spent + req.amount_usd > policy.rules.max_daily_amount_usd + USD_EPSILON {
         return Err(DenyReason::BudgetExceeded);
     }
@@ -569,13 +693,19 @@ fn step_8a_check_daily_cumulative(
 }
 
 /// Step 8b: Check monthly cumulative. `sum(monthly_window.amounts) + req.amount > max_monthly`
-/// → `BudgetExceeded`.
+/// → `BudgetExceeded`. Poisoned (non-finite/negative) sums or limits deny (C-02).
 fn step_8b_check_monthly_cumulative(
     state: &PolicyState,
     policy: &PolicyV2,
     req: &PayRequest,
 ) -> Result<(), DenyReason> {
     let monthly_spent: f64 = state.monthly_window.iter().map(|(_, a)| a).sum();
+    if !monthly_spent.is_finite() ||
+        monthly_spent < 0.0 ||
+        !policy.rules.max_monthly_amount_usd.is_finite()
+    {
+        return Err(DenyReason::BudgetExceeded);
+    }
     if monthly_spent + req.amount_usd > policy.rules.max_monthly_amount_usd + USD_EPSILON {
         return Err(DenyReason::BudgetExceeded);
     }
@@ -587,8 +717,11 @@ fn step_8b_check_monthly_cumulative(
 /// Single-amount exceed IS a budget violation, not a whitelist violation.
 /// R80 caps `DenyReason` at exactly 9 variants; `BudgetExceeded` is reused
 /// for single-payment cap violations (feature-file term `AMOUNT_EXCEEDED`).
+/// A non-finite limit denies (C-02): `NaN > x` is false and would fail open.
 fn step_9_check_single_amount(policy: &PolicyV2, req: &PayRequest) -> Result<(), DenyReason> {
-    if req.amount_usd > policy.rules.max_single_amount_usd {
+    if !policy.rules.max_single_amount_usd.is_finite() ||
+        req.amount_usd > policy.rules.max_single_amount_usd
+    {
         return Err(DenyReason::BudgetExceeded);
     }
     Ok(())
@@ -618,6 +751,11 @@ fn step_11_deny(
 /// named function. The caller persists counters via `state.persist(path)` after
 /// this returns.
 ///
+/// **Step 1 (C-02):** `req.amount_usd` is validated (finite AND >= 0) before
+/// any state mutation; invalid amounts return `Deny(InvalidAmount)` without
+/// touching counters or windows. This runs even before the policy lookup so a
+/// malformed amount can never reach the budget arithmetic.
+///
 /// **Naming note (L5):** the flow is historically called "11-step" but actually
 /// performs **12 checks** — `step_8` (per-tx budget) is followed by `step_8a`
 /// (daily cumulative) and `step_8b` (monthly cumulative). The step numbers are
@@ -631,6 +769,17 @@ pub fn evaluate_11_step(
     // Resolve "now" — use override for testing, else SystemTime::now()
     let now_unix = state.now_override.unwrap_or_else(current_unix);
     let now_ms = now_unix.saturating_mul(1000);
+
+    // Step 1: validate the amount BEFORE any state mutation (C-02).
+    if !is_valid_amount(req.amount_usd) {
+        tracing::warn!(
+            target: "oc-policy::v2",
+            amount = req.amount_usd,
+            session_key_id = %session_key_id,
+            "pay request rejected: amount_usd must be finite and non-negative"
+        );
+        return step_11_deny(state, DenyReason::InvalidAmount, session_key_id, now_ms);
+    }
 
     // Slide rate-limit windows before checks
     slide_all_windows(state, now_ms);
@@ -1180,6 +1329,97 @@ mod tests {
         assert_eq!(d3, Decision::Deny(DenyReason::BudgetExceeded));
     }
 
+    // --- Step 1: invalid amounts (C-02) ---
+
+    #[test]
+    fn test_evaluate_nan_amount_denied_counter_unchanged() {
+        let mut state = fresh_state();
+        let mut req = test_request();
+        req.amount_usd = f64::NAN;
+        let decision = evaluate_11_step(&req, "sk-test", &mut state);
+        assert_eq!(decision, Decision::Deny(DenyReason::InvalidAmount));
+        // No state mutation: no spend, no rate-limit slots consumed.
+        assert_eq!(state.local_spent_usd, 0.0);
+        assert!(state.minutely_window.is_empty());
+        assert!(state.daily_window.is_empty());
+        assert!(state.monthly_window.is_empty());
+    }
+
+    #[test]
+    fn test_evaluate_negative_amount_denied() {
+        let mut state = fresh_state();
+        let mut req = test_request();
+        req.amount_usd = -5.0;
+        let decision = evaluate_11_step(&req, "sk-test", &mut state);
+        assert_eq!(decision, Decision::Deny(DenyReason::InvalidAmount));
+        assert_eq!(state.local_spent_usd, 0.0);
+    }
+
+    #[test]
+    fn test_evaluate_infinite_amount_denied() {
+        for amount in [f64::INFINITY, f64::NEG_INFINITY] {
+            let mut state = fresh_state();
+            let mut req = test_request();
+            req.amount_usd = amount;
+            let decision = evaluate_11_step(&req, "sk-test", &mut state);
+            assert_eq!(decision, Decision::Deny(DenyReason::InvalidAmount));
+            assert_eq!(state.local_spent_usd, 0.0);
+        }
+    }
+
+    #[test]
+    fn test_evaluate_zero_amount_still_allowed() {
+        let mut state = fresh_state();
+        let mut req = test_request();
+        req.amount_usd = 0.0;
+        let decision = evaluate_11_step(&req, "sk-test", &mut state);
+        assert_eq!(decision, Decision::Allow);
+        assert_eq!(state.local_spent_usd, 0.0);
+    }
+
+    /// C-02 recovery: a state whose spend counter was poisoned in memory must
+    /// be denied safely instead of evaluating to ALLOW.
+    ///
+    /// Fail-closed semantics: a non-finite or negative `local_spent_usd` cannot
+    /// prove budget headroom, so step 8 denies with `BudgetExceeded` rather
+    /// than trusting the comparison. (Such a state cannot arise from our own
+    /// JSON persistence — serde_json writes non-finite floats as `null`, which
+    /// fails deserialization into `f64` — but in-memory corruption or external
+    /// writers are still defended against.)
+    #[test]
+    fn test_poisoned_spent_counter_fails_closed() {
+        for poisoned in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -100.0] {
+            let mut state = fresh_state();
+            state.local_spent_usd = poisoned;
+            let decision = evaluate_11_step(&test_request(), "sk-test", &mut state);
+            assert_eq!(
+                decision,
+                Decision::Deny(DenyReason::BudgetExceeded),
+                "poisoned spent {poisoned} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_record_allow_ignores_invalid_amounts() {
+        let mut state = fresh_state();
+        let mut req = test_request();
+        req.amount_usd = f64::NAN;
+        state.record_allow(&req, 1_000_000_000);
+        assert_eq!(state.local_spent_usd, 0.0);
+        assert!(state.minutely_window.is_empty());
+        assert!(state.daily_window.is_empty());
+
+        req.amount_usd = -1.0;
+        state.record_allow(&req, 1_000_000_000);
+        assert_eq!(state.local_spent_usd, 0.0);
+
+        // Valid amounts still count.
+        req.amount_usd = 5.0;
+        state.record_allow(&req, 1_000_000_000);
+        assert_eq!(state.local_spent_usd, 5.0);
+    }
+
     // --- Sliding window ---
 
     #[test]
@@ -1300,6 +1540,49 @@ mod tests {
                 std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode();
             assert_eq!(parent_mode & 0o777, 0o700, "parent dir should have 0700 perms");
         }
+    }
+
+    /// M-10: two threads persisting different states to the same path must
+    /// never corrupt the file — it always parses and always contains exactly
+    /// one writer's state, with no temp files leaked.
+    #[test]
+    fn test_persist_concurrent_threads_file_always_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("concurrent.json");
+
+        let mut state_a = fresh_state();
+        state_a.local_spent_usd = 1.0;
+        let mut state_b = fresh_state();
+        state_b.local_spent_usd = 2.0;
+
+        let path_b = path.clone();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..50 {
+                    state_a.persist(&path).unwrap();
+                }
+            });
+            scope.spawn(|| {
+                for _ in 0..50 {
+                    state_b.persist(&path_b).unwrap();
+                }
+            });
+        });
+
+        // No temp files may leak.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
+
+        let loaded = PolicyState::load(&path, "sk-test".into()).unwrap();
+        assert!(
+            loaded.local_spent_usd == 1.0 || loaded.local_spent_usd == 2.0,
+            "final file must be exactly one writer's state, got {}",
+            loaded.local_spent_usd
+        );
     }
 
     // --- proptest on 11-step state transitions ---

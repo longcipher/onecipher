@@ -11,17 +11,35 @@ use oc_core::{
 use tokio::sync::{broadcast, mpsc, oneshot};
 use uuid::Uuid;
 
-/// Error returned when an approval has already been resolved.
+/// Error returned when submitting a decision fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AlreadyResolved;
+pub enum ResolveError {
+    /// The approval was already resolved (or never existed) — 409 Conflict.
+    AlreadyResolved,
+    /// The approval's TTL elapsed before a decision arrived — 410 Gone.
+    ApprovalExpired,
+}
 
-impl std::fmt::Display for AlreadyResolved {
+impl std::fmt::Display for ResolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("approval already resolved")
+        f.write_str(match self {
+            Self::AlreadyResolved => "approval already resolved",
+            Self::ApprovalExpired => "approval expired",
+        })
     }
 }
 
-impl std::error::Error for AlreadyResolved {}
+impl std::error::Error for ResolveError {}
+
+/// Outcome of a successful decision submission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveOutcome {
+    /// The decision was forwarded to the original requester (which will sign).
+    Delivered,
+    /// The entry was a replayed orphan with no requester attached — the
+    /// decision cleared the queue but nothing was signed.
+    Stale,
+}
 
 /// WebSocket event broadcast to connected clients.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -29,6 +47,14 @@ impl std::error::Error for AlreadyResolved {}
 pub enum WsEvent {
     PendingApproval { approval: Box<PendingApproval> },
     ApprovalResolved { id: Uuid, decision: ApprovalDecision },
+}
+
+/// Current unix time in seconds (0 if the clock is before the epoch).
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
 }
 
 /// Entry in the pending approvals map.
@@ -83,37 +109,66 @@ impl ApprovalQueue {
 
     /// Submit a decision for a pending approval.
     ///
-    /// Returns `Ok(())` if the decision was accepted, or `Err(AlreadyResolved)`
-    /// if the approval was already resolved (409 Conflict).
-    pub fn resolve(&self, id: Uuid, decision: ApprovalDecision) -> Result<(), AlreadyResolved> {
-        let entry = self.pending.remove(&id);
-        match entry {
-            Some((_, mut entry)) => {
-                if let Some(tx) = entry.resp_tx.take() {
-                    let _ = tx.send(decision.clone());
-                }
-                // Broadcast resolved event
-                let _ =
-                    self.ws_tx.send(WsEvent::ApprovalResolved { id, decision: decision.clone() });
-                // Persist the resolution for crash recovery.
-                if let Some(log) = &self.log {
-                    let (decision_str, reason) = match &decision {
-                        ApprovalDecision::Approve => ("approved", String::new()),
-                        ApprovalDecision::Reject { reason } => ("rejected", reason.clone()),
-                        ApprovalDecision::Timeout => ("timeout", String::new()),
-                    };
-                    if let Err(e) = log.append_resolved(id, decision_str, &reason) {
-                        tracing::warn!(error = %e, "failed to log resolved approval");
-                    }
-                }
-                Ok(())
+    /// Expiry is checked first: a decision arriving after
+    /// `expires_at_unix` is rejected with [`ResolveError::ApprovalExpired`]
+    /// and the entry is removed (the requester is told the request timed out).
+    ///
+    /// Returns the outcome on success, or [`ResolveError::AlreadyResolved`]
+    /// if the approval was already resolved or never existed.
+    pub fn resolve(
+        &self,
+        id: Uuid,
+        decision: ApprovalDecision,
+    ) -> Result<ResolveOutcome, ResolveError> {
+        let Some((_, mut entry)) = self.pending.remove(&id) else {
+            return Err(ResolveError::AlreadyResolved);
+        };
+
+        // Fail closed: a late decision on an expired approval must never
+        // reach the signer. The requester learns nothing was signed.
+        if unix_now() >= entry.approval.expires_at_unix {
+            if let Some(tx) = entry.resp_tx.take() {
+                let _ = tx.send(ApprovalDecision::Timeout);
             }
-            None => Err(AlreadyResolved),
+            self.record_resolution(id, &ApprovalDecision::Timeout);
+            return Err(ResolveError::ApprovalExpired);
+        }
+
+        let outcome = match entry.resp_tx.take() {
+            Some(tx) => {
+                let _ = tx.send(decision.clone());
+                ResolveOutcome::Delivered
+            }
+            // Replayed orphan: no response channel exists, so the decision
+            // only cleared the queue — nothing was signed.
+            None => ResolveOutcome::Stale,
+        };
+        self.record_resolution(id, &decision);
+        Ok(outcome)
+    }
+
+    /// Broadcast the resolved event and persist it for crash recovery.
+    fn record_resolution(&self, id: Uuid, decision: &ApprovalDecision) {
+        let _ = self.ws_tx.send(WsEvent::ApprovalResolved { id, decision: decision.clone() });
+        if let Some(log) = &self.log {
+            let (decision_str, reason) = match decision {
+                ApprovalDecision::Approve => ("approved", String::new()),
+                ApprovalDecision::Reject { reason } => ("rejected", reason.clone()),
+                ApprovalDecision::Timeout => ("timeout", String::new()),
+            };
+            if let Err(e) = log.append_resolved(id, decision_str, &reason) {
+                tracing::warn!(error = %e, "failed to log resolved approval");
+            }
         }
     }
 
-    /// Insert a pending approval (called by the background receiver task).
-    fn insert(&self, approval: PendingApproval, resp_tx: oneshot::Sender<ApprovalDecision>) {
+    /// Insert a pending approval (called by the background receiver task;
+    /// `pub(crate)` so route-level tests can seed the queue directly).
+    pub(crate) fn insert(
+        &self,
+        approval: PendingApproval,
+        resp_tx: oneshot::Sender<ApprovalDecision>,
+    ) {
         let id = approval.id;
         // Broadcast pending event
         let _ = self.ws_tx.send(WsEvent::PendingApproval { approval: Box::new(approval.clone()) });
@@ -178,9 +233,14 @@ mod tests {
             risk: oc_core::RiskLevel::Safe,
             risk_reasons: vec![],
             simulation: None,
-            created_at_unix: 1000,
-            expires_at_unix: 1300,
+            created_at_unix: unix_now(),
+            expires_at_unix: unix_now() + 3600,
         }
+    }
+
+    /// An approval whose TTL has already elapsed.
+    fn expired_approval(id: Uuid) -> PendingApproval {
+        PendingApproval { expires_at_unix: 0, ..make_approval(id) }
     }
 
     #[tokio::test]
@@ -222,7 +282,34 @@ mod tests {
         assert!(first.is_ok());
 
         let second = queue.resolve(id, ApprovalDecision::Reject { reason: "late".into() });
-        assert!(second.is_err());
+        assert_eq!(second, Err(ResolveError::AlreadyResolved));
+    }
+
+    #[tokio::test]
+    async fn approve_after_expiry_is_rejected_and_removed() {
+        let queue = ApprovalQueue::new(16);
+        let id = Uuid::new_v4();
+        let (tx, rx) = oneshot::channel();
+        queue.insert(expired_approval(id), tx);
+
+        let result = queue.resolve(id, ApprovalDecision::Approve);
+        assert_eq!(result, Err(ResolveError::ApprovalExpired));
+        // The expired entry is removed from the queue...
+        assert!(queue.list_pending().is_empty());
+        // ...and the requester learns that nothing was signed.
+        assert_eq!(rx.await.unwrap(), ApprovalDecision::Timeout);
+    }
+
+    #[tokio::test]
+    async fn orphan_approve_reports_stale() {
+        let queue = ApprovalQueue::new(16);
+        let id = Uuid::new_v4();
+        queue.replay_orphans(vec![make_approval(id)]);
+
+        // Approving an orphan clears the queue but signs nothing.
+        let outcome = queue.resolve(id, ApprovalDecision::Approve).unwrap();
+        assert_eq!(outcome, ResolveOutcome::Stale);
+        assert!(queue.list_pending().is_empty());
     }
 
     #[tokio::test]

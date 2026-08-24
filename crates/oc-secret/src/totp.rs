@@ -7,6 +7,7 @@
 // The dependency `totp-rs` also exposes a `TotpError` type; rename it on import
 // to avoid a clash with the local `TotpError` defined below.
 use totp_rs::{Algorithm, Builder, Totp, TotpError as TotpRsError};
+use zeroize::Zeroizing;
 
 /// Errors returned by OTP operations.
 #[derive(Debug, thiserror::Error)]
@@ -51,14 +52,15 @@ pub fn generate_totp_from_secret(
     issuer: &str,
     account: &str,
 ) -> Result<String, TotpError> {
-    let secret = base32_decode(base32_secret)
+    let mut secret = base32_decode(base32_secret)
         .map_err(|e| TotpError::InvalidSecret(format!("base32 decode failed: {e}")))?;
     let totp = Builder::new()
         .with_algorithm(Algorithm::SHA1)
         .with_digits(DEFAULT_DIGITS as u8)
         .with_skew(u16::from(DEFAULT_SKEW))
         .with_step_duration(DEFAULT_STEP)
-        .with_secret(secret)
+        // Single ownership-release boundary into totp-rs (see `take_seed`).
+        .with_secret(take_seed(&mut secret))
         .with_issuer(Some(issuer.to_string()))
         .with_account_name(account.to_string())
         .build()
@@ -71,14 +73,15 @@ pub fn generate_totp_from_secret(
 /// The resulting URI can be used to generate TOTP codes via
 /// [`generate_totp`] or imported into authenticator apps.
 pub fn build_otpauth_uri(secret: &str, issuer: &str, account: &str) -> Result<String, TotpError> {
-    let decoded = base32_decode(secret)
+    let mut decoded = base32_decode(secret)
         .map_err(|e| TotpError::InvalidSecret(format!("base32 decode failed: {e}")))?;
     let totp = Builder::new()
         .with_algorithm(Algorithm::SHA1)
         .with_digits(DEFAULT_DIGITS as u8)
         .with_skew(u16::from(DEFAULT_SKEW))
         .with_step_duration(DEFAULT_STEP)
-        .with_secret(decoded)
+        // Single ownership-release boundary into totp-rs (see `take_seed`).
+        .with_secret(take_seed(&mut decoded))
         .with_issuer(Some(issuer.to_string()))
         .with_account_name(account.to_string())
         .build()
@@ -94,17 +97,17 @@ pub fn build_otpauth_uri(secret: &str, issuer: &str, account: &str) -> Result<St
 /// HOTP differs from TOTP in that the counter is caller-managed rather than
 /// derived from the system clock.
 pub fn generate_hotp(otpauth_uri: &str, counter: u64) -> Result<String, TotpError> {
-    let (algorithm, digits, secret) = parse_hotp_uri(otpauth_uri)?;
-    generate_hotp_code(&algorithm, digits, &secret, counter)
+    let (algorithm, digits, mut secret) = parse_hotp_uri(otpauth_uri)?;
+    generate_hotp_code(&algorithm, digits, &mut secret, counter)
 }
 
 /// Generate an HOTP code from a raw base32-encoded secret and a counter.
 ///
 /// Uses default parameters: SHA-1 algorithm, 6 digits.
 pub fn generate_hotp_from_secret(base32_secret: &str, counter: u64) -> Result<String, TotpError> {
-    let secret = base32_decode(base32_secret)
+    let mut secret = base32_decode(base32_secret)
         .map_err(|e| TotpError::InvalidSecret(format!("base32 decode failed: {e}")))?;
-    generate_hotp_code(&Algorithm::SHA1, DEFAULT_DIGITS, &secret, counter)
+    generate_hotp_code(&Algorithm::SHA1, DEFAULT_DIGITS, &mut secret, counter)
 }
 
 /// Build an `otpauth://` URI for an HOTP secret from a base32 secret,
@@ -137,7 +140,7 @@ pub fn build_hotp_otpauth_uri(
 fn generate_hotp_code(
     algorithm: &Algorithm,
     digits: usize,
-    secret: &[u8],
+    secret: &mut Zeroizing<Vec<u8>>,
     counter: u64,
 ) -> Result<String, TotpError> {
     // step=1 and skew=0: `generate(time)` computes HMAC over `time / 1 = time`,
@@ -147,18 +150,22 @@ fn generate_hotp_code(
         .with_digits(digits as u8)
         .with_skew(0u16) // skew: not meaningful for HOTP
         .with_step_duration(1) // step: 1 so counter maps directly
-        .with_secret(secret.to_vec())
+        // Single ownership-release boundary into totp-rs (see `take_seed`);
+        // also removes the previous extra plaintext copy via `to_vec`.
+        .with_secret(take_seed(secret))
         .build_noncompliant();
     Ok(totp.generate(counter).to_string())
 }
 
 /// Parse an `otpauth://hotp/` URI into its component parts.
 ///
-/// Returns `(algorithm, digits, secret_bytes)`.
+/// Returns `(algorithm, digits, secret_bytes)`; the decoded seed is wrapped
+/// in [`Zeroizing`] and must be released only via [`take_seed`] at the
+/// `totp-rs` builder boundary.
 ///
 /// Does manual parsing to avoid depending on the `url` crate directly
 /// (it is a transitive dependency via `totp-rs` but not re-exported).
-fn parse_hotp_uri(uri: &str) -> Result<(Algorithm, usize, Vec<u8>), TotpError> {
+fn parse_hotp_uri(uri: &str) -> Result<(Algorithm, usize, Zeroizing<Vec<u8>>), TotpError> {
     // Strip scheme: otpauth://hotp/...
     let rest = uri
         .strip_prefix("otpauth://")
@@ -186,7 +193,7 @@ fn parse_hotp_uri(uri: &str) -> Result<(Algorithm, usize, Vec<u8>), TotpError> {
 
     let mut algorithm = Algorithm::SHA1;
     let mut digits = DEFAULT_DIGITS;
-    let mut secret = Vec::new();
+    let mut secret = Zeroizing::new(Vec::new());
 
     for pair in query.split('&') {
         let (key, value) = match pair.split_once('=') {
@@ -314,16 +321,31 @@ fn base32_encode(data: &[u8]) -> String {
     output
 }
 
+/// Release a decoded OTP seed from its [`Zeroizing`] guard at the single
+/// ownership-transfer boundary into `totp-rs`.
+///
+/// `Builder::with_secret` takes ownership of a plain `Vec<u8>`, so the
+/// guarded buffer must be handed over rather than copied. [`std::mem::take`]
+/// swaps an empty vector into the guard (making its later drop a no-op) and
+/// yields the original buffer for the builder to consume. Do not copy or
+/// clone the seed out of its guard anywhere else.
+fn take_seed(secret: &mut Zeroizing<Vec<u8>>) -> Vec<u8> {
+    std::mem::take(&mut *secret)
+}
+
 /// Decode a base32-encoded string (RFC 4648, no padding required).
+///
+/// The decoded seed is returned in a [`Zeroizing`] buffer that is wiped on
+/// drop. Callers pass it into `totp-rs` only through [`take_seed`].
 ///
 /// `totp-rs` uses `constant_time_eq`'s base32 under the hood, but we do a
 /// manual uppercase + strip-padding approach for robustness.
-fn base32_decode(input: &str) -> Result<Vec<u8>, &'static str> {
+fn base32_decode(input: &str) -> Result<Zeroizing<Vec<u8>>, &'static str> {
     let upper = input.to_ascii_uppercase();
     let stripped = upper.trim_end_matches('=');
     let mut bits: u32 = 0;
     let mut bit_count: u32 = 0;
-    let mut output = Vec::with_capacity(stripped.len() * 5 / 8);
+    let mut output = Zeroizing::new(Vec::with_capacity(stripped.len() * 5 / 8));
 
     for c in stripped.chars() {
         let val = match c {
@@ -388,21 +410,21 @@ mod tests {
     fn base32_decode_rfc_vector() {
         // "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ" decodes to "12345678901234567890"
         let decoded = base32_decode(TEST_SECRET_BASE32).unwrap();
-        assert_eq!(decoded, b"12345678901234567890");
+        assert_eq!(decoded.as_slice(), b"12345678901234567890".as_slice());
     }
 
     #[test]
     fn base32_decode_handles_lowercase() {
         let lower = TEST_SECRET_BASE32.to_ascii_lowercase();
         let decoded = base32_decode(&lower).unwrap();
-        assert_eq!(decoded, b"12345678901234567890");
+        assert_eq!(decoded.as_slice(), b"12345678901234567890".as_slice());
     }
 
     #[test]
     fn base32_decode_handles_padding() {
         let padded = format!("{TEST_SECRET_BASE32}===");
         let decoded = base32_decode(&padded).unwrap();
-        assert_eq!(decoded, b"12345678901234567890");
+        assert_eq!(decoded.as_slice(), b"12345678901234567890".as_slice());
     }
 
     #[test]

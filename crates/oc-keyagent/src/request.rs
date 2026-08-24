@@ -133,7 +133,7 @@ mod tests {
         // A request with no kind set encodes to 0 bytes and decodes back to None.
         let req = KeyAgentRequest { kind: None };
         let bytes = req.encode_to_vec();
-        assert!(bytes.is_empty());
+        assert_eq!(bytes.len(), 0);
         let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();
         assert_eq!(req, decoded);
         assert!(decoded.kind.is_none());

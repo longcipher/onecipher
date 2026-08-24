@@ -1,3 +1,5 @@
+// Benchmark code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Criterion benchmark for `evaluate_11_step`.
 //!
 //! Performance goal (R29 / Non-Functional Goals): p99 < 5 ms in-process.

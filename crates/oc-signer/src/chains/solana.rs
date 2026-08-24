@@ -233,7 +233,7 @@ mod tests {
                 .unwrap();
         let address = signer.derive_address(&privkey).unwrap();
         // Base58 encoded ed25519 public key
-        assert!(!address.is_empty());
+        assert_ne!(address.len(), 0);
         // Verify it decodes back to 32 bytes
         let decoded = bs58::decode(&address).into_vec().unwrap();
         assert_eq!(decoded.len(), 32);

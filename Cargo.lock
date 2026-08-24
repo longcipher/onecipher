@@ -4299,6 +4299,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
+ "tracing",
  "uuid",
  "zeroize",
 ]
@@ -4333,6 +4334,7 @@ dependencies = [
  "sha2 0.11.0",
  "subtle",
  "thiserror 2.0.20",
+ "tracing",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -4522,6 +4524,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]

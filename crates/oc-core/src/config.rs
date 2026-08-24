@@ -442,12 +442,12 @@ mod tests {
         // yield an empty trusted_origins (deny-all secure default).
         let json = r#"{"vault_path": "/tmp/.onecipher"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
-        assert!(config.wc.trusted_origins.is_empty());
+        assert_eq!(config.wc.trusted_origins.len(), 0);
 
         let partial = r#"{"wc": {"relay_url": "wss://127.0.0.1:7443"}}"#;
         let config: Config = serde_json::from_str(partial).unwrap();
         assert_eq!(config.wc.relay_url, "wss://127.0.0.1:7443");
-        assert!(config.wc.trusted_origins.is_empty());
+        assert_eq!(config.wc.trusted_origins.len(), 0);
     }
 
     #[test]

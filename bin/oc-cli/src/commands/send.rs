@@ -120,7 +120,9 @@ pub(crate) fn run(
     items.extend_from_slice(&encode_bytes(&rlp_uint(max_priority_fee_per_gas)));
     items.extend_from_slice(&encode_bytes(&rlp_uint(max_fee_per_gas)));
     items.extend_from_slice(&encode_bytes(&rlp_uint(gas_limit)));
-    items.extend_from_slice(&encode_bytes(&hex::decode(&token_addr).expect("validated hex")));
+    let token_addr_bytes = hex::decode(&token_addr)
+        .map_err(|e| CliError::InvalidArgs(format!("invalid token address hex: {e}")))?;
+    items.extend_from_slice(&encode_bytes(&token_addr_bytes));
     items.extend_from_slice(&encode_bytes(&[])); // value = 0
     items.extend_from_slice(&encode_bytes(&data));
     items.extend_from_slice(&encode_list(&[])); // empty access list

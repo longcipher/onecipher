@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Real-relay integration tests (L3).
 //!
 //! These tests exercise the protocol against a REAL WalletConnect relay

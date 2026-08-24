@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! End-to-end signature verification tests for all supported chains.
 //!
 //! Each test signs a known message with a known private key, then verifies

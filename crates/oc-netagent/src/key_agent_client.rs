@@ -14,6 +14,8 @@
 //! high-concurrency. If the pooled connection is closed by the peer (EOF) or
 //! errors, it is transparently re-established on the next [`send`].
 
+use std::time::Duration;
+
 use oc_keyagent::{
     KeyAgentRequest, KeyAgentResponse,
     frame::{Frame, FrameError},
@@ -29,6 +31,12 @@ use crate::error::NetAgentError;
 /// Maximum frame size: 4 MiB (mirrors `oc_keyagent::frame::MAX_FRAME_SIZE`).
 const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 
+/// Default per-request deadline for a full write+read round trip (L-03).
+///
+/// A hung Key-Agent must surface as a typed wire error instead of stalling
+/// the WC handler task forever.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Async client for the Key-Agent over UDS.
 ///
 /// Reuses a single pooled connection by default (the socket path is stored as
@@ -38,6 +46,8 @@ const MAX_FRAME_SIZE: u32 = 4 * 1024 * 1024;
 #[derive(Clone)]
 pub struct KeyAgentClient {
     sock_path: String,
+    /// Per-request deadline (L-03).
+    request_timeout: Duration,
     /// Lazily-established pooled connection. `None` means "not yet connected"
     /// or "was closed — reconnect on next send". Guarded by a `Mutex` because
     /// `send` takes `&self`.
@@ -47,7 +57,17 @@ pub struct KeyAgentClient {
 impl KeyAgentClient {
     /// Construct a new client targeting the Key-Agent UDS at `sock_path`.
     pub fn new(sock_path: impl Into<String>) -> Self {
-        Self { sock_path: sock_path.into(), pooled: std::sync::Arc::new(Mutex::new(None)) }
+        Self {
+            sock_path: sock_path.into(),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            pooled: std::sync::Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Override the per-request deadline (L-03).
+    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
     }
 
     /// Return the configured socket path (used by tests / diagnostics).
@@ -109,44 +129,60 @@ impl KeyAgentClient {
         let len = u32::try_from(payload.len()).map_err(|_| {
             NetAgentError::KeyAgentWire(format!("request length overflow: {} bytes", payload.len()))
         })?;
-        stream.write_all(&len.to_be_bytes()).await?;
-        stream.write_all(&payload).await?;
-        stream.flush().await?;
 
-        // Read response frame.
-        let mut len_buf = [0u8; 4];
-        stream
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(|e| NetAgentError::KeyAgentWire(format!("reading length prefix: {e}")))?;
-        let len = u32::from_be_bytes(len_buf);
-        if len == 0 {
-            // Empty payload — decode as a default (kind=None) response.
-            self.return_pooled(stream).await;
-            return Ok(KeyAgentResponse::default());
+        // L-03: bound the full write+read round trip. On timeout or error the
+        // stream is dropped rather than returned to the pool — its framing
+        // state is unknown, so the next `send` reconnects cleanly.
+        let io = async {
+            stream.write_all(&len.to_be_bytes()).await.map_err(NetAgentError::Io)?;
+            stream.write_all(&payload).await.map_err(NetAgentError::Io)?;
+            stream.flush().await.map_err(NetAgentError::Io)?;
+
+            // Read response frame.
+            let mut len_buf = [0u8; 4];
+            stream
+                .read_exact(&mut len_buf)
+                .await
+                .map_err(|e| NetAgentError::KeyAgentWire(format!("reading length prefix: {e}")))?;
+            let rlen = u32::from_be_bytes(len_buf);
+            if rlen == 0 {
+                // Empty payload — decode as a default (kind=None) response.
+                return Ok((stream, KeyAgentResponse::default()));
+            }
+            if rlen > MAX_FRAME_SIZE {
+                return Err(NetAgentError::KeyAgentWire(format!(
+                    "response too large: {rlen} bytes (max {MAX_FRAME_SIZE})"
+                )));
+            }
+            let mut buf = vec![0u8; rlen as usize];
+            stream
+                .read_exact(&mut buf)
+                .await
+                .map_err(|e| NetAgentError::KeyAgentWire(format!("reading payload: {e}")))?;
+
+            let resp = Frame::<KeyAgentResponse>::decode(buf.as_slice())
+                .map(|f| f.into_inner())
+                .map_err(|e| match e {
+                    FrameError::Decode(de) => NetAgentError::ProstDecode(de),
+                    other => {
+                        NetAgentError::KeyAgentWire(format!("response decode failed: {other}"))
+                    }
+                })?;
+            Ok((stream, resp))
+        };
+
+        match tokio::time::timeout(self.request_timeout, io).await {
+            Ok(Ok((stream, resp))) => {
+                // Return the connection to the pool for reuse.
+                self.return_pooled(stream).await;
+                Ok(resp)
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(NetAgentError::KeyAgentWire(format!(
+                "key-agent request timed out after {:?}",
+                self.request_timeout
+            ))),
         }
-        if len > MAX_FRAME_SIZE {
-            self.return_pooled(stream).await;
-            return Err(NetAgentError::KeyAgentWire(format!(
-                "response too large: {len} bytes (max {MAX_FRAME_SIZE})"
-            )));
-        }
-        let mut buf = vec![0u8; len as usize];
-        stream
-            .read_exact(&mut buf)
-            .await
-            .map_err(|e| NetAgentError::KeyAgentWire(format!("reading payload: {e}")))?;
-
-        let resp = Frame::<KeyAgentResponse>::decode(buf.as_slice())
-            .map(|f| f.into_inner())
-            .map_err(|e| match e {
-                FrameError::Decode(de) => NetAgentError::ProstDecode(de),
-                other => NetAgentError::KeyAgentWire(format!("response decode failed: {other}")),
-            })?;
-
-        // Return the connection to the pool for reuse.
-        self.return_pooled(stream).await;
-        Ok(resp)
     }
 }
 
@@ -221,5 +257,44 @@ mod tests {
             NetAgentError::Io(_) => {}
             other => panic!("expected Io error, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_send_times_out_when_keyagent_stalls() {
+        // L-03 regression: a Key-Agent that accepts the connection but never
+        // responds must surface as a typed timeout, not hang forever.
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("stalled.sock").to_string_lossy().to_string();
+        let listener = UnixListener::bind(&sock_path).expect("bind stalled keyagent");
+
+        // Accept the connection in the background and deliberately never
+        // write a response. Keep the accepted stream alive well past the
+        // client's timeout — dropping it early would RST the connection and
+        // produce an Io error instead of the typed timeout.
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut len_buf = [0u8; 4];
+                // Drain the request so the client's write side completes.
+                let _ = stream.read_exact(&mut len_buf).await;
+                // Hold the stream open past the 100 ms client timeout.
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                drop(stream);
+            }
+        });
+
+        let client = KeyAgentClient::new(&sock_path)
+            .with_request_timeout(std::time::Duration::from_millis(100));
+        let req = KeyAgentRequest { kind: Some(KeyAgentRequestKind::ListWallets(Empty {})) };
+        let started = std::time::Instant::now();
+        let result = client.send(&req).await;
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("stalled key-agent must time out");
+        assert!(err.to_string().contains("timed out"), "expected timeout error, got: {err}");
+        assert!(
+            elapsed >= std::time::Duration::from_millis(90),
+            "timeout fired too early: {elapsed:?}"
+        );
+        assert!(elapsed < std::time::Duration::from_secs(5), "timeout took too long: {elapsed:?}");
     }
 }

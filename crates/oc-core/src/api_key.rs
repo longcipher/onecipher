@@ -129,8 +129,8 @@ mod tests {
     #[test]
     fn test_secret_permissions_default_is_deny_all() {
         let perms = SecretPermissions::default();
-        assert!(perms.read_patterns.is_empty());
-        assert!(perms.write_patterns.is_empty());
+        assert_eq!(perms.read_patterns.len(), 0);
+        assert_eq!(perms.write_patterns.len(), 0);
         assert!(!perms.allow_totp);
         assert_eq!(perms.max_reads_per_minute, 0);
     }

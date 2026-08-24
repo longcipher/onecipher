@@ -46,29 +46,27 @@ impl FilecoinSigner {
     }
 
     /// Compute a Blake2b hash with a variable output length.
-    fn blake2b(data: &[u8], output_len: usize) -> Vec<u8> {
+    ///
+    /// Only the Filecoin protocol-mandated sizes (4, 20, 32 bytes) are
+    /// supported; anything else returns `SignerError::InvalidMessage`.
+    fn blake2b(data: &[u8], output_len: usize) -> Result<Vec<u8>, SignerError> {
+        fn digest<D: Digest>(data: &[u8]) -> Vec<u8> {
+            let mut hasher = D::new();
+            hasher.update(data);
+            hasher.finalize().to_vec()
+        }
         match output_len {
-            4 => {
-                let mut hasher = Blake2b::<U4>::new();
-                hasher.update(data);
-                hasher.finalize().to_vec()
-            }
-            20 => {
-                let mut hasher = Blake2b::<U20>::new();
-                hasher.update(data);
-                hasher.finalize().to_vec()
-            }
-            32 => {
-                let mut hasher = Blake2b256::new();
-                hasher.update(data);
-                hasher.finalize().to_vec()
-            }
-            _ => panic!("unsupported blake2b output length: {output_len}"),
+            4 => Ok(digest::<Blake2b<U4>>(data)),
+            20 => Ok(digest::<Blake2b<U20>>(data)),
+            32 => Ok(digest::<Blake2b256>(data)),
+            _ => Err(SignerError::InvalidMessage(format!(
+                "unsupported blake2b output length: {output_len} (expected 4, 20 or 32)"
+            ))),
         }
     }
 
     /// Compute the Filecoin address checksum: blake2b-4(protocol || payload).
-    fn checksum(protocol: u8, payload: &[u8]) -> Vec<u8> {
+    fn checksum(protocol: u8, payload: &[u8]) -> Result<Vec<u8>, SignerError> {
         let mut data = Vec::with_capacity(1 + payload.len());
         data.push(protocol);
         data.extend_from_slice(payload);
@@ -98,11 +96,11 @@ impl ChainSigner for FilecoinSigner {
         let pubkey_uncompressed = pubkey_bytes.as_bytes();
 
         // Blake2b-160 hash of the full uncompressed pubkey (65 bytes)
-        let payload = Self::blake2b(pubkey_uncompressed, 20);
+        let payload = Self::blake2b(pubkey_uncompressed, 20)?;
 
         // Checksum: blake2b-4(protocol_byte || payload)
         let protocol: u8 = 1; // secp256k1
-        let checksum = Self::checksum(protocol, &payload);
+        let checksum = Self::checksum(protocol, &payload)?;
 
         // Address: "f1" + base32(payload + checksum)
         let mut addr_bytes = Vec::with_capacity(payload.len() + checksum.len());
@@ -145,13 +143,13 @@ impl ChainSigner for FilecoinSigner {
         tx_bytes: &[u8],
     ) -> Result<SignOutput, SignerError> {
         // Filecoin transaction signing: Blake2b-256 hash of CBOR-encoded message
-        let hash = Self::blake2b(tx_bytes, 32);
+        let hash = Self::blake2b(tx_bytes, 32)?;
         self.sign(private_key, &hash)
     }
 
     fn sign_message(&self, private_key: &[u8], message: &[u8]) -> Result<SignOutput, SignerError> {
         // Hash with Blake2b-256 and sign
-        let hash = Self::blake2b(message, 32);
+        let hash = Self::blake2b(message, 32)?;
         self.sign(private_key, &hash)
     }
 
@@ -210,7 +208,7 @@ mod tests {
                 .unwrap();
         let signer = FilecoinSigner;
 
-        let hash = FilecoinSigner::blake2b(b"test message", 32);
+        let hash = FilecoinSigner::blake2b(b"test message", 32).unwrap();
         let result = signer.sign(&privkey, &hash).unwrap();
 
         assert_eq!(result.signature.len(), 65);

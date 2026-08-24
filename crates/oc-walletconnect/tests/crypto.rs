@@ -1,3 +1,5 @@
+// Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Crypto-layer tests against the official WalletConnect v2 reference
 //! implementation (`@walletconnect/utils`). Includes golden vectors that pin
 //! the exact key-derivation, envelope layout, and AEAD behavior the official

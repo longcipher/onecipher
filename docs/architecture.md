@@ -64,6 +64,12 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 - **`spawn_blocking` bridge**: async layer calls signing-core via `tokio::task::spawn_blocking`, avoiding reactor blockage.
 - **Local First**: All signing and policy evaluation happen locally. The server never touches plaintext private keys.
 
+> **Daemon module layout:** daemon lifecycle lives in `bin/oc-cli/src/daemon/`
+> (`mod.rs` lifecycle + control socket), extracted from `main.rs`. Signal
+> handling is split: one-shot commands use exiting signal handlers, while the
+> daemon uses a signal notifier feeding its graceful-shutdown `select!` loop
+> (`SIGTERM`/`SIGINT`/`SIGHUP`/`SIGQUIT`) with panic-hook cleanup.
+
 ## Workspace Layout
 
 ```
@@ -81,7 +87,8 @@ onecipher/
 │   ├── oc-signer/              # Multi-chain signing
 │   ├── oc-vault/               # Wallet vault (filesystem 700/600, .ocbk backup)
 │   ├── oc-wallet/              # Wallet operations (key store, policy, migration)
-│   └── oc-walletconnect/       # WalletConnect v2 protocol wrapper
+│   ├── oc-walletconnect/       # WalletConnect v2 protocol wrapper
+│   └── oc-webui/               # Web UI HTTP server (approval queue, WebAuthn auth, static dashboard)
 ├── docs/                       # This documentation
 └── Cargo.toml                  # Workspace root
 ```
@@ -93,7 +100,7 @@ These are non-negotiable invariants enforced by CI:
 | Gate | Rule | Scope | Enforcement |
 |------|------|-------|-------------|
 | **R56** | No `tokio`, `reqwest`, `tungstenite`, `hyper`, `async-std`, `smol` | `oc-crypto`, `oc-policy`, `oc-session-key` (even as dev-deps) | `cargo tree -p <crate> -e features` |
-| **R12** | No TCP symbols (`TcpListener`, `TcpStream`, `AF_INET`) | `onecipher` binary's signing-core code paths | `nm` symbol inspection |
+| **R12** | No TCP in isolated crates; loopback-only binds in the daemon | `oc-keyagent`, `oc-crypto`, `oc-policy`, `oc-session-key` sources; `onecipher` daemon | Five sub-rules: **R12a** source isolation — isolated crate sources must not contain `TcpListener`/`TcpStream` (`rg 'TcpListener\|TcpStream'`); **R12b** the daemon binary MAY contain TCP symbols (axum/hyper for the Web UI HTTP server and WC relay); **R12c** any daemon `TcpListener` must bind `127.0.0.1` exclusively (`lsof -iTCP -sTCP:LISTEN`); **R12d** at runtime the Key-Agent's seccomp BPF filter denies `connect(2)`/`bind(2)` to non-UDS sockets; **R12e** a non-loopback `[webui] listen` address is rejected at startup and the Web UI server refuses to start |
 | **R51/R52** | Zero I/O, zero network dependencies | `oc-crypto` | Architecture + review |
 | **R55** | Signing core uses sync `std::thread` only | `oc-keyagent` crate | `cargo tree -p <crate> -e features` |
 | **R53** | Drop all capabilities except `CAP_IPC_LOCK` | `onecipher` binary (Linux, when enclave enabled) | `sandbox.rs` |

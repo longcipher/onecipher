@@ -45,13 +45,20 @@ const ZERO_ADDRESS_EVM: &str = "0x0000000000000000000000000000000000000000";
 pub(crate) fn build_call_data(kind: &IntentKind, chain: &str) -> Result<CallData, IntentError> {
     match kind {
         IntentKind::Pay { recipient, token, amount, .. } => match token {
-            // Native payment: forward the raw wei hex string as the value.
-            None => Ok(CallData {
-                from: None,
-                to: recipient.clone(),
-                value: Some(amount.clone()),
-                data: None,
-            }),
+            // Native payment: normalize the amount through the shared strict
+            // parser and carry it as a hex wei quantity. Using ONE strict
+            // parser here (M-08) guarantees simulate and execute accept and
+            // reject identical inputs — a malformed amount can never show a
+            // $0 estimate in simulation and then fail at execution.
+            None => {
+                let base_units = parse_amount(amount)?;
+                Ok(CallData {
+                    from: None,
+                    to: recipient.clone(),
+                    value: Some(format!("0x{base_units:x}")),
+                    data: None,
+                })
+            }
             // ERC-20 payment: encode `transfer(address,uint256)` calldata.
             Some(token) => {
                 let amount_value = parse_amount(amount)?;
@@ -91,16 +98,16 @@ pub(crate) fn build_call_data(kind: &IntentKind, chain: &str) -> Result<CallData
         IntentKind::SignMessage { .. } => {
             Ok(CallData { from: None, to: ZERO_ADDRESS_EVM.to_string(), value: None, data: None })
         }
-        IntentKind::CrossChainTransfer { recipient, .. } => Ok(CallData {
-            from: None,
-            to: recipient.clone(),
-            // Zero native value; the bridged asset is carried out-of-band by
-            // the bridge, not as EVM wei. `None` (rather than `"0x0"`) avoids
-            // emitting an odd-length hex literal that the tx builder would
-            // reject.
-            value: None,
-            data: None,
-        }),
+        // M-04b: CrossChainTransfer previously built a zero-value no-op
+        // transfer while the user had approved an actual asset transfer —
+        // the signed transaction would NOT do what was approved. Fail closed
+        // instead: bridge integration must land before this intent kind can
+        // be simulated or executed.
+        IntentKind::CrossChainTransfer { .. } => Err(IntentError::Unsupported(
+            "CrossChainTransfer requires bridge integration; refusing to sign \
+             a no-op transfer that does not move the approved asset"
+                .to_string(),
+        )),
     }
 }
 
@@ -271,8 +278,36 @@ mod tests {
         let kind = pay_intent("0x0de0b6b3a7640000", RECIPIENT, None);
         let call = build_call_data(&kind, "eip155:1").expect("build");
         assert_eq!(call.to, RECIPIENT);
-        assert_eq!(call.value.as_deref(), Some("0x0de0b6b3a7640000"));
+        // M-08: the value is normalized to a canonical hex wei quantity
+        // (leading zeros stripped by `{base:x}`).
+        assert_eq!(call.value.as_deref(), Some("0xde0b6b3a7640000"));
         assert!(call.data.is_none());
+    }
+
+    #[test]
+    fn pay_without_token_normalizes_decimal_amount() {
+        // M-08 parity: a plain decimal integer is accepted by the shared
+        // strict parser and carried as hex wei — identical on simulate and
+        // execute paths.
+        let kind = pay_intent("1000000", RECIPIENT, None);
+        let call = build_call_data(&kind, "eip155:1").expect("build");
+        assert_eq!(call.value.as_deref(), Some("0xf4240"));
+    }
+
+    #[test]
+    fn cross_chain_transfer_is_unsupported() {
+        // M-04b regression: CrossChainTransfer must fail closed instead of
+        // building a zero-value no-op transfer.
+        let kind = IntentKind::CrossChainTransfer {
+            amount: "100 USDC".to_string(),
+            asset: "eip155:8453/erc20:0x2222222222222222222222222222222222222222".to_string(),
+            from_chain: "eip155:8453".to_string(),
+            to_chain: "eip155:42161".to_string(),
+            recipient: RECIPIENT.to_string(),
+        };
+        let err = build_call_data(&kind, "eip155:8453").expect_err("must be unsupported");
+        assert!(matches!(err, IntentError::Unsupported(_)), "got {err}");
+        assert!(err.to_string().contains("bridge"));
     }
 
     #[test]

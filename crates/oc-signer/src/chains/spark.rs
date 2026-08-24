@@ -124,7 +124,7 @@ mod tests {
     fn test_sign_message() {
         let privkey = test_privkey();
         let result = SparkSigner.sign_message(&privkey, b"hello spark").unwrap();
-        assert!(!result.signature.is_empty());
+        assert_ne!(result.signature.len(), 0);
         assert!(result.recovery_id.is_some());
     }
 
@@ -132,7 +132,7 @@ mod tests {
     fn test_sign_transaction() {
         let privkey = test_privkey();
         let result = SparkSigner.sign_transaction(&privkey, b"fake tx data").unwrap();
-        assert!(!result.signature.is_empty());
+        assert_ne!(result.signature.len(), 0);
         assert!(result.recovery_id.is_some());
     }
 }
