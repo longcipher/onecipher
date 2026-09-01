@@ -130,6 +130,27 @@ impl SecretEntry {
         Ok(Zeroizing::new(view.secret))
     }
 
+    /// Decrypt and return the primary secret directly as page-locked [`HardenedBytes`].
+    ///
+    /// This is the hardened counterpart to [`decrypt_secret`](Self::decrypt_secret):
+    /// the decrypted age plaintext is page-locked before JSON parsing, and the
+    /// primary `secret` field is copied into a `HardenedBytes` buffer (mlock +
+    /// `MADV_DONTDUMP` + zeroize-on-drop) before the intermediate `String` is
+    /// dropped and zeroized via [`SecretPayload`]'s `Drop`. Callers that need
+    /// `mlock` should prefer this over [`decrypt`](Self::decrypt) + `String`
+    /// handling.
+    pub fn decrypt_hardened(
+        &self,
+        identity: &AgeIdentity,
+    ) -> Result<HardenedBytes, SecretEntryError> {
+        // ponytail: String for JSON compat, HardenedBytes at use-site
+        let payload = self.decrypt(identity)?;
+        let hb =
+            HardenedBytes::from_slice(payload.secret.as_bytes()).map_err(SecretEntryError::from)?;
+        // `payload` is dropped here and its Drop impl zeroizes secret/notes.
+        Ok(hb)
+    }
+
     /// Build a plaintext [`SecretIndexEntry`] from this entry.
     pub fn to_index_entry(&self) -> SecretIndexEntry {
         SecretIndexEntry {

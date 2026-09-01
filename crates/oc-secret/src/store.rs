@@ -283,30 +283,28 @@ impl SecretStore {
 
 /// Reject names that could escape the secrets directory.
 ///
-/// `/` is allowed — it is percent-encoded in filenames via [`name_to_filename`].
+/// `/` is allowed — it is percent-encoded in filenames via [`name_to_filename`]
+/// (and [`oc_core::paths::secret_name_to_filename`]). Delegates to
+/// `oc_core::paths::validate_secret_name` for centralized validation.
+/// See `oc_core::paths::validate_wallet_id` for the flat (non-hierarchical) case
+/// where '/' is forbidden.
 fn validate_name(name: &str) -> Result<(), SecretStoreError> {
-    if name.trim().is_empty() {
-        return Err(SecretStoreError::InvalidName("name must not be empty".into()));
-    }
-    if name.contains('\\') ||
-        name.contains('\0') ||
-        name == ".." ||
-        name == "." ||
-        name.starts_with('.')
-    {
-        return Err(SecretStoreError::InvalidName(format!(
-            "name contains forbidden characters or sequences: '{name}'"
-        )));
-    }
-    Ok(())
+    oc_core::paths::validate_secret_name(name).map_err(|e| {
+        let msg = match e {
+            oc_core::OcError::InvalidInput { message } => message,
+            other => other.to_string(),
+        };
+        SecretStoreError::InvalidName(msg)
+    })
 }
 
 /// Percent-encode a secret name for filesystem storage.
 ///
 /// Encodes `%` as `%25` first, then `/` as `%2F`. This allows hierarchical
 /// names like `github/personal` while keeping the filesystem flat and safe.
+/// Delegates to `oc_core::paths::secret_name_to_filename`.
 fn name_to_filename(name: &str) -> String {
-    name.replace('%', "%25").replace('/', "%2F")
+    oc_core::paths::secret_name_to_filename(name)
 }
 
 #[cfg(unix)]

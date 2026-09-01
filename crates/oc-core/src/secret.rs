@@ -83,7 +83,24 @@ pub struct SecretMetadata {
 /// `HardenedBytes`), but it prevents the plaintext from lingering in freed
 /// heap memory after the payload is dropped. Callers that need page-locking
 /// should route the secret through `oc_crypto::HardenedBytes` at the point of
-/// use.
+/// use via [`SecretPayload::secret_hardened`] / [`SecretPayload::into_secret_hardened`]
+/// (requires the `hardened` feature) or `oc_secret::SecretEntry::decrypt_hardened`.
+///
+/// ## Why `String` and not `HardenedBytes`?
+///
+/// - `SecretPayload` covers passwords/TOTP/notes whose CLI `--json` contract requires plain string
+///   serialization; `HardenedBytes` is not `Serialize`.
+/// - It never holds wallet signing keys (those flow exclusively through `HardenedBytes` /
+///   `SecretBytes`).
+/// - Serde round-trips (`to_vec` → age encrypt, age decrypt → `from_slice`) would otherwise copy
+///   plaintext through unhardened JSON buffers anyway. The hardened path is therefore applied *at
+///   use-site* immediately after `decrypt`, not inside the payload type itself.
+/// - Any future signing-key field on this type MUST use `HardenedBytes`.
+///
+/// Mitigation: `Drop` zeroizes, and `secret_hardened()` moves the bytes into
+/// a page-locked `HardenedBytes` buffer so callers can upgrade hardening
+/// without changing the JSON-compatible storage type.
+// ponytail: String for JSON compat, HardenedBytes at use-site via secret_hardened()
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SecretPayload {
     /// The primary secret (password, mnemonic, TOTP seed, etc.).
@@ -94,6 +111,32 @@ pub struct SecretPayload {
     /// Type-specific extra fields.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extra: Option<serde_json::Value>,
+}
+
+impl SecretPayload {
+    /// Copy the primary secret into a page-locked [`oc_crypto::HardenedBytes`] buffer.
+    ///
+    /// Requires the `hardened` feature. Use when the decrypted secret must be
+    /// handled with `mlock` + `MADV_DONTDUMP` + zeroize-on-drop beyond the
+    /// best-effort `Drop` zeroize on `Self`.
+    #[cfg(feature = "hardened")]
+    pub fn secret_hardened(&self) -> Result<oc_crypto::HardenedBytes, oc_crypto::MemGuardError> {
+        oc_crypto::HardenedBytes::from_slice(self.secret.as_bytes())
+    }
+
+    /// Move the primary secret into a page-locked [`oc_crypto::HardenedBytes`] buffer.
+    ///
+    /// Requires the `hardened` feature. Consumes `self` so the original
+    /// `String` backing buffer is zeroized on drop; the returned buffer is
+    /// page-locked and zeroized on its own drop.
+    #[cfg(feature = "hardened")]
+    pub fn into_secret_hardened(
+        self,
+    ) -> Result<oc_crypto::HardenedBytes, oc_crypto::MemGuardError> {
+        let hb = oc_crypto::HardenedBytes::from_slice(self.secret.as_bytes())?;
+        // `self` is dropped here and its Drop impl zeroizes secret/notes.
+        Ok(hb)
+    }
 }
 
 impl Drop for SecretPayload {

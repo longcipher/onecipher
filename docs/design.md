@@ -114,7 +114,7 @@ cross-chain routing via ERC-7683, and Cedar-policy full integration.
 - **R51/R52**: `oc-crypto` stays zero-I/O; `age` MUST NOT be added to `oc-crypto`.
 - **R55**: `oc-keyagent` remains tokio-free.
 - **R12**: The release binary MUST NOT contain TCP-specific symbols (`TcpListener`, `TcpStream`, `AF_INET`). Phase 1-6 changes add only file I/O, terminal rendering, and (optionally) libgit2 sync — no direct TCP code paths. Verified via `nm` symbol inspection.
-- **Memory hardening**: Signing key material (mnemonics, private keys) MUST flow through `HardenedBytes`. **Documented exemption:** `SecretPayload.secret` (oc-core/src/secret.rs) remains a `String` with a custom `Drop` zeroize — this is a formally accepted deviation: the payload covers passwords/TOTP/notes whose CLI `--json` output contract requires plain string serialization, it never holds wallet signing keys, and serde round-trips would otherwise copy plaintext through unhardened JSON buffers anyway. Any future signing-key field on this type MUST use `HardenedBytes`.
+- **Memory hardening**: Signing key material (mnemonics, private keys) MUST flow through `HardenedBytes`. **Documented exemption:** `SecretPayload.secret` (oc-core/src/secret.rs) remains a `String` with a custom `Drop` zeroize — this is a formally accepted deviation: the payload covers passwords/TOTP/notes whose CLI `--json` output contract requires plain string serialization, it never holds wallet signing keys, and serde round-trips would otherwise copy plaintext through unhardened JSON buffers anyway. Callers that need page-locking should route via `oc_crypto::HardenedBytes` at point of use via `SecretPayload::secret_hardened()` / `into_secret_hardened()` (`oc-core` `hardened` feature) or `oc_secret::SecretEntry::decrypt_hardened()`. Any future signing-key field on this type MUST use `HardenedBytes`.
 
 ### 4.11 Feature Flags
 
@@ -150,15 +150,17 @@ an unsigned EIP-1559 transaction and forwards it through the RPC
 client — it does not sign directly. `MockRpcClient` backs unit tests.
 
 > **Honest status (C2):** as of this revision the Intent Layer is **not on the
-> production signing path**. The WC router signs directly via
-> `KeyAgentRequest` and returns `signed_tx_hex` for the dApp to broadcast;
-> `simulate_intent`/`execute_intent` are exercised only by unit tests. The
-> layer is currently a CLI-adjacent library, not the core execution path
-> described above. Additionally, `HpxRpcClient::native_price_usd` is a stub
-> (returns an error), so `simulate_intent` fails under a real RPC client until
-> a price feed is integrated. Wiring the intent layer into the WC router is
-> tracked and must be done behind an explicit opt-in to avoid breaking
-> existing dApp clients.
+> production signing path** — the three production entry points (WC v2
+> `WcMethodRouter`, HTTP-RPC, and WalletSigner loopback `wallet-rpc`) all
+> bypass `oc-netagent::intent` and forward directly to the Key-Agent via UDS
+> `KeyAgentRequest` frames, returning `signed_tx_hex` for the dApp to
+> broadcast. `simulate_intent`/`execute_intent` are exercised only by unit
+> tests and CLI (`onecipher intent simulate/execute`). The layer is currently
+> a CLI-adjacent library, not the core execution path described above.
+> Additionally, `HpxRpcClient::native_price_usd` is a stub (returns an error),
+> so `simulate_intent` fails under a real RPC client until a price feed is
+> integrated. Wiring the Intent Layer into any hot path is tracked and must be
+> done behind an explicit opt-in to avoid breaking existing clients.
 
 ### §6.2 Session Keys (`oc-session-key`)
 Session keys enable delegated signing for AI agents without exposing

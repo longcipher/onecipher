@@ -8,10 +8,7 @@ use std::{
     collections::VecDeque,
     io::Write,
     path::{Path, PathBuf},
-    sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -238,22 +235,16 @@ impl std::fmt::Debug for PolicyState {
 ///
 /// See `PolicyState::persist` for why a process-global lock was chosen over a
 /// per-state mutex.
+// ponytail: global lock, per-session-key sharded locks if throughput matters (DashMap<String,
+// Mutex<()>>)
 static PERSIST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Build a unique temp-file path next to `path` (M-10).
 ///
-/// Deterministic names (`path.json.tmp`) collide under concurrent persists and
-/// interleave writes; pid + nanos + a process-local monotonic counter makes
-/// collisions practically impossible even within the same nanosecond.
+/// Delegates to `oc_core::paths::unique_tmp_path` — single-source for atomic-write
+/// helpers. Kept as thin wrapper for `cargo test` path visibility.
 fn unique_tmp_path(path: &Path) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let mut name = path
-        .file_name()
-        .map_or_else(|| "policy_state.json".to_string(), |n| n.to_string_lossy().into_owned());
-    name.push_str(&format!(".{}.{}.{}.tmp", std::process::id(), nanos, seq));
-    path.with_file_name(name)
+    oc_core::paths::unique_tmp_path(path)
 }
 
 impl PolicyState {
@@ -339,7 +330,8 @@ impl PolicyState {
     /// file still requires external synchronization.
     pub fn persist(&self, path: &Path) -> Result<(), OcPolicyError> {
         let _guard = PERSIST_LOCK.lock().map_err(|_| {
-            OcPolicyError::InvalidInput("policy state persist lock poisoned".into())
+            tracing::error!("policy state persist lock poisoned");
+            OcPolicyError::Internal("policy state persist lock poisoned".into())
         })?;
 
         if let Some(parent) = path.parent() {

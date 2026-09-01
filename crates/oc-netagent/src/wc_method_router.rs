@@ -4,6 +4,10 @@
 //! inbound WC requests. Each JSON-RPC method is mapped to a `KeyAgentRequest`
 //! variant, forwarded to the Key-Agent via UDS, and the response is translated
 //! back to a JSON value (or a JSON-RPC error code).
+//!
+//! Note: Intent Layer (`oc_netagent::intent`) is CLI-only and NOT on the WC hot path.
+//! This router forwards signing requests directly to the Key-Agent via UDS frames.
+//! See `docs/design.md` §6.1 Honest status (C2).
 
 use std::{
     sync::{
@@ -14,6 +18,7 @@ use std::{
 };
 
 use oc_core::{ChainIdExt, TxSimulation, approval_log::ApprovalLog};
+// ponytail: proto types via oc_keyagent (pure codec, R56-safe); future: move to oc_core::ipc
 use oc_keyagent::{
     KeyAgentRequest, KeyAgentRequestKind, KeyAgentResponse, KeyAgentResponseKind,
     proto::{
@@ -250,15 +255,19 @@ impl WcMethodRouter {
         risk_reasons: Vec<RiskReason>,
         simulation: Option<TxSimulation>,
     ) -> Result<bool, (JsonRpcErrorCode, String)> {
-        // If approval mode is off, always proceed
         if !self.approval_mode.load(Ordering::Relaxed) {
-            return Ok(true);
+            return Ok(true); // approval gating disabled — proceed without approval
         }
 
-        // If no approval channel configured, proceed (graceful degradation)
+        // Fail-closed: approval_mode is true but no approver wired (Web UI not running).
         let approval_channel = match &self.approval {
             Some(ch) => ch,
-            None => return Ok(true),
+            None => {
+                return Err((
+                    JsonRpcErrorCode::Internal,
+                    "approval required but no approver connected — Web UI not running".into(),
+                ))
+            }
         };
 
         let now_secs = Self::now_unix_secs()?;
@@ -580,6 +589,9 @@ fn deny_reason_to_rpc_code_from_proto(reason: i32) -> JsonRpcErrorCode {
     }
 }
 
+// Intent Layer (`oc_netagent::intent`) is CLI-only — this handler forwards
+// directly to the Key-Agent via UDS frames and does NOT go through
+// `execute_intent` (see module docs and `docs/design.md` §6.1 C2).
 impl WalletMethodHandler for WcMethodRouter {
     fn handle<'a>(
         &'a self,

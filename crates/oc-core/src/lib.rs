@@ -7,6 +7,7 @@ pub mod caip;
 pub mod chain;
 pub mod config;
 pub mod error;
+pub mod ipc;
 pub mod paths;
 pub mod policy;
 pub mod secret;

@@ -11,4 +11,6 @@ pub enum OcPolicyError {
     Serde(#[from] serde_json::Error),
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    #[error("internal error: {0}")]
+    Internal(String),
 }

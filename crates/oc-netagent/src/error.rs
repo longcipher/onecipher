@@ -23,6 +23,7 @@ pub enum NetAgentError {
     #[error("Key-Agent returned error: {0}")]
     KeyAgentError(String),
     /// Key-Agent returned a policy `Deny` response carrying the deny reason.
+    // ponytail: proto types via oc_keyagent (pure codec, R56-safe); future: move to oc_core::ipc
     #[error("Key-Agent policy DENY: {0:?}")]
     KeyAgentDeny(oc_keyagent::proto::DenyReason),
     /// Invalid request from the client (could not be translated to a

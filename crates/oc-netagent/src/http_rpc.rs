@@ -76,18 +76,20 @@ impl LocalRpcServer {
     ///
     /// When `config.approval` is `Some`, the router is constructed with the
     /// approval wiring via [`WcMethodRouter::with_approval`]. If approval mode
-    /// is active but no channel was wired, the server fails closed by
-    /// installing a sender with no receiver, so gated requests time out
-    /// instead of silently bypassing approval.
+    /// is active but no channel was wired, no dummy channel is created — the
+    /// router will fail-closed via `maybe_gate_approval` returning an explicit
+    /// error instead of silently bypassing or hanging on timeout.
     pub fn new(config: LocalRpcServerConfig) -> Self {
         let key_agent = KeyAgentClient::new(&config.key_agent_sock);
-        let approval_channel = match config.approval {
-            Some(channel) => Some(channel),
-            None if config.approval_mode.load(Ordering::Relaxed) => {
-                let (channel, _rx) = crate::approval::ApprovalChannel::new(1);
-                Some(channel)
+        let approval_channel = if let Some(channel) = config.approval {
+            Some(channel)
+        } else {
+            if config.approval_mode.load(Ordering::Relaxed) {
+                tracing::warn!(
+                    "HTTP-RPC approval_mode enabled but no approval channel wired — gated requests will be rejected"
+                );
             }
-            None => None,
+            None
         };
         let router = match approval_channel {
             Some(channel) => WcMethodRouter::with_approval(
@@ -353,6 +355,9 @@ mod tests {
             approval_timeout: Duration::from_secs(5),
             approval_log: None,
         });
-        assert!(server.router.has_approval_channel());
+        // Fail-closed: no dummy channel is created; gated requests will be
+        // rejected explicitly via maybe_gate_approval (Internal error) rather
+        // than hanging on a timeout. The router therefore has no channel.
+        assert!(!server.router.has_approval_channel());
     }
 }

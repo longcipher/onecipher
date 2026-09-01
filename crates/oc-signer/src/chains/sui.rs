@@ -1,3 +1,4 @@
+// ponytail: blake2 0.11.0-rc.6 pinned until digest 0.11 final — see workspace Cargo.toml
 use blake2::{Blake2b256, Digest};
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use oc_core::ChainType;

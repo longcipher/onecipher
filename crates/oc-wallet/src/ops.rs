@@ -7,6 +7,7 @@ use oc_signer::{
     CryptoEnvelope, CryptoError, Curve, HdDeriver, Mnemonic, MnemonicStrength, SecretBytes,
     decrypt, encrypt, signer_for_chain,
 };
+use zeroize::Zeroize;
 
 use crate::{
     error::OcWalletError,
@@ -329,12 +330,22 @@ fn decode_hex_key(hex_str: &str) -> Result<Vec<u8>, OcWalletError> {
 
 /// Import a wallet from a hex-encoded private key.
 /// The `chain` parameter specifies which chain the key originates from (e.g. "evm", "solana").
-/// A random key is generated for the other curve so all 6 chains are supported.
+/// A random key is generated for the other curve so all chains are supported.
 ///
 /// Alternatively, provide both `secp256k1_key_hex` and `ed25519_key_hex` to supply
 /// explicit keys for each curve. When both are given, `private_key_hex` and `chain`
 /// are ignored. When only one curve key is given alongside `private_key_hex`, it
 /// overrides the random generation for that curve.
+///
+/// # Random complementary key
+///
+/// When only one private key is supplied, the other curve gets a **random**
+/// 32-byte key so the wallet can derive addresses for all chain families (EVM,
+/// Solana, etc.). The wallet will have valid addresses on every chain, but the
+/// random key is a ghost address — it cannot be recovered from the original
+/// single key. You MUST run `onecipher wallet export <name>` (or
+/// `export_wallet` API) to back up both keys; otherwise funds sent to the
+/// random-curve addresses will be unrecoverable after vault loss.
 pub fn import_wallet_private_key(
     name: &str,
     private_key_hex: &str,
@@ -358,7 +369,7 @@ pub fn import_wallet_private_key(
             ed25519: SecretBytes::from_vec(decode_hex_key(ed_hex)?).map_err(CryptoError::from)?,
         }
     } else {
-        // Existing single-key behavior
+        // Single-key path: complementary curve gets a random key.
         let key_bytes = decode_hex_key(private_key_hex)?;
 
         // Determine curve from the source chain (default: secp256k1)
@@ -370,31 +381,45 @@ pub fn import_wallet_private_key(
             None => oc_signer::Curve::Secp256k1,
         };
 
-        // Build key pair: provided key for its curve, random 32 bytes for the other
-        let mut other_key = vec![0u8; 32];
-        getrandom::fill(&mut other_key).map_err(|e| {
-            OcWalletError::InvalidInput(format!("failed to generate random key: {e}"))
-        })?;
+        // Generate the complementary key directly into a stack buffer and copy
+        // into a page-locked HardenedBytes — no intermediate heap Vec window.
+        // The stack buffer is zeroized immediately after. Warn the user that
+        // the random key must be backed up via `export`.
+        let generate_random = || -> Result<SecretBytes, OcWalletError> {
+            let mut buf = [0u8; 32];
+            getrandom::fill(&mut buf).map_err(|e| {
+                OcWalletError::InvalidInput(format!("failed to generate random key: {e}"))
+            })?;
+            let hb = SecretBytes::from_slice(&buf).map_err(CryptoError::from)?;
+            buf.zeroize();
+            Ok(hb)
+        };
 
         match source_curve {
-            oc_signer::Curve::Secp256k1 => KeyPair {
-                secp256k1: SecretBytes::from_vec(key_bytes).map_err(CryptoError::from)?,
-                ed25519: match ed25519_key_hex {
-                    Some(h) => {
-                        SecretBytes::from_vec(decode_hex_key(h)?).map_err(CryptoError::from)?
-                    }
-                    None => SecretBytes::from_vec(other_key).map_err(CryptoError::from)?,
-                },
-            },
-            oc_signer::Curve::Ed25519 => KeyPair {
-                secp256k1: match secp256k1_key_hex {
-                    Some(h) => {
-                        SecretBytes::from_vec(decode_hex_key(h)?).map_err(CryptoError::from)?
-                    }
-                    None => SecretBytes::from_vec(other_key).map_err(CryptoError::from)?,
-                },
-                ed25519: SecretBytes::from_vec(key_bytes).map_err(CryptoError::from)?,
-            },
+            oc_signer::Curve::Secp256k1 => {
+                let secp = SecretBytes::from_vec(key_bytes).map_err(CryptoError::from)?;
+                let ed = if let Some(h) = ed25519_key_hex {
+                    SecretBytes::from_vec(decode_hex_key(h)?).map_err(CryptoError::from)?
+                } else {
+                    tracing::warn!(
+                        "generated random ed25519 key for full-chain support (source curve secp256k1); export wallet to back up both keys"
+                    );
+                    generate_random()?
+                };
+                KeyPair { secp256k1: secp, ed25519: ed }
+            }
+            oc_signer::Curve::Ed25519 => {
+                let ed = SecretBytes::from_vec(key_bytes).map_err(CryptoError::from)?;
+                let secp = if let Some(h) = secp256k1_key_hex {
+                    SecretBytes::from_vec(decode_hex_key(h)?).map_err(CryptoError::from)?
+                } else {
+                    tracing::warn!(
+                        "generated random secp256k1 key for full-chain support (source curve ed25519); export wallet to back up both keys"
+                    );
+                    generate_random()?
+                };
+                KeyPair { secp256k1: secp, ed25519: ed }
+            }
         }
     };
 

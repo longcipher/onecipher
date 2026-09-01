@@ -120,9 +120,11 @@ pub struct Config {
 }
 
 impl Config {
-    /// Default vault path (`~/.onecipher`), or a relative `.onecipher` when
-    /// HOME is unavailable. Used by `#[serde(default)]` so partial user config
-    /// files still parse.
+    /// Default vault path (`~/.onecipher`). When `HOME` is unavailable this
+    /// falls back to relative `.onecipher` in CWD — **not** fail-closed.
+    /// Library callers that need hard failure should use `paths::state_dir()?`
+    /// directly and handle `Err`; CLI entry points already exit via `home_dir()`.
+    /// See `paths::home_dir` for the security rationale (`/tmp` fallback removed).
     fn default_vault_path() -> PathBuf {
         crate::paths::state_dir().unwrap_or_else(|_| PathBuf::from(crate::paths::STATE_DIR_NAME))
     }
@@ -227,36 +229,50 @@ impl Config {
     /// Load config from a specific path, merging user overrides on top of defaults.
     pub fn load_or_default_from(path: &std::path::Path) -> Self {
         let mut config = Self::default();
-        if path.exists() &&
-            let Ok(contents) = std::fs::read_to_string(path) &&
-            let Ok(user_config) = serde_json::from_str::<Self>(&contents)
-        {
-            for (k, v) in user_config.rpc {
-                config.rpc.insert(k, v);
+        if !path.exists() {
+            return config;
+        }
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[CONFIG-WARN] failed to read {}: {e} — using defaults", path.display());
+                tracing::warn!(path = %path.display(), error = %e, "failed to read config — using defaults");
+                return config;
             }
-            config.plugins = user_config.plugins;
-            config.backup = user_config.backup;
-            config.webui = user_config.webui;
-            // Honor any non-empty user-specified WC relay settings.
-            if !user_config.wc.relay_url.is_empty() {
-                config.wc.relay_url = user_config.wc.relay_url;
-            }
-            if !user_config.wc.project_id.is_empty() {
-                config.wc.project_id = user_config.wc.project_id;
-            }
-            // Honor user-specified trusted origins (empty list is a deliberate
-            // deny-all and must round-trip, so there is no "non-empty" guard).
-            if !user_config.wc.trusted_origins.is_empty() {
+        };
+        match serde_json::from_str::<Self>(&contents) {
+            Ok(user_config) => {
+                for (k, v) in user_config.rpc {
+                    config.rpc.insert(k, v);
+                }
+                config.plugins = user_config.plugins;
+                config.backup = user_config.backup;
+                config.webui = user_config.webui;
+                // Honor any non-empty user-specified WC relay settings.
+                if !user_config.wc.relay_url.is_empty() {
+                    config.wc.relay_url = user_config.wc.relay_url;
+                }
+                if !user_config.wc.project_id.is_empty() {
+                    config.wc.project_id = user_config.wc.project_id;
+                }
+                // Empty list is a deliberate deny-all and must round-trip.
                 config.wc.trusted_origins = user_config.wc.trusted_origins;
+                // Honor any non-empty user-specified vault path. The previous
+                // code also ignored the literal `/tmp/.onecipher`, because that
+                // used to be the `Default` value when HOME was unset and would
+                // otherwise be round-tripped back in as an explicit setting.
+                // That fallback is gone, so the sentinel check would now only
+                // serve to silently ignore a deliberate operator choice.
+                if !user_config.vault_path.as_os_str().is_empty() {
+                    config.vault_path = user_config.vault_path;
+                }
             }
-            // Honor any non-empty user-specified vault path. The previous
-            // code also ignored the literal `/tmp/.onecipher`, because that
-            // used to be the `Default` value when HOME was unset and would
-            // otherwise be round-tripped back in as an explicit setting.
-            // That fallback is gone, so the sentinel check would now only
-            // serve to silently ignore a deliberate operator choice.
-            if !user_config.vault_path.as_os_str().is_empty() {
-                config.vault_path = user_config.vault_path;
+            Err(e) => {
+                eprintln!(
+                    "[CONFIG-WARN] {} is corrupt (JSON parse failed: {e}) — using defaults; fix or remove the file to restore custom settings",
+                    path.display()
+                );
+                tracing::warn!(path = %path.display(), error = %e, "config is corrupt — using defaults");
             }
         }
         config

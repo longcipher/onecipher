@@ -19,7 +19,11 @@
 //! This module is the single source of truth. `HOME` unset is an error, never
 //! a silent downgrade to an insecure location.
 
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::error::OcError;
 
@@ -31,6 +35,23 @@ pub const MODE_PRIVATE_FILE: u32 = 0o600;
 
 /// Mode for non-secret files (policies, session metadata).
 pub const MODE_REGULAR_FILE: u32 = 0o644;
+
+/// Build a unique temp-file path next to `path`.
+///
+/// Deterministic names (`.{filename}.tmp`) collide under concurrent writes and
+/// interleave writes; pid + nanos + a process-local monotonic counter makes
+/// collisions practically impossible even within the same nanosecond.
+/// Canonical implementation — `oc_policy::v2::unique_tmp_path` delegates here.
+pub fn unique_tmp_path(path: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let mut name = path
+        .file_name()
+        .map_or_else(|| "onecipher".to_string(), |n| n.to_string_lossy().into_owned());
+    name.push_str(&format!(".{}.{}.{}.tmp", std::process::id(), nanos, seq));
+    path.with_file_name(name)
+}
 
 /// Atomically write `contents` to `path` with mode `mode`.
 ///
@@ -69,12 +90,15 @@ pub fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<(), std::
     std::fs::create_dir_all(parent)?;
 
     // Same directory as the target so `rename` cannot cross a filesystem
-    // boundary (which would make it non-atomic).
-    let tmp_path = parent
-        .join(format!(".{}.tmp", path.file_name().and_then(|n| n.to_str()).unwrap_or("onecipher")));
-
-    // Best-effort cleanup of a leftover temp file from a previous crash.
-    let _ = std::fs::remove_file(&tmp_path);
+    // boundary (which would make it non-atomic). Use a unique temp name to
+    // avoid races under concurrency.
+    let tmp_path = unique_tmp_path(path);
+    // Best-effort cleanup of a leftover deterministic temp file from a previous
+    // crash / old version for migration. Unique path needs no pre-remove.
+    let _ = std::fs::remove_file(parent.join(format!(
+        ".{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("onecipher")
+    )));
 
     let result = (|| -> Result<(), std::io::Error> {
         let mut opts = std::fs::OpenOptions::new();
@@ -117,6 +141,84 @@ pub fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<(), std::
 /// See [`write_atomic`].
 pub fn write_atomic_private(path: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
     write_atomic(path, contents, MODE_PRIVATE_FILE)
+}
+
+// ── Validation helpers (unified, Rxx) ───────────────────────────────────────
+
+/// Validate a wallet ID (used for vault file names). Rejects '/', '\\', '..' to prevent traversal.
+///
+/// Wallet IDs are flat file names (`<vault>/wallets/<id>.json`); a '/' would
+/// create subdirectories or escape the vault. Hierarchical names are **not**
+/// supported here — see [`validate_secret_name`] for the hierarchical case.
+///
+/// Rejects: empty/blank, '/', '\\', ".." substring, leading '.', exact "."/"..",
+/// and NUL bytes. The allowed character set in practice is alphanumeric plus
+/// '-'/'_' (but the validator only enforces the forbidden patterns to stay
+/// permissive on other punctuation).
+pub fn validate_wallet_id(id: &str) -> Result<(), crate::error::OcError> {
+    if id.trim().is_empty() {
+        return Err(crate::error::OcError::InvalidInput {
+            message: "wallet ID must not be empty".to_string(),
+        });
+    }
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(crate::error::OcError::InvalidInput {
+            message: format!(
+                "wallet ID contains forbidden pattern: '{id}' (allowed: alphanumeric + '-'/'_' only; '/' is rejected)"
+            ),
+        });
+    }
+    if id.contains('\0') {
+        return Err(crate::error::OcError::InvalidInput {
+            message: format!("wallet ID contains forbidden characters: '{id}'"),
+        });
+    }
+    if id == "." || id == ".." || id.starts_with('.') {
+        return Err(crate::error::OcError::InvalidInput {
+            message: format!("wallet ID must not be '.'/'..' or start with '.': '{id}'"),
+        });
+    }
+    Ok(())
+}
+
+/// Validate a secret name (allows '/' for hierarchy, percent-encodes to %2F). Rejects '\', '\0',
+/// '.', '..', leading '.'.
+///
+/// Secret names are hierarchical (e.g. `github/personal`) and '/' is **allowed**
+/// — it is percent-encoded to `%2F` on disk via [`secret_name_to_filename`] so
+/// the filesystem stays flat. This is the intentional difference from
+/// [`validate_wallet_id`], where '/' is forbidden because wallet IDs map
+/// directly to file names without encoding.
+///
+/// Rejects: empty/blank, '\\', NUL, exact "."/"..", leading '.'.
+/// Allows '/' and '%' (encoded). For Windows compatibility, ':' '*' '?' '"' '<' '>' '|' could also
+/// be rejected, but are currently not enforced to avoid breaking existing names; they are
+/// documented here for future tightening.
+pub fn validate_secret_name(name: &str) -> Result<(), crate::error::OcError> {
+    if name.trim().is_empty() {
+        return Err(crate::error::OcError::InvalidInput {
+            message: "name must not be empty".to_string(),
+        });
+    }
+    if name.contains('\\') ||
+        name.contains('\0') ||
+        name == ".." ||
+        name == "." ||
+        name.starts_with('.')
+    {
+        return Err(crate::error::OcError::InvalidInput {
+            message: format!("name contains forbidden characters or sequences: '{name}'"),
+        });
+    }
+    Ok(())
+}
+
+/// Percent-encode a secret name for filesystem storage (shared).
+///
+/// Encodes `%` as `%25` first, then `/` as `%2F`. This allows hierarchical
+/// names like `github/personal` while keeping the filesystem flat and safe.
+pub fn secret_name_to_filename(name: &str) -> String {
+    name.replace('%', "%25").replace('/', "%2F")
 }
 
 /// Resolve the current user's home directory.

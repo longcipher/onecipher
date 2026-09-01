@@ -117,6 +117,12 @@ pub(crate) fn run_daemon() -> Result<(), CliError> {
                     report.coredump_disabled,
                     report.ptrace_denied
                 );
+                #[cfg(target_os = "macos")]
+                if !report.network_blocked() {
+                    eprintln!(
+                        "WARNING: macOS network isolation degraded — signing thread has no Seatbelt filter; ensure R12a source scan and lsof checks in CI"
+                    );
+                }
             }
             Err(e) => {
                 // Fail-closed: an unconfined signing core must not serve.
@@ -217,7 +223,8 @@ pub(crate) fn run_daemon() -> Result<(), CliError> {
                 Err((_, read_err)) => {
                     eprintln!(
                         "WARNING: no WC policy at {} ({read_err}) — chain whitelists, expiry \
-                         and risk checks are NOT enforced on WalletConnect signing",
+                         and risk checks are NOT enforced on WalletConnect signing; create \
+                         ~/.onecipher/wc-policy.json or set OC_WC_POLICY=off to explicitly opt out",
                         path.display()
                     );
                     None

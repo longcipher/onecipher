@@ -86,13 +86,14 @@ pub fn save_encrypted_wallet(
     wallet: &EncryptedWallet,
     vault_path: Option<&Path>,
 ) -> Result<(), OcVaultError> {
-    // Validate wallet ID to prevent path traversal
-    if wallet.id.contains('/') || wallet.id.contains('\\') || wallet.id.contains("..") {
-        return Err(OcVaultError::InvalidInput(format!(
-            "wallet ID contains path separator or '..': {}",
-            wallet.id
-        )));
-    }
+    // Validate wallet ID via centralized oc_core validator (flat file name, '/' forbidden).
+    oc_core::paths::validate_wallet_id(&wallet.id).map_err(|e| {
+        let msg = match e {
+            oc_core::OcError::InvalidInput { message } => message,
+            other => other.to_string(),
+        };
+        OcVaultError::InvalidInput(msg)
+    })?;
     let dir = wallets_dir(vault_path)?;
     let path = dir.join(format!("{}.json", wallet.id));
     let json = serde_json::to_string_pretty(wallet)?;
@@ -168,12 +169,14 @@ pub fn load_wallet_by_name_or_id(
 
 /// Delete a wallet file from the vault by ID.
 pub fn delete_wallet_file(id: &str, vault_path: Option<&Path>) -> Result<(), OcVaultError> {
-    // Validate wallet ID to prevent path traversal
-    if id.contains('/') || id.contains('\\') || id.contains("..") {
-        return Err(OcVaultError::InvalidInput(format!(
-            "wallet ID contains path separator or '..': {id}"
-        )));
-    }
+    // Validate wallet ID via centralized oc_core validator.
+    oc_core::paths::validate_wallet_id(id).map_err(|e| {
+        let msg = match e {
+            oc_core::OcError::InvalidInput { message } => message,
+            other => other.to_string(),
+        };
+        OcVaultError::InvalidInput(msg)
+    })?;
     let dir = wallets_dir(vault_path)?;
     let path = dir.join(format!("{id}.json"));
     if !path.exists() {

@@ -70,6 +70,40 @@ impl SandboxReport {
     pub fn network_blocked(&self) -> bool {
         self.filter_installed
     }
+
+    /// Whether macOS network isolation is degraded (no kernel Seatbelt filter).
+    ///
+    /// On macOS `apply_signing_thread_sandbox` deliberately skips Seatbelt
+    /// (process-wide would kill WSS); `filter_installed` stays `false` there
+    /// and isolation falls back to source-level R12a + runtime `lsof` checks,
+    /// not kernel enforcement. Full isolation requires an out-of-process enclave
+    /// (future).
+    pub fn is_macos_network_isolation_degraded(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            !self.filter_installed
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+}
+
+/// Whether the current process is running with degraded macOS network isolation.
+///
+/// On macOS `apply_signing_thread_sandbox` skips Seatbelt (process-wide would
+/// kill the daemon's WSS relay); this helper returns `true` on macOS and
+/// `false` elsewhere so callers can surface the limitation without a report.
+pub fn is_macos_network_isolation_degraded() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        true
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 /// Apply the platform sandbox.
@@ -101,7 +135,12 @@ pub fn apply_sandbox() -> Result<(), KeyAgentError> {
 /// deny-network profile in-process would also cut off the daemon's own WSS
 /// relay. On macOS this variant therefore applies only core-dump + debugger
 /// denial and logs why Seatbelt is skipped; `SandboxReport::filter_installed`
-/// stays `false` there.
+/// stays `false` there — **network isolation is degraded on macOS** and falls
+/// back to source-level R12a (`rg TcpListener|TcpStream` on isolated crates)
+/// plus runtime `lsof -iTCP` checks, not kernel enforcement. Full isolation
+/// requires an out-of-process enclave (future). See
+/// [`SandboxReport::is_macos_network_isolation_degraded`] and
+/// [`is_macos_network_isolation_degraded`].
 ///
 /// Windows mitigation policies are process-wide but benign for a pure-Rust
 /// binary (no JIT, no remote image loads) and are applied as-is.
@@ -133,9 +172,12 @@ pub fn apply_signing_thread_sandbox() -> Result<SandboxReport, KeyAgentError> {
         // Seatbelt is process-wide: applying the deny-network profile here
         // would also confine the daemon's tokio WSS relay, which requires
         // outbound TCP to the WalletConnect relay. Skip it deliberately.
-        tracing::info!(
-            "signing-thread sandbox: Seatbelt skipped (process-wide scope would break the \
-             host WSS relay); core-dump/ptrace denial active"
+        // filter_installed intentionally stays false on macOS — network
+        // isolation is degraded; rely on source-level R12a + runtime lsof.
+        tracing::warn!(
+            "WARNING: macOS signing thread lacks kernel network filter; rely on source-level \
+              R12a + runtime lsof checks — Seatbelt skipped (process-wide scope would break the \
+              host WSS relay); core-dump/ptrace denial active; filter_installed=false"
         );
     }
 

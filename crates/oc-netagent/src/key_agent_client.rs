@@ -16,6 +16,7 @@
 
 use std::time::Duration;
 
+// ponytail: proto types via oc_keyagent (pure codec, R56-safe); future: move to oc_core::ipc
 use oc_keyagent::{
     KeyAgentRequest, KeyAgentResponse,
     frame::{Frame, FrameError},

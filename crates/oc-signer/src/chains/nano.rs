@@ -6,6 +6,7 @@
 //! Address format: `nano_` + 52 base32 chars (pubkey) + 8 base32 chars (checksum).
 //! State block hash: blake2b-256 over 176-byte canonical block representation.
 
+// ponytail: blake2 0.11.0-rc.6 pinned until digest 0.11 final — see workspace Cargo.toml
 use blake2::{
     Blake2b, Blake2b512,
     digest::{

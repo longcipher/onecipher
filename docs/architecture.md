@@ -19,9 +19,13 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 │  │         └─────────────────────┘                                │    │
 │  │                          ▼                                     │    │
 │  │              ┌───────────────────────┐                         │    │
-│  │              │   Intent Engine       │                         │    │
-│  │              │   (simulate + review) │                         │    │
+│  │              │   Intent Engine *     │                         │    │
+│  │              │ (CLI-only, off hot    │                         │    │
+│  │              │  path — see footnote) │                         │    │
 │  │              └───────────┬───────────┘                         │    │
+│  │              * dashed = CLI-only (`intent` cmd); WC/HTTP-RPC    │    │
+│  │                hot path forwards directly to Key-Agent via      │    │
+│  │                UDS frames, NOT through `execute_intent`.        │    │
 │  └──────────────────────────┼─────────────────────────────────────┘    │
 │                             │ UDS frames (KeyAgentRequest)            │
 │  ┌──────────────────────────▼────────────────────────────────────┐    │
@@ -63,6 +67,7 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 - **Compile-time isolation**: The signing crates (`oc-policy`, `oc-crypto`, `oc-signer`, `oc-vault`) have zero async/network dependencies. CI enforces this via R56.
 - **`spawn_blocking` bridge**: async layer calls signing-core via `tokio::task::spawn_blocking`, avoiding reactor blockage.
 - **Local First**: All signing and policy evaluation happen locally. The server never touches plaintext private keys.
+- **Intent Layer is CLI-only**: `oc-netagent::intent` (`simulate_intent`/`execute_intent`) is NOT on the production hot path. The WC v2, HTTP-RPC, and WalletSigner flows forward directly to the Key-Agent via UDS `KeyAgentRequest` frames; wiring Intent in is tracked behind an opt-in feature (see Integration status below).
 
 > **Daemon module layout:** daemon lifecycle lives in `bin/oc-cli/src/daemon/`
 > (`mod.rs` lifecycle + control socket), extracted from `main.rs`. Signal
@@ -100,7 +105,7 @@ These are non-negotiable invariants enforced by CI:
 | Gate | Rule | Scope | Enforcement |
 |------|------|-------|-------------|
 | **R56** | No `tokio`, `reqwest`, `tungstenite`, `hyper`, `async-std`, `smol` | `oc-crypto`, `oc-policy`, `oc-session-key` (even as dev-deps) | `cargo tree -p <crate> -e features` |
-| **R12** | No TCP in isolated crates; loopback-only binds in the daemon | `oc-keyagent`, `oc-crypto`, `oc-policy`, `oc-session-key` sources; `onecipher` daemon | Five sub-rules: **R12a** source isolation — isolated crate sources must not contain `TcpListener`/`TcpStream` (`rg 'TcpListener\|TcpStream'`); **R12b** the daemon binary MAY contain TCP symbols (axum/hyper for the Web UI HTTP server and WC relay); **R12c** any daemon `TcpListener` must bind `127.0.0.1` exclusively (`lsof -iTCP -sTCP:LISTEN`); **R12d** at runtime the Key-Agent's seccomp BPF filter denies `connect(2)`/`bind(2)` to non-UDS sockets; **R12e** a non-loopback `[webui] listen` address is rejected at startup and the Web UI server refuses to start |
+| **R12** | No TCP in isolated crates; loopback-only binds in the daemon | `oc-keyagent`, `oc-crypto`, `oc-policy`, `oc-session-key` sources; `onecipher` daemon | Five sub-rules: **R12a** source isolation — isolated crate sources must not contain `TcpListener`/`TcpStream` (`rg 'TcpListener\|TcpStream'`); **R12b** the daemon binary MAY contain TCP symbols (axum/hyper for the Web UI HTTP server and WC relay); **R12c** any daemon `TcpListener` must bind `127.0.0.1` exclusively (`lsof -iTCP -sTCP:LISTEN`); **R12d** at runtime the Key-Agent's seccomp BPF filter denies `connect(2)`/`bind(2)` to non-UDS sockets; **R12e** a non-loopback `[webui] listen` address is rejected at startup and the Web UI server refuses to start. **Note (macOS):** `apply_signing_thread_sandbox` skips Seatbelt on macOS (process-wide would kill WSS); network isolation falls back to source scan + `lsof`, not kernel enforcement. Full isolation requires out-of-process enclave (future) |
 | **R51/R52** | Zero I/O, zero network dependencies | `oc-crypto` | Architecture + review |
 | **R55** | Signing core uses sync `std::thread` only | `oc-keyagent` crate | `cargo tree -p <crate> -e features` |
 | **R53** | Drop all capabilities except `CAP_IPC_LOCK` | `onecipher` binary (Linux, when enclave enabled) | `sandbox.rs` |
@@ -186,9 +191,7 @@ bin/oc-cli (single binary)
 >   passkey↔wallet binding.
 > - Policy v3 remains a hand-rolled Cedar-*like* rule tree gated behind the
 >   `experimental-v3` feature (off by default).
-> - The Intent Layer (`oc-netagent::intent`) remains off the production
->   signing path; `simulate_intent`/`execute_intent` are exercised by unit
->   tests only, and `HpxRpcClient::native_price_usd` is still a stub.
+> - **Intent Layer:** `oc-netagent::intent` is CLI-only (`onecipher intent simulate/execute`); the WC, HTTP-RPC, and WalletSigner hot paths forward directly to the Key-Agent via UDS frames, not through `execute_intent`. `simulate_intent`/`execute_intent` are exercised only by unit tests and `HpxRpcClient::native_price_usd` remains a stub. Wiring the Intent Layer into the signing path is tracked behind an explicit opt-in feature to avoid breaking existing dApp clients.
 
 ## Testing Strategy
 
