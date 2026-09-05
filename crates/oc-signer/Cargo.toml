@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Cryptographic signing and key management for OneCipher"
-readme = "README.md"
 
 [features]
 default = []

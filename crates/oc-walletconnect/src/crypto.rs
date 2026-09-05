@@ -186,29 +186,28 @@ pub struct Envelope {
 /// - Type 0: `[type ‖ iv ‖ sealed]`
 /// - Type 1: `[type ‖ senderPubKey ‖ iv ‖ sealed]`
 /// - Type 2: `[type ‖ sealed]`
+///
+/// Returns [`WcError::Crypto`] if a type-1 envelope is requested without a
+/// sender public key (previously this silently returned an empty vector,
+/// causing the caller to publish a corrupt envelope).
 pub fn serialize_envelope(
     r#type: u8,
     iv: &[u8; 12],
     sender: Option<&[u8; 32]>,
     sealed: &[u8],
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + 12 + sealed.len());
+) -> WcResult<Vec<u8>> {
+    let mut out = Vec::with_capacity(1 + 32 + 12 + sealed.len());
     out.push(r#type);
     if r#type == ENVELOPE_TYPE_1 {
         let key = sender
-            .ok_or_else(|| WcError::Crypto("type-1 envelope requires sender public key".into()));
-        // We can't `?` in a non-Result helper returning Vec; fall back to empty.
-        let key = match key {
-            Ok(k) => k,
-            Err(_) => return Vec::new(),
-        };
+            .ok_or_else(|| WcError::Crypto("type-1 envelope requires sender public key".into()))?;
         out.extend_from_slice(key);
     }
     if r#type != ENVELOPE_TYPE_2 {
         out.extend_from_slice(iv);
     }
     out.extend_from_slice(sealed);
-    out
+    Ok(out)
 }
 
 /// Parse an on-wire envelope byte buffer.
@@ -296,7 +295,7 @@ impl WcCipher {
         let mut iv = [0u8; IV_LENGTH];
         rand::rng().fill(&mut iv[..]);
         let sealed = Self::seal(key, &iv, plaintext)?;
-        Ok(serialize_envelope(ENVELOPE_TYPE_0, &iv, None, &sealed))
+        serialize_envelope(ENVELOPE_TYPE_0, &iv, None, &sealed)
     }
 
     /// Decrypt a type-0 envelope.
@@ -321,7 +320,7 @@ impl WcCipher {
         let mut iv = [0u8; IV_LENGTH];
         rand::rng().fill(&mut iv[..]);
         let sealed = Self::seal(key, &iv, plaintext)?;
-        Ok(serialize_envelope(ENVELOPE_TYPE_1, &iv, Some(sender_pubkey), &sealed))
+        serialize_envelope(ENVELOPE_TYPE_1, &iv, Some(sender_pubkey), &sealed)
     }
 
     /// Decrypt a type-1 envelope (returns the sender's public key + plaintext).
@@ -422,7 +421,7 @@ mod tests {
 
     #[test]
     fn type2_envelope_is_plaintext() {
-        let bytes = serialize_envelope(ENVELOPE_TYPE_2, &[0u8; 12], None, b"raw");
+        let bytes = serialize_envelope(ENVELOPE_TYPE_2, &[0u8; 12], None, b"raw").unwrap();
         assert_eq!(bytes, [ENVELOPE_TYPE_2, b'r', b'a', b'w']);
         let env = deserialize_envelope(&bytes).unwrap();
         assert_eq!(env.r#type, ENVELOPE_TYPE_2);

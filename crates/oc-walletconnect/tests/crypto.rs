@@ -135,7 +135,8 @@ fn hkdf_sha256_known_vector() {
 #[test]
 fn envelope_type2_is_plaintext() {
     let env =
-        serialize_envelope(oc_walletconnect::crypto::ENVELOPE_TYPE_2, &[0u8; 12], None, b"hi");
+        serialize_envelope(oc_walletconnect::crypto::ENVELOPE_TYPE_2, &[0u8; 12], None, b"hi")
+            .unwrap();
     assert_eq!(env, [2, b'h', b'i']);
     let deser = deserialize_envelope(&env).unwrap();
     assert_eq!(deser.sealed, b"hi");

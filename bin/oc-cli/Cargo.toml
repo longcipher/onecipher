@@ -6,7 +6,6 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "CLI for OneCipher"
-readme = "README.md"
 
 [[bin]]
 name = "onecipher"

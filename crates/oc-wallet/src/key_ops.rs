@@ -80,7 +80,7 @@ pub fn create_api_key_with_secret_permissions(
         wallet_secrets.insert(wallet.id.clone(), envelope_json);
         // Always persist canonical wallet IDs (UUIDs). Callers may pass names or IDs;
         // agent signing checks `contains(wallet.id)` when verifying scope.
-        resolved_wallet_ids.push(wallet.id.clone());
+        resolved_wallet_ids.push(wallet.id);
     }
 
     // Validate that all policies exist

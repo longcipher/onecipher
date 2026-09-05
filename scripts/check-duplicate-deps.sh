@@ -37,7 +37,10 @@ set -euo pipefail
 # The count is stable across this feature branch (no new package versions
 # entered the lockfile), so the increase predates it; re-raise only if the
 # count actually grows again.
-BASELINE=69
+#
+# Lowered 69 -> 68: the alloy 1.7.1 -> 1.7.2 bump collapsed one duplicate
+# entry in the lockfile. Locked in at 68 so the gain is not lost.
+BASELINE=68
 
 cd "$(dirname "$0")/.."
 
