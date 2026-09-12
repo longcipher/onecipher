@@ -19,12 +19,16 @@
 
 pub mod error;
 pub mod execute;
+pub mod hot_path;
 pub mod rpc;
 pub mod schema;
 pub mod simulate;
 
 pub use error::IntentError;
 pub use execute::execute_intent;
+pub use hot_path::{
+    HotPathConfig, IntentSigner, execute_for_hot_path, select_rpc_client, simulate_for_hot_path,
+};
 pub use rpc::{CallData, MockRpcClient, RpcClient, RpcError};
 pub use schema::{
     Intent, IntentKind, IntentResult, IntentStatus, IntentSummary, MessageEncoding, SigningKeyRef,

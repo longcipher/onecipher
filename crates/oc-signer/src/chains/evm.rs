@@ -38,7 +38,7 @@ impl EvmSigner {
 
     fn signing_key(private_key: &[u8]) -> Result<SigningKey, SignerError> {
         SigningKey::from_slice(private_key)
-            .map_err(|_| SignerError::InvalidPrivateKey("key parsing failed".into()))
+            .map_err(|_| SignerError::Input("key parsing failed".into()))
     }
 
     fn parse_quantity_bytes(
@@ -48,7 +48,7 @@ impl EvmSigner {
     ) -> Result<Vec<u8>, SignerError> {
         let trimmed = value.trim();
         if trimmed.is_empty() {
-            return Err(SignerError::InvalidMessage(format!("{field} cannot be empty")));
+            return Err(SignerError::Input(format!("{field} cannot be empty")));
         }
 
         let bytes = if let Some(hex_value) =
@@ -62,9 +62,8 @@ impl EvmSigner {
                 } else {
                     format!("0{hex_value}")
                 };
-                let decoded = hex::decode(&normalized).map_err(|e| {
-                    SignerError::InvalidMessage(format!("invalid {field} hex value: {e}"))
-                })?;
+                let decoded = hex::decode(&normalized)
+                    .map_err(|e| SignerError::Input(format!("invalid {field} hex value: {e}")))?;
                 let first_nonzero =
                     decoded.iter().position(|byte| *byte != 0).unwrap_or(decoded.len());
                 decoded[first_nonzero..].to_vec()
@@ -76,13 +75,13 @@ impl EvmSigner {
             // reject impossibly large inputs before the O(n·m) conversion.
             let max_digits = max_len * 3 + 1;
             if trimmed.len() > max_digits {
-                return Err(SignerError::InvalidMessage(format!("{field} exceeds {max_len} bytes")));
+                return Err(SignerError::Input(format!("{field} exceeds {max_len} bytes")));
             }
             Self::parse_decimal_bytes(trimmed, field)?
         };
 
         if bytes.len() > max_len {
-            return Err(SignerError::InvalidMessage(format!("{field} exceeds {max_len} bytes")));
+            return Err(SignerError::Input(format!("{field} exceeds {max_len} bytes")));
         }
 
         Ok(bytes)
@@ -90,7 +89,7 @@ impl EvmSigner {
 
     fn parse_decimal_bytes(value: &str, field: &str) -> Result<Vec<u8>, SignerError> {
         if !value.bytes().all(|b| b.is_ascii_digit()) {
-            return Err(SignerError::InvalidMessage(format!(
+            return Err(SignerError::Input(format!(
                 "{field} must be decimal digits or 0x-prefixed hex"
             )));
         }
@@ -120,13 +119,10 @@ impl EvmSigner {
     fn parse_address_bytes(address: &str) -> Result<[u8; 20], SignerError> {
         let address =
             address.strip_prefix("0x").or_else(|| address.strip_prefix("0X")).unwrap_or(address);
-        let decoded = hex::decode(address).map_err(|e| {
-            SignerError::InvalidMessage(format!("invalid authorization address: {e}"))
-        })?;
+        let decoded = hex::decode(address)
+            .map_err(|e| SignerError::Input(format!("invalid authorization address: {e}")))?;
         decoded.try_into().map_err(|_| {
-            SignerError::InvalidMessage(
-                "authorization address must be exactly 20 bytes".to_string(),
-            )
+            SignerError::Input("authorization address must be exactly 20 bytes".to_string())
         })
     }
 
@@ -222,7 +218,7 @@ impl ChainSigner for EvmSigner {
 
     fn sign(&self, private_key: &[u8], message: &[u8]) -> Result<SignOutput, SignerError> {
         if message.len() != 32 {
-            return Err(SignerError::InvalidMessage(format!(
+            return Err(SignerError::Input(format!(
                 "expected 32-byte prehash, got {} bytes",
                 message.len()
             )));
@@ -262,18 +258,16 @@ impl ChainSigner for EvmSigner {
         signature: &SignOutput,
     ) -> Result<Vec<u8>, SignerError> {
         if signature.signature.len() != 65 {
-            return Err(SignerError::InvalidTransaction(
-                "expected 65-byte signature (r || s || v)".into(),
-            ));
+            return Err(SignerError::Transaction("expected 65-byte signature (r || s || v)".into()));
         }
 
         let v = signature.signature[64];
         let r: [u8; 32] = signature.signature[..32]
             .try_into()
-            .map_err(|_| SignerError::InvalidTransaction("bad r".into()))?;
+            .map_err(|_| SignerError::Transaction("bad r".into()))?;
         let s: [u8; 32] = signature.signature[32..64]
             .try_into()
-            .map_err(|_| SignerError::InvalidTransaction("bad s".into()))?;
+            .map_err(|_| SignerError::Transaction("bad s".into()))?;
 
         crate::rlp::encode_signed_typed_tx(tx_bytes, v, &r, &s)
     }
@@ -323,35 +317,34 @@ impl ChainSigner for EvmSigner {
         signature: &[u8],
     ) -> Result<bool, SignerError> {
         if hash.len() != 32 {
-            return Err(SignerError::InvalidMessage(format!(
+            return Err(SignerError::Input(format!(
                 "expected 32-byte hash, got {} bytes",
                 hash.len()
             )));
         }
         if signature.len() != 65 {
-            return Err(SignerError::InvalidMessage(format!(
+            return Err(SignerError::Input(format!(
                 "expected 65-byte signature (r+s+v), got {} bytes",
                 signature.len()
             )));
         }
 
         let r_bytes: [u8; 32] =
-            signature[..32].try_into().map_err(|_| SignerError::InvalidMessage("bad r".into()))?;
-        let s_bytes: [u8; 32] = signature[32..64]
-            .try_into()
-            .map_err(|_| SignerError::InvalidMessage("bad s".into()))?;
+            signature[..32].try_into().map_err(|_| SignerError::Input("bad r".into()))?;
+        let s_bytes: [u8; 32] =
+            signature[32..64].try_into().map_err(|_| SignerError::Input("bad s".into()))?;
         let v = signature[64];
 
         // v must be 27 or 28 for EIP-191/EIP-712
         let recovery_id = if v >= 27 { v - 27 } else { v };
         let recid = k256::ecdsa::RecoveryId::try_from(recovery_id)
-            .map_err(|e| SignerError::InvalidMessage(format!("bad recovery id: {e}")))?;
+            .map_err(|e| SignerError::Input(format!("bad recovery id: {e}")))?;
         let ecdsa_sig = k256::ecdsa::Signature::from_scalars(r_bytes, s_bytes)
-            .map_err(|e| SignerError::InvalidMessage(format!("bad signature: {e}")))?;
+            .map_err(|e| SignerError::Input(format!("bad signature: {e}")))?;
 
         let recovered_key =
             k256::ecdsa::VerifyingKey::recover_from_prehash(hash, &ecdsa_sig, recid)
-                .map_err(|e| SignerError::InvalidMessage(format!("recovery failed: {e}")))?;
+                .map_err(|e| SignerError::Input(format!("recovery failed: {e}")))?;
 
         // Derive address from recovered key
         let pubkey_bytes = recovered_key.to_sec1_point(false);

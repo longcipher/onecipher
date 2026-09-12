@@ -28,7 +28,7 @@ fn run_local(
 ) -> Result<(), CliError> {
     // Check for API token in passphrase — route through library for policy enforcement
     let passphrase = super::peek_passphrase();
-    if passphrase.as_deref().is_some_and(|p| p.starts_with(oc_wallet::key_store::TOKEN_PREFIX)) {
+    if passphrase.as_deref().is_some_and(|p| oc_core::Credential::parse(p).is_token()) {
         let result = oc_wallet::sign_transaction(
             wallet_name,
             chain_str,
@@ -40,7 +40,14 @@ fn run_local(
         return print_result(&result.signature, result.recovery_id, json_output);
     }
 
-    // Owner mode: resolve key directly (existing behavior)
+    // Owner mode via per-request enclave (default): decrypt→sign→wipe runs
+    // in a subprocess; the parent only forwards.
+    if crate::enclave_spawn::signing_enclave_enabled() {
+        return run_local_enclave(chain_str, wallet_name, tx_hex, index, json_output);
+    }
+
+    // Owner mode: resolve key directly (in-process fallback for tests /
+    // `OC_ENCLAVE=off` only).
     let chain = parse_chain(chain_str)?;
     let key = super::resolve_signing_key(wallet_name, chain.chain_type, index)?;
 
@@ -53,6 +60,49 @@ fn run_local(
     let output = signer.sign_transaction(key.expose(), signable)?;
 
     print_result(&hex::encode(&output.signature), output.recovery_id, json_output)
+}
+
+/// Owner-mode transaction signing through the per-request enclave child.
+///
+/// Same credential prompt-and-retry behavior as the message path: on a
+/// decrypt failure with an interactive terminal, prompts once and retries.
+fn run_local_enclave(
+    chain_str: &str,
+    wallet_name: &str,
+    tx_hex: &str,
+    index: u32,
+    json_output: bool,
+) -> Result<(), CliError> {
+    parse_chain(chain_str)?;
+    let mut credential = match super::peek_passphrase() {
+        Some(p) => zeroize::Zeroizing::new(p),
+        None => super::read_passphrase(),
+    };
+    let mut retried = false;
+    loop {
+        let mut req = crate::enclave_spawn::fresh_request(
+            oc_keyagent::enclave::OP_SIGN_TRANSACTION,
+            wallet_name,
+            chain_str,
+        );
+        req.payload_hex = tx_hex.to_string();
+        req.index = index;
+        req.credential_hex =
+            Some(crate::enclave_spawn::passphrase_credential_hex(credential.as_str()));
+        match crate::enclave_spawn::spawn_enclave(&req) {
+            Ok(resp) => {
+                let signature =
+                    crate::enclave_spawn::response_hex(resp.signature_hex.as_ref(), "signature")
+                        .map_err(CliError::KeyAgent)?;
+                return print_result(&hex::encode(&signature), resp.recovery_id, json_output);
+            }
+            Err(e) if e.contains("E_DECRYPT") && !retried && super::is_interactive_stdin() => {
+                retried = true;
+                credential = super::read_passphrase();
+            }
+            Err(e) => return Err(CliError::KeyAgent(e)),
+        }
+    }
 }
 
 fn run_wc(tx_hex: &str, json_output: bool) -> Result<(), CliError> {

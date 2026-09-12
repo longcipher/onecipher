@@ -11,10 +11,12 @@
 #![deny(unsafe_code)]
 
 pub mod audit;
+pub mod enclave;
 pub mod engine;
 pub mod error;
 pub mod frame;
 pub mod handler;
+pub mod hardening;
 pub mod key_ops;
 pub mod passkey;
 pub mod proto;
@@ -30,7 +32,10 @@ pub use audit::{AuditEntry, AuditError, AuditLog, EventType};
 pub use engine::{SignRequest, SignResult, SigningEngine};
 pub use error::KeyAgentError;
 pub use frame::{FrameClient, FrameClientError, FrameError, read_frame, write_frame};
-pub use handler::{AgentContext, dispatch, dispatch_with};
+pub use handler::{AgentContext, dispatch, dispatch_with, with_signing_key, with_signing_key_at};
+pub use hardening::{
+    HardenStatus, apply_hardening, apply_hardening_strict, cached_status, strict_mode_enabled,
+};
 pub use key_ops::{decrypt_mnemonic, derive_chain_key};
 // Re-export key types for convenience (formerly in oc-signing-core).
 pub use oc_core::{Passphrase, UnlockToken, WalletId};

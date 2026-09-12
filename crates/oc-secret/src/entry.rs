@@ -1,11 +1,18 @@
 //! A secret entry: encrypted payload + plaintext index metadata.
+//!
+//! The age ciphertext wraps an `ocenv/1` envelope (see [`crate::envelope`])
+//! binding the lookup path and the monotonic generation (B1/B4). Decryption
+//! verifies the binding and fails closed with [`SecretEntryError::Tampered`].
 
 use oc_core::{ItemType, SecretIndexEntry, SecretMetadata, SecretPayload};
 use oc_crypto::HardenedBytes;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::age::{self, AgeError, AgeIdentity};
+use crate::{
+    age::{self, AgeError, AgeIdentity},
+    envelope::{self, ENVELOPE_MAGIC},
+};
 
 /// Errors returned by [`SecretEntry`] operations.
 #[derive(Debug, thiserror::Error)]
@@ -16,6 +23,8 @@ pub enum SecretEntryError {
     Serde(#[from] serde_json::Error),
     #[error("invalid name: {0}")]
     InvalidName(String),
+    #[error("tampered envelope for '{path}': {reason}")]
+    Tampered { path: String, reason: String },
     #[error("memory hardening failed: {0}")]
     MemGuard(String),
 }
@@ -26,11 +35,24 @@ impl From<oc_crypto::MemGuardError> for SecretEntryError {
     }
 }
 
+impl From<crate::envelope::EnvelopeError> for SecretEntryError {
+    fn from(e: crate::envelope::EnvelopeError) -> Self {
+        match e {
+            crate::envelope::EnvelopeError::Tampered { path, reason } => {
+                Self::Tampered { path, reason }
+            }
+            crate::envelope::EnvelopeError::InvalidPath(msg) => Self::InvalidName(msg),
+        }
+    }
+}
+
 /// A complete secret entry (encrypted payload + plaintext metadata).
 ///
-/// The `ciphertext` field holds the age-encrypted [`SecretPayload`]. The
-/// metadata fields (`name`, `item_type`, `created_at`, etc.) are stored in
-/// plaintext so the index can be searched without decryption.
+/// The `ciphertext` field holds the age-encrypted `ocenv/1` envelope wrapping
+/// the [`SecretPayload`] JSON. The metadata fields (`name`, `item_type`,
+/// `generation`, timestamps, etc.) are stored in plaintext so the index can be
+/// searched without decryption; the envelope binds the ciphertext to `name`
+/// + `generation` so swaps and replays fail closed on [`decrypt`](Self::decrypt).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SecretEntry {
     pub id: String,
@@ -39,27 +61,39 @@ pub struct SecretEntry {
     pub created_at: String,
     pub updated_at: String,
     pub metadata: SecretMetadata,
-    /// age-encrypted `SecretPayload` (binary, base64-encoded in JSON).
+    /// Monotonic generation bound inside the envelope (B4, 0 = legacy).
+    #[serde(default)]
+    pub generation: u64,
+    /// age-encrypted `ocenv/1` envelope (binary, base64-encoded in JSON).
     #[serde(with = "serde_bytes_base64")]
     pub ciphertext: Vec<u8>,
 }
 
 impl SecretEntry {
     /// Create a new secret entry by encrypting `payload` to `recipients`.
+    ///
+    /// `generation` MUST be the store-allocated `next_generation(name)`
+    /// (`floor + 1` saturating, 1 for a fresh name). The envelope binds
+    /// `name` + `generation`; [`SecretStore::put`](crate::store::SecretStore::put)
+    /// rejects a stale `generation` fail-closed.
     pub fn new(
         name: &str,
         item_type: ItemType,
         payload: &SecretPayload,
         metadata: SecretMetadata,
         recipients: &[String],
+        generation: u64,
     ) -> Result<Self, SecretEntryError> {
-        if name.trim().is_empty() {
-            return Err(SecretEntryError::InvalidName("name must not be empty".into()));
+        crate::path::validate_path(name)
+            .map_err(|e| SecretEntryError::InvalidName(e.to_string()))?;
+        if generation == 0 {
+            return Err(SecretEntryError::InvalidName("generation must be >= 1".into()));
         }
-        // Serialize payload to JSON, then encrypt with age. The plaintext
-        // JSON buffer is zeroized on drop.
+        // Serialize payload to JSON, wrap in the path-bound envelope, then
+        // encrypt with age. Plaintext buffers are zeroized on drop.
         let json = Zeroizing::new(serde_json::to_vec(payload)?);
-        let ciphertext = age::encrypt_payload(&json, recipients)?;
+        let enveloped = envelope::wrap_envelope(name, generation, &json)?;
+        let ciphertext = age::encrypt_payload(&enveloped, recipients)?;
         let now = jiff_now();
         Ok(Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -68,39 +102,95 @@ impl SecretEntry {
             created_at: now.clone(),
             updated_at: now,
             metadata,
+            generation,
             ciphertext,
         })
     }
 
+    /// Replace the payload, rebinding to `generation` (caller-allocated next generation).
+    ///
+    /// Used by update/edit flows: the caller queries
+    /// [`SecretStore::next_generation`](crate::store::SecretStore::next_generation)
+    /// first, then persists via `put`.
+    pub fn set_payload(
+        &mut self,
+        payload: &SecretPayload,
+        recipients: &[String],
+        generation: u64,
+    ) -> Result<(), SecretEntryError> {
+        if generation == 0 {
+            return Err(SecretEntryError::InvalidName("generation must be >= 1".into()));
+        }
+        let json = Zeroizing::new(serde_json::to_vec(payload)?);
+        let enveloped = envelope::wrap_envelope(&self.name, generation, &json)?;
+        self.ciphertext = age::encrypt_payload(&enveloped, recipients)?;
+        self.generation = generation;
+        self.updated_at = jiff_now();
+        Ok(())
+    }
+
     /// Re-encrypt this entry's payload to a new recipient list.
     ///
-    /// The existing payload is decrypted with `old_identity`, then
-    /// re-encrypted to `new_recipients`. `updated_at` is bumped.
+    /// The existing payload is decrypted (verifying the envelope binding),
+    /// then re-encrypted to `new_recipients` preserving `name` + `generation`.
+    /// `updated_at` is bumped. For a store-level rotation that must also bump
+    /// `generation`, decrypt + [`set_payload`](Self::set_payload) with the allocated
+    /// next generation instead.
     pub fn re_encrypt(
         &mut self,
         old_identity: &AgeIdentity,
         new_recipients: &[String],
     ) -> Result<(), SecretEntryError> {
         let payload = self.decrypt(old_identity)?;
-        // The re-serialized plaintext JSON is zeroized on drop.
         let json = Zeroizing::new(serde_json::to_vec(&payload)?);
-        self.ciphertext = age::encrypt_payload(&json, new_recipients)?;
+        let enveloped = envelope::wrap_envelope(&self.name, self.generation, &json)?;
+        self.ciphertext = age::encrypt_payload(&enveloped, new_recipients)?;
         self.updated_at = jiff_now();
         Ok(())
     }
 
-    /// Decrypt this entry's payload using an age identity.
+    /// Decrypt the age layer and verify the `ocenv/1` envelope binding.
     ///
-    /// The decrypted bytes are wrapped in [`HardenedBytes`] for the brief
-    /// moment before JSON parsing, so the intermediate buffer is page-locked
-    /// and zeroized on drop.
-    pub fn decrypt(&self, identity: &AgeIdentity) -> Result<SecretPayload, SecretEntryError> {
+    /// Returns the envelope `generation` and the inner payload JSON. Legacy
+    /// ciphertexts (decrypted bytes not starting with `ocenv/1`) fall back to
+    /// raw JSON with `generation == 0` so pre-B1 vaults still open; re-saving
+    /// upgrades them to enveloped form.
+    fn decrypt_envelope_json(
+        &self,
+        identity: &AgeIdentity,
+    ) -> Result<(u64, Zeroizing<Vec<u8>>), SecretEntryError> {
         let mut plaintext = age::decrypt_payload(&self.ciphertext, identity)?;
         // Transfer ownership into a page-locked buffer for the brief moment
-        // before JSON parsing (`mem::take` leaves an empty buffer in the
-        // guard; `HardenedBytes::from_vec` wipes the source).
+        // before parsing (`mem::take` leaves an empty buffer in the guard;
+        // `HardenedBytes::from_vec` wipes the source).
         let hardened = HardenedBytes::from_vec(std::mem::take(&mut *plaintext))
             .map_err(SecretEntryError::from)?;
+        let bytes: &[u8] = hardened.as_ref();
+        if !starts_with_magic(bytes) {
+            // Legacy (pre-envelope) payload: raw SecretPayload JSON.
+            let mut legacy = Zeroizing::new(Vec::with_capacity(bytes.len()));
+            legacy.extend_from_slice(bytes);
+            return Ok((0, legacy));
+        }
+        let (generation, payload) = envelope::unwrap_envelope(&self.name, bytes)?;
+        if self.generation != 0 && generation != self.generation {
+            return Err(SecretEntryError::Tampered {
+                path: self.name.clone(),
+                reason: "generation mismatch".into(),
+            });
+        }
+        Ok((generation, payload))
+    }
+
+    /// Decrypt this entry's payload using an age identity.
+    ///
+    /// Verifies the envelope path binding (`Tampered{path,reason}` on
+    /// mismatch). The decrypted bytes are wrapped in [`HardenedBytes`] for
+    /// the brief moment before JSON parsing, so the intermediate buffer is
+    /// page-locked and zeroized on drop.
+    pub fn decrypt(&self, identity: &AgeIdentity) -> Result<SecretPayload, SecretEntryError> {
+        let (_gen, payload_json) = self.decrypt_envelope_json(identity)?;
+        let hardened = HardenedBytes::from_slice(&payload_json).map_err(SecretEntryError::from)?;
         let payload: SecretPayload = serde_json::from_slice(hardened.as_ref())?;
         Ok(payload)
     }
@@ -121,12 +211,9 @@ impl SecretEntry {
             secret: String,
         }
 
-        let mut plaintext = age::decrypt_payload(&self.ciphertext, identity)?;
-        let hardened = HardenedBytes::from_vec(std::mem::take(&mut *plaintext))
-            .map_err(SecretEntryError::from)?;
+        let (_gen, payload_json) = self.decrypt_envelope_json(identity)?;
+        let hardened = HardenedBytes::from_slice(&payload_json).map_err(SecretEntryError::from)?;
         let view: SecretFieldOnly = serde_json::from_slice(hardened.as_ref())?;
-        // Move the secret out of the view (nothing sensitive remains behind)
-        // and wrap it in a zeroizing owner.
         Ok(Zeroizing::new(view.secret))
     }
 
@@ -143,11 +230,9 @@ impl SecretEntry {
         &self,
         identity: &AgeIdentity,
     ) -> Result<HardenedBytes, SecretEntryError> {
-        // ponytail: String for JSON compat, HardenedBytes at use-site
         let payload = self.decrypt(identity)?;
         let hb =
             HardenedBytes::from_slice(payload.secret.as_bytes()).map_err(SecretEntryError::from)?;
-        // `payload` is dropped here and its Drop impl zeroizes secret/notes.
         Ok(hb)
     }
 
@@ -160,18 +245,15 @@ impl SecretEntry {
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
             metadata: self.metadata.clone(),
+            generation: self.generation,
+            tombstone: false,
         }
     }
+}
 
-    /// Update the entry's name (sets `updated_at`).
-    pub fn rename(&mut self, new_name: &str) -> Result<(), SecretEntryError> {
-        if new_name.trim().is_empty() {
-            return Err(SecretEntryError::InvalidName("name must not be empty".into()));
-        }
-        self.name = new_name.to_string();
-        self.updated_at = jiff_now();
-        Ok(())
-    }
+fn starts_with_magic(bytes: &[u8]) -> bool {
+    let magic = ENVELOPE_MAGIC.as_bytes();
+    bytes.len() >= magic.len() && &bytes[..magic.len()] == magic
 }
 
 fn jiff_now() -> String {
@@ -208,6 +290,10 @@ mod tests {
         (id, r)
     }
 
+    fn payload_of(secret: &str) -> SecretPayload {
+        SecretPayload { secret: secret.into(), notes: None, extra: None }
+    }
+
     #[test]
     fn new_entry_encrypts_and_decrypts() {
         let (id, recipient_str) = recipient();
@@ -219,16 +305,65 @@ mod tests {
             &payload,
             SecretMetadata::default(),
             &[recipient_str],
+            1,
         )
         .unwrap();
 
         assert_eq!(entry.name, "GitHub");
         assert_eq!(entry.item_type, ItemType::Password);
-        assert_ne!(entry.ciphertext.len(), 0);
+        assert_eq!(entry.generation, 1);
+        assert_ne!(entry.ciphertext, [] as [u8; 0]);
 
         let decrypted = entry.decrypt(&id).unwrap();
         assert_eq!(decrypted.secret, "hunter2");
         assert_eq!(decrypted.notes.as_deref(), Some("note"));
+    }
+
+    #[test]
+    fn envelope_binds_path_swapped_file_fails() {
+        let (id, r) = recipient();
+        let mut a = SecretEntry::new(
+            "alpha",
+            ItemType::Password,
+            &payload_of("a"),
+            SecretMetadata::default(),
+            std::slice::from_ref(&r),
+            1,
+        )
+        .unwrap();
+        let b = SecretEntry::new(
+            "beta",
+            ItemType::Password,
+            &payload_of("b"),
+            SecretMetadata::default(),
+            &[r],
+            1,
+        )
+        .unwrap();
+        // Swap ciphertexts: `a` now holds `b`'s envelope bound to "beta".
+        a.ciphertext = b.ciphertext;
+        let err = a.decrypt(&id).unwrap_err();
+        assert!(matches!(err, SecretEntryError::Tampered { .. }), "swapped path must fail: {err}");
+    }
+
+    #[test]
+    fn envelope_binds_gen_header_mismatch_fails() {
+        let (id, r) = recipient();
+        let mut entry = SecretEntry::new(
+            "generation-check",
+            ItemType::Password,
+            &payload_of("x"),
+            SecretMetadata::default(),
+            &[r],
+            3,
+        )
+        .unwrap();
+        entry.generation = 4;
+        let err = entry.decrypt(&id).unwrap_err();
+        assert!(
+            matches!(err, SecretEntryError::Tampered { .. }),
+            "generation mismatch must fail: {err}"
+        );
     }
 
     #[test]
@@ -245,6 +380,7 @@ mod tests {
             &payload,
             SecretMetadata::default(),
             &[recipient_str],
+            1,
         )
         .unwrap();
 
@@ -262,6 +398,21 @@ mod tests {
             &payload,
             SecretMetadata::default(),
             &[recipient_str],
+            1,
+        );
+        assert!(matches!(result, Err(SecretEntryError::InvalidName(_))));
+    }
+
+    #[test]
+    fn zero_gen_rejected() {
+        let (_, recipient_str) = recipient();
+        let result = SecretEntry::new(
+            "name",
+            ItemType::Note,
+            &payload_of("x"),
+            SecretMetadata::default(),
+            &[recipient_str],
+            0,
         );
         assert!(matches!(result, Err(SecretEntryError::InvalidName(_))));
     }
@@ -273,32 +424,31 @@ mod tests {
         let metadata =
             SecretMetadata { url: Some("https://example.com".into()), ..Default::default() };
         let entry =
-            SecretEntry::new("name", ItemType::Password, &payload, metadata, &[recipient_str])
+            SecretEntry::new("name", ItemType::Password, &payload, metadata, &[recipient_str], 2)
                 .unwrap();
         let idx = entry.to_index_entry();
         assert_eq!(idx.name, "name");
         assert_eq!(idx.id, entry.id);
+        assert_eq!(idx.generation, 2);
+        assert!(!idx.tombstone);
         assert_eq!(idx.metadata.url.as_deref(), Some("https://example.com"));
     }
 
     #[test]
-    fn rename_updates_name_and_timestamp() {
-        let (_id, recipient_str) = recipient();
-        let payload = SecretPayload { secret: "x".into(), notes: None, extra: None };
+    fn set_payload_rebinds_gen() {
+        let (id, r) = recipient();
         let mut entry = SecretEntry::new(
-            "old",
-            ItemType::Note,
-            &payload,
+            "rebind",
+            ItemType::Password,
+            &payload_of("v1"),
             SecretMetadata::default(),
-            &[recipient_str],
+            std::slice::from_ref(&r),
+            1,
         )
         .unwrap();
-        let original_updated = entry.updated_at.clone();
-        // Sleep briefly to ensure timestamp changes.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        entry.rename("new").unwrap();
-        assert_eq!(entry.name, "new");
-        assert_ne!(entry.updated_at, original_updated);
+        entry.set_payload(&payload_of("v2"), &[r], 2).unwrap();
+        assert_eq!(entry.generation, 2);
+        assert_eq!(entry.decrypt(&id).unwrap().secret, "v2");
     }
 
     #[test]
@@ -315,6 +465,7 @@ mod tests {
             &payload,
             SecretMetadata::default(),
             &[recipient_str],
+            1,
         )
         .unwrap();
 
@@ -338,14 +489,13 @@ mod tests {
             &payload,
             SecretMetadata::default(),
             &[recipient_str1],
+            1,
         )
         .unwrap();
 
         entry.re_encrypt(&id1, &[recipient_str2]).unwrap();
 
-        // Old identity can no longer decrypt.
         assert!(entry.decrypt(&id1).is_err());
-        // New identity can.
         let decrypted = entry.decrypt(&id2).unwrap();
         assert_eq!(decrypted.secret, "re-encrypt me");
     }
@@ -360,11 +510,11 @@ mod tests {
             &payload,
             SecretMetadata::default(),
             &[recipient_str],
+            1,
         )
         .unwrap();
         let json = serde_json::to_value(&entry).unwrap();
         let ct = json["ciphertext"].as_str().unwrap();
-        // Ciphertext is base64-encoded.
         assert!(BASE64_STANDARD.decode(ct).is_ok());
     }
 }

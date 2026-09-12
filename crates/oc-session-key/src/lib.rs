@@ -24,8 +24,6 @@
 
 use std::{future::Future, pin::Pin};
 
-use sha2::Digest;
-
 pub mod abi;
 pub mod error;
 pub mod evm;
@@ -50,17 +48,71 @@ pub use types::{
 
 /// Compute the ERC-7715 permission Merkle root from a `PolicyV2`.
 ///
-/// **Deviation note (R74 YAGNI):** Phase 1 uses SHA-256 of the serialized
-/// `PolicyV2` as a stand-in for the Merkle root. Real EVM uses keccak256 + a
-/// Merkle tree of individual permissions; that is a Phase 2 concern. The root
-/// is deterministic for a given policy, which is sufficient for the Phase 1
-/// mock path. Shared by the EVM and mock providers to avoid duplicated
-/// implementations (M7 fix).
+/// keccak256 Merkle over canonical permission leaves (EVM-canonical hash).
+/// Each leaf is `keccak256("<domain>:<canonical-value>")` for the
+/// permission-relevant policy fields (chain/contract/asset whitelists, expiry,
+/// amount caps, session/device binding); pairwise `keccak256(left || right)`
+/// combines them (odd leaf duplicated) to a single 32-byte root, hex-encoded
+/// as `0x…`. Deterministic per policy; shared by the EVM and mock providers
+/// (M7 fix).
+///
+/// **Residual gap vs full ERC-7715:** a production SCA builds leaves from the
+/// on-chain permission struct (validated via `alloy` in `oc-netagent`), not
+/// from `PolicyV2` JSON projections. This root is consensus-compatible at the
+/// hash level (keccak256 Merkle) but NOT wire-identical to a Solidity
+/// `MerkleProof` tree until the `real-rpc` bridge supplies on-chain leaf
+/// encodings. The lock test below pins the current root so any drift is
+/// explicit.
 pub(crate) fn compute_merkle_root(policy: &PolicyV2) -> Result<String, SessionKeyError> {
-    let json =
-        serde_json::to_string(policy).map_err(|e| SessionKeyError::MerkleFailed(e.to_string()))?;
-    let hash = sha2::Sha256::digest(json.as_bytes());
-    Ok(format!("0x{}", hex::encode(hash)))
+    use sha3::{Digest, Keccak256};
+
+    fn leaf(domain: &str, value: &str) -> [u8; 32] {
+        let mut h = Keccak256::new();
+        h.update(domain.as_bytes());
+        h.update(b":");
+        h.update(value.as_bytes());
+        h.finalize().into()
+    }
+
+    let rules = &policy.rules;
+    let mut leaves = vec![
+        leaf("session", &policy.session_key_id),
+        leaf("device", &policy.device_id),
+        leaf("expiry", &rules.expiry_unix.to_string()),
+        leaf("max_single_usd", &rules.max_single_amount_usd.to_string()),
+        leaf("max_daily_usd", &rules.max_daily_amount_usd.to_string()),
+        leaf("max_monthly_usd", &rules.max_monthly_amount_usd.to_string()),
+        leaf("chains", &rules.chain_whitelist.join(",")),
+        leaf("contracts", &rules.contract_whitelist.join(",")),
+        leaf("assets", &rules.asset_whitelist.join(",")),
+        leaf(
+            "budget",
+            &format!("{}@{}", rules.expiry_unix, policy.budget_allocation.allocated_usd),
+        ),
+    ];
+    // Canonical order: sort leaf hashes so field insertion order cannot fork
+    // the root.
+    leaves.sort_unstable();
+    while leaves.len() > 1 {
+        let mut next = Vec::with_capacity(leaves.len().div_ceil(2));
+        let mut i = 0;
+        while i < leaves.len() {
+            let left = leaves[i];
+            let right = if i + 1 < leaves.len() { leaves[i + 1] } else { left };
+            let mut h = Keccak256::new();
+            h.update(left);
+            h.update(right);
+            next.push(h.finalize().into());
+            i += 2;
+        }
+        next.sort_unstable();
+        leaves = next;
+    }
+    let root: [u8; 32] = leaves
+        .into_iter()
+        .next()
+        .ok_or_else(|| SessionKeyError::MerkleFailed("empty permission set".to_string()))?;
+    Ok(format!("0x{}", hex::encode(root)))
 }
 
 /// The multi-chain `SessionKeyProvider` trait (R21).

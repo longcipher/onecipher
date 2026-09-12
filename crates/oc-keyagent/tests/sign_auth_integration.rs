@@ -45,6 +45,13 @@ impl HomeGuard {
         // SAFETY: tests are serialized via HOME_LOCK; no other thread reads
         // HOME concurrently within this crate's test binary.
         unsafe { std::env::set_var("HOME", &home) };
+        // Opt out of per-request enclave isolation: integration tests cannot
+        // spawn the real `onecipher` binary (`current_exe` here is the test
+        // harness, which has no `--enclave-child` entry point), so they
+        // exercise the in-process fallback. Idempotent set-only — never
+        // unset — so parallel tests in this binary cannot race on it.
+        // SAFETY: same serialization as HOME above.
+        unsafe { std::env::set_var("OC_ENCLAVE", "off") };
         Self { _lock: lock, _dir: dir }
     }
 }
@@ -58,7 +65,9 @@ fn create_device_bound_wallet(wallet_id: &str) -> Vec<u8> {
         .expect("derive unlock token");
     let passphrase = token.to_passphrase().expect("derive passphrase");
 
-    let envelope = oc_signer::encrypt(ABANDON_PHRASE.as_bytes(), passphrase.as_bytes()).unwrap();
+    let envelope =
+        oc_vault::crypto::encrypt_with_passphrase(ABANDON_PHRASE.as_bytes(), passphrase.as_bytes())
+            .unwrap();
     let wallet = EncryptedWallet::new(
         wallet_id.to_string(),
         "auth-wallet".to_string(),

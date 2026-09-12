@@ -10,7 +10,14 @@ use serde_json::{Value, json};
 use super::state::{KeyInfo, RpcError, SignPaymentParams, SignerState};
 
 /// `ledgerflow_keys` → `[{"alg":"ed25519","public_key":"<b64>"}, ...]`.
+///
+/// Per-request enclave (default): key derivation runs in a subprocess via the
+/// read-only `public_key` op (no signing side effect); the parent never holds
+/// key material. In-process fallback below is tests / `OC_ENCLAVE=off` only.
 pub(crate) fn handle_keys(state: &SignerState) -> Result<Value, RpcError> {
+    if crate::enclave_spawn::signing_enclave_enabled() {
+        return handle_keys_enclave(state);
+    }
     let mut keys = Vec::new();
     match state.ed25519_pubkey() {
         Ok(pubkey) => keys.push(KeyInfo::new(
@@ -27,6 +34,34 @@ pub(crate) fn handle_keys(state: &SignerState) -> Result<Value, RpcError> {
             None,
         )),
         Err(e) => return Err(RpcError::new(-32603, e)),
+    }
+    serde_json::to_value(keys).map_err(|e| RpcError::new(-32603, e.to_string()))
+}
+
+/// `ledgerflow_keys` through the enclave child (passphrase mode, `public_key`
+/// op — derivation only, no signing).
+fn handle_keys_enclave(state: &SignerState) -> Result<Value, RpcError> {
+    let wallet_id = state.configured_wallet_id().map_err(|e| RpcError::new(-32603, e))?;
+    let mut keys = Vec::new();
+    for (alg, chain_id) in
+        [("ed25519", "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"), ("secp256k1", "eip155:1")]
+    {
+        let mut req = crate::enclave_spawn::fresh_request(
+            oc_keyagent::enclave::OP_PUBLIC_KEY,
+            &wallet_id,
+            chain_id,
+        );
+        req.index = state.index();
+        req.credential_hex = Some(state.passphrase_credential_hex());
+        let resp = crate::enclave_spawn::spawn_enclave(&req)
+            .map_err(|e| RpcError::new(-32603, crate::enclave_spawn::sanitize_enclave_error(&e)))?;
+        let pubkey = crate::enclave_spawn::response_hex(resp.public_key_hex.as_ref(), "public key")
+            .map_err(|e| RpcError::new(-32603, crate::enclave_spawn::sanitize_enclave_error(&e)))?;
+        keys.push(KeyInfo::new(
+            alg,
+            base64::engine::general_purpose::STANDARD.encode(&pubkey),
+            None,
+        ));
     }
     serde_json::to_value(keys).map_err(|e| RpcError::new(-32603, e.to_string()))
 }
@@ -49,6 +84,12 @@ pub(crate) fn handle_sign(state: &SignerState, params: &Value) -> Result<Value, 
         .and_then(Value::as_str)
         .unwrap_or("ed25519")
         .to_ascii_lowercase();
+
+    // Per-request enclave (default): decrypt→sign→wipe runs in a subprocess.
+    // In-process fallback below is tests / `OC_ENCLAVE=off` only.
+    if crate::enclave_spawn::signing_enclave_enabled() {
+        return handle_sign_enclave(state, &message, &alg);
+    }
 
     let (signature, pubkey) = match alg.as_str() {
         "ed25519" => {
@@ -78,6 +119,43 @@ pub(crate) fn handle_sign(state: &SignerState, params: &Value) -> Result<Value, 
         }
         other => return Err(RpcError::new(-32602, format!("unsupported alg: {other}"))),
     };
+
+    serde_json::to_value(json!({
+        "signer": {
+            "alg": alg,
+            "public_key": base64::engine::general_purpose::STANDARD.encode(pubkey),
+            "key_id": null,
+        },
+        "signature": {
+            "value": base64::engine::general_purpose::STANDARD.encode(&signature),
+            "alg": alg,
+        },
+    }))
+    .map_err(|e| RpcError::new(-32603, e.to_string()))
+}
+
+/// `ledgerflow_sign` through the enclave child (passphrase mode).
+fn handle_sign_enclave(state: &SignerState, message: &[u8], alg: &str) -> Result<Value, RpcError> {
+    let chain_id = match alg {
+        "ed25519" => "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+        "secp256k1" => "eip155:1",
+        other => return Err(RpcError::new(-32602, format!("unsupported alg: {other}"))),
+    };
+    let wallet_id = state.configured_wallet_id().map_err(|e| RpcError::new(-32603, e))?;
+    let mut req = crate::enclave_spawn::fresh_request(
+        oc_keyagent::enclave::OP_SIGN_MESSAGE,
+        &wallet_id,
+        chain_id,
+    );
+    req.payload_hex = hex::encode(message);
+    req.index = state.index();
+    req.credential_hex = Some(state.passphrase_credential_hex());
+    let resp = crate::enclave_spawn::spawn_enclave(&req)
+        .map_err(|e| RpcError::new(-32603, crate::enclave_spawn::sanitize_enclave_error(&e)))?;
+    let signature = crate::enclave_spawn::response_hex(resp.signature_hex.as_ref(), "signature")
+        .map_err(|e| RpcError::new(-32603, crate::enclave_spawn::sanitize_enclave_error(&e)))?;
+    let pubkey = crate::enclave_spawn::response_hex(resp.public_key_hex.as_ref(), "public key")
+        .map_err(|e| RpcError::new(-32603, crate::enclave_spawn::sanitize_enclave_error(&e)))?;
 
     serde_json::to_value(json!({
         "signer": {
@@ -130,10 +208,6 @@ pub(crate) fn handle_sign_payment(state: &SignerState, params: &Value) -> Result
         None => 0,
     };
 
-    // Decrypt the signing key.
-    let secret = state.secret_key(oc_core::ChainType::Evm).map_err(|e| RpcError::new(-32603, e))?;
-    let signer = oc_signer::chains::EvmSigner;
-
     // Build an unsigned EIP-1559 transaction:
     // RLP([chain_id, nonce, max_priority_fee, max_fee, gas_limit, to, value, data, access_list])
     let items: Vec<u8> = [
@@ -152,12 +226,47 @@ pub(crate) fn handle_sign_payment(state: &SignerState, params: &Value) -> Result
     let mut unsigned_tx = vec![0x02u8];
     unsigned_tx.extend_from_slice(&oc_signer::rlp::encode_list(&items));
 
+    // Per-request enclave (default): decrypt→sign→wipe runs in a subprocess.
+    // In-process fallback below is tests / `OC_ENCLAVE=off` only.
+    if crate::enclave_spawn::signing_enclave_enabled() {
+        return handle_sign_payment_enclave(state, p.chain_id(), &unsigned_tx);
+    }
+
+    // Decrypt the signing key.
+    let secret = state.secret_key(oc_core::ChainType::Evm).map_err(|e| RpcError::new(-32603, e))?;
+    let signer = oc_signer::chains::EvmSigner;
+
     let output = signer
         .sign_transaction(secret.expose(), &unsigned_tx)
         .map_err(|e| RpcError::new(-32603, format!("signing failed: {e}")))?;
     let signed = signer
         .encode_signed_transaction(&unsigned_tx, &output)
         .map_err(|e| RpcError::new(-32603, format!("tx encoding failed: {e}")))?;
+
+    let raw_transaction = format!("0x{}", hex::encode(&signed));
+    serde_json::to_value(json!({ "raw_transaction": raw_transaction, "tx_hash": null }))
+        .map_err(|e| RpcError::new(-32603, e.to_string()))
+}
+
+/// `ledgerflow_sign_payment` through the enclave child (passphrase mode).
+fn handle_sign_payment_enclave(
+    state: &SignerState,
+    chain_id: &str,
+    unsigned_tx: &[u8],
+) -> Result<Value, RpcError> {
+    let wallet_id = state.configured_wallet_id().map_err(|e| RpcError::new(-32603, e))?;
+    let mut req = crate::enclave_spawn::fresh_request(
+        oc_keyagent::enclave::OP_SIGN_TRANSACTION,
+        &wallet_id,
+        chain_id,
+    );
+    req.payload_hex = hex::encode(unsigned_tx);
+    req.index = state.index();
+    req.credential_hex = Some(state.passphrase_credential_hex());
+    let resp = crate::enclave_spawn::spawn_enclave(&req)
+        .map_err(|e| RpcError::new(-32603, crate::enclave_spawn::sanitize_enclave_error(&e)))?;
+    let signed = crate::enclave_spawn::response_hex(resp.signed_tx_hex.as_ref(), "signed tx")
+        .map_err(|e| RpcError::new(-32603, crate::enclave_spawn::sanitize_enclave_error(&e)))?;
 
     let raw_transaction = format!("0x{}", hex::encode(&signed));
     serde_json::to_value(json!({ "raw_transaction": raw_transaction, "tx_hash": null }))

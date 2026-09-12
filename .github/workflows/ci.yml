@@ -99,6 +99,52 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/check-duplicate-deps.sh
 
+  no-std:
+    name: no-std (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # A13 pilot (oc-signer only): host must pass; thumbv7m is
+        # experimental until each dependency's `std` gate is audited.
+        target: [host, thumbv7m-none-eabi]
+    continue-on-error: ${{ matrix.target == 'thumbv7m-none-eabi' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target == 'thumbv7m-none-eabi' && 'thumbv7m-none-eabi' || '' }}
+      - uses: Swatinem/rust-cache@v2
+      - name: host no_std check
+        if: matrix.target == 'host'
+        run: cargo check -p oc-signer --no-default-features
+      - name: thumbv7m no_std check (experimental)
+        if: matrix.target == 'thumbv7m-none-eabi'
+        run: cargo check -p oc-signer --no-default-features --target thumbv7m-none-eabi
+
+  skill-consistency:
+    name: SKILL <-> clap consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-skill-consistency.sh
+
+  makefile-mirror:
+    name: Justfile <-> Makefile mirror
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/check-makefile-mirror.sh
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-deny
+      - run: cargo deny check advisories licenses bans sources
+
   test:
     name: Test
     runs-on: ubuntu-latest

@@ -4,19 +4,30 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     curve::Curve,
+    encoding::double_sha256,
     traits::{ChainSigner, SignOutput, SignerError},
 };
 
 /// Spark chain signer (Bitcoin L2, secp256k1).
 ///
-/// Reuses the Bitcoin BIP-84 derivation path — Spark operates on the same
-/// key as Bitcoin since it's a Bitcoin L2 protocol.
+/// Constant sources (A11):
+/// - SLIP-44 registers coin type **8797555** for the Spark namespace
+///   (`ChainType::Spark::default_coin_type()`, also the `coin_type` column in
+///   `oc-core/src/chain_registry.rs`). Source: SLIP-44 coin-type registry.
+/// - Derivation REUSES the Bitcoin BIP-84 path `m/84'/0'/0'/0/{index}` (purpose `84'`, coin `0'`)
+///   because Spark operates on the same key as Bitcoin (Bitcoin L2). Hence
+///   `ChainSigner::coin_type()` returns `0` (the path's coin field), NOT 8797555 (the namespace
+///   registry entry). The split is intentional and locked by `chain_registry` tests.
+/// - Address format `spark:` + compressed-pubkey hex follows the Spark (Lightspark) account
+///   convention for L2 identity keys.
+/// - Transaction/message hashing reuses Bitcoin conventions (double-SHA256 sighash, single-SHA256
+///   message) via the shared `crate::encoding` primitives.
 pub struct SparkSigner;
 
 impl SparkSigner {
     fn signing_key(private_key: &[u8]) -> Result<SigningKey, SignerError> {
         SigningKey::from_slice(private_key)
-            .map_err(|_| SignerError::InvalidPrivateKey("key parsing failed".into()))
+            .map_err(|_| SignerError::Input("key parsing failed".into()))
     }
 }
 
@@ -30,7 +41,10 @@ impl ChainSigner for SparkSigner {
     }
 
     fn coin_type(&self) -> u32 {
-        0 // same as Bitcoin
+        // Path coin field (BIP-84 `0'`), NOT the SLIP-44 namespace registry
+        // entry 8797555 (see struct docs). Keeps `default_derivation_path`
+        // byte-identical to Bitcoin by construction.
+        0
     }
 
     fn derive_address(&self, private_key: &[u8]) -> Result<String, SignerError> {
@@ -42,7 +56,7 @@ impl ChainSigner for SparkSigner {
 
     fn sign(&self, private_key: &[u8], message: &[u8]) -> Result<SignOutput, SignerError> {
         if message.len() != 32 {
-            return Err(SignerError::InvalidMessage(format!(
+            return Err(SignerError::Input(format!(
                 "expected 32-byte hash, got {} bytes",
                 message.len()
             )));
@@ -66,7 +80,8 @@ impl ChainSigner for SparkSigner {
         private_key: &[u8],
         tx_bytes: &[u8],
     ) -> Result<SignOutput, SignerError> {
-        let hash = Sha256::digest(Sha256::digest(tx_bytes));
+        // Shared double-SHA256 with Bitcoin (Bitcoin-L2 sighash convention).
+        let hash = double_sha256(tx_bytes);
         self.sign(private_key, &hash)
     }
 

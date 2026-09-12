@@ -2,6 +2,11 @@
 //!
 //! Only implements the subset needed to append v, r, s to an unsigned
 //! EIP-1559/EIP-2930 transaction list.
+//!
+//! A13: `no_std`-compatible (uses `alloc` only when `std` is off).
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 use crate::traits::SignerError;
 
@@ -9,7 +14,7 @@ use crate::traits::SignerError;
 /// Returns `(payload_offset, payload_length)`.
 fn decode_length(data: &[u8]) -> Result<(usize, usize), SignerError> {
     if data.is_empty() {
-        return Err(SignerError::InvalidTransaction("empty input".into()));
+        return Err(SignerError::Transaction("empty input".into()));
     }
     let prefix = data[0];
     match prefix {
@@ -24,7 +29,7 @@ fn decode_length(data: &[u8]) -> Result<(usize, usize), SignerError> {
         0xb8..=0xbf => {
             let len_bytes = (prefix - 0xb7) as usize;
             if data.len() < 1 + len_bytes {
-                return Err(SignerError::InvalidTransaction("truncated RLP length".into()));
+                return Err(SignerError::Transaction("truncated RLP length".into()));
             }
             let len = read_be_uint(&data[1..=len_bytes]);
             Ok((1 + len_bytes, len))
@@ -38,7 +43,7 @@ fn decode_length(data: &[u8]) -> Result<(usize, usize), SignerError> {
         0xf8..=0xff => {
             let len_bytes = (prefix - 0xf7) as usize;
             if data.len() < 1 + len_bytes {
-                return Err(SignerError::InvalidTransaction("truncated RLP length".into()));
+                return Err(SignerError::Transaction("truncated RLP length".into()));
             }
             let len = read_be_uint(&data[1..=len_bytes]);
             Ok((1 + len_bytes, len))
@@ -130,12 +135,12 @@ pub fn encode_signed_typed_tx(
     s: &[u8; 32],
 ) -> Result<Vec<u8>, SignerError> {
     if unsigned_tx.is_empty() {
-        return Err(SignerError::InvalidTransaction("empty transaction".into()));
+        return Err(SignerError::Transaction("empty transaction".into()));
     }
 
     let type_byte = unsigned_tx[0];
     if type_byte != 0x01 && type_byte != 0x02 {
-        return Err(SignerError::InvalidTransaction(
+        return Err(SignerError::Transaction(
             "unsupported transaction type (expected 0x01 or 0x02)".into(),
         ));
     }
@@ -144,7 +149,7 @@ pub fn encode_signed_typed_tx(
     let (payload_offset, payload_length) = decode_length(rlp_data)?;
 
     if rlp_data.len() < payload_offset + payload_length {
-        return Err(SignerError::InvalidTransaction("truncated RLP payload".into()));
+        return Err(SignerError::Transaction("truncated RLP payload".into()));
     }
 
     // Extract the inner list items (raw concatenated RLP items)

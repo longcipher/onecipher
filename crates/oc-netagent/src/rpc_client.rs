@@ -37,6 +37,11 @@ pub struct HpxRpcClient {
     chain_id: String,
     rpc_url: String,
     client: hpx::Client,
+    /// Optional native-token price feed endpoint (see [`Self::with_price_feed`]).
+    /// Falls back to the `OC_PRICE_FEED_URL` env var. When neither is set,
+    /// [`RpcClient::native_price_usd`] fails closed (explicit error — the
+    /// simulation layer degrades USD figures to "unknown" instead of guessing).
+    price_feed_url: Option<String>,
 }
 
 impl HpxRpcClient {
@@ -45,7 +50,31 @@ impl HpxRpcClient {
     /// `chain_id` follows the CAIP-2 namespace (e.g. `eip155:1`,
     /// `eip155:8453`). `rpc_url` must be an HTTP(S) JSON-RPC endpoint.
     pub fn new(chain_id: impl Into<String>, rpc_url: impl Into<String>) -> Result<Self, RpcError> {
-        Ok(Self { chain_id: chain_id.into(), rpc_url: rpc_url.into(), client: hpx::Client::new() })
+        Ok(Self {
+            chain_id: chain_id.into(),
+            rpc_url: rpc_url.into(),
+            client: hpx::Client::new(),
+            price_feed_url: None,
+        })
+    }
+
+    /// Attach a native-token price feed endpoint.
+    ///
+    /// The endpoint must return JSON with a numeric `price`, `usd`, or
+    /// `result` field (e.g. `{"price": 2500.0}`). Takes precedence over the
+    /// `OC_PRICE_FEED_URL` env var. When neither is set, `native_price_usd`
+    /// fails closed — callers (notably `simulate_intent`) treat that as
+    /// "price unknown", never as zero.
+    pub fn with_price_feed(mut self, url: impl Into<String>) -> Self {
+        self.price_feed_url = Some(url.into());
+        self
+    }
+
+    /// Effective price feed URL: explicit value, else `OC_PRICE_FEED_URL` env.
+    fn effective_price_feed_url(&self) -> Option<String> {
+        self.price_feed_url
+            .clone()
+            .or_else(|| std::env::var("OC_PRICE_FEED_URL").ok().filter(|v| !v.trim().is_empty()))
     }
 
     /// Send a JSON-RPC 2.0 POST and return the `result` field.
@@ -229,10 +258,43 @@ impl RpcClient for HpxRpcClient {
     }
 
     fn native_price_usd(&self) -> Pin<Box<dyn Future<Output = Result<f64, RpcError>> + Send + '_>> {
-        Box::pin(async {
-            Err(RpcError::Parse(
-                "native_price_usd not yet implemented; no price feed integrated".into(),
-            ))
+        let feed = self.effective_price_feed_url();
+        Box::pin(async move {
+            let Some(url) = feed else {
+                // Fail-closed: no price feed integrated. The simulation layer
+                // (`simulate_intent`) maps this to "price unknown" (USD figures
+                // omitted + warning) rather than aborting. Set a feed via
+                // `with_price_feed` or the `OC_PRICE_FEED_URL` env var to get
+                // real estimates. Never return a guessed constant here — a
+                // stale hardcoded price would misstate gas costs.
+                return Err(RpcError::Parse(
+                    "native_price_usd: no price feed configured (set OC_PRICE_FEED_URL or HpxRpcClient::with_price_feed)".into(),
+                ));
+            };
+            // Minimal price-feed fetch: GET the URL, expect JSON with a numeric
+            // `price`, `usd`, or `result` field. Any shape mismatch is a typed
+            // parse error (fail-closed), never a silent zero.
+            let resp = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| RpcError::Transport(e.to_string()))?;
+            if !resp.status().is_success() {
+                return Err(RpcError::Transport(format!("price feed HTTP {}", resp.status())));
+            }
+            let v: Value =
+                resp.json().await.map_err(|e| RpcError::Parse(format!("price feed JSON: {e}")))?;
+            for key in ["price", "usd", "result"] {
+                if let Some(n) = v.get(key).and_then(Value::as_f64) {
+                    if n.is_finite() && n >= 0.0 {
+                        return Ok(n);
+                    }
+                }
+            }
+            Err(RpcError::Parse(format!(
+                "price feed response has no numeric price/usd/result: {v}"
+            )))
         })
     }
 
@@ -259,6 +321,7 @@ fn parse_hex_u64(s: &str) -> Result<u64, RpcError> {
 }
 
 #[cfg(test)]
+#[allow(unsafe_code)]
 mod tests {
     use super::*;
 
@@ -339,9 +402,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_price_usd_returns_not_implemented() {
+    async fn native_price_usd_fails_closed_without_feed() {
+        // Fail-closed: with no feed configured the error names the fix
+        // (OC_PRICE_FEED_URL / with_price_feed) instead of guessing a price.
+        let saved = std::env::var("OC_PRICE_FEED_URL").ok();
+        unsafe { std::env::remove_var("OC_PRICE_FEED_URL") };
         let c = HpxRpcClient::new("eip155:1", "https://eth.example.com").expect("new");
         let err = c.native_price_usd().await.unwrap_err();
-        assert!(format!("{err}").contains("not yet implemented"));
+        assert!(format!("{err}").contains("no price feed configured"), "got: {err}");
+        if let Some(v) = saved {
+            unsafe { std::env::set_var("OC_PRICE_FEED_URL", v) };
+        }
+    }
+
+    #[test]
+    fn with_price_feed_sets_explicit_url() {
+        let c = HpxRpcClient::new("eip155:1", "https://eth.example.com")
+            .expect("new")
+            .with_price_feed("https://price.example.com/eth");
+        assert_eq!(c.effective_price_feed_url().as_deref(), Some("https://price.example.com/eth"));
     }
 }

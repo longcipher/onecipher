@@ -26,8 +26,23 @@ path = "src/main.rs"
 # a signing-focused binary with zero C-crypto (rustls+ring only).
 #
 # `xrpl` is OFF by default — see the rationale in `oc-signer/Cargo.toml`.
-default = ["webui"]
+#
+# `qr` is ON by default. It pulls `qr2term` (terminal QR via half-block
+# characters `▀▄█`). Build with `--no-default-features` (plus the features
+# you need) for a minimal binary without QR rendering; `--qr` then falls
+# back to plaintext with a warning instead of failing.
+#
+# Chain umbrella (A12): `onecipher` enables `oc-signer/mainstream` by default
+# (high-traffic families; exotic chains stay off). Full coverage needs
+# `--features all-chains` (adds `spark`, `filecoin`, `nano`, `near`, `xrpl`
+# via `oc-signer/all-chains`). The workspace has NO `default-members`
+# (owx trap): `just build` (`cargo build --workspace`) always builds every
+# crate regardless of these feature flags.
+default = ["webui", "qr", "mainstream"]
+mainstream = ["oc-signer/mainstream"]
+all-chains = ["mainstream", "oc-signer/all-chains"]
 git = ["oc-secret/git"]
+qr = ["dep:qr2term"]
 webui = ["dep:oc-webui"]
 xrpl = ["oc-signer/xrpl"]
 
@@ -42,6 +57,7 @@ dirs = { workspace = true }
 ed25519-dalek = { workspace = true }
 eyre = { workspace = true }
 hex = { workspace = true }
+hmac = { workspace = true }
 hpx = { workspace = true, features = ["rustls-tls", "http1", "http2", "json"] }
 jiff = { workspace = true, features = ["serde", "std"] }
 k256 = { workspace = true }
@@ -56,7 +72,7 @@ oc-wallet = { workspace = true, features = ["rpc", "sui-grpc"] }
 oc-walletconnect = { workspace = true }
 oc-webui = { workspace = true, optional = true }
 prost = { workspace = true }
-qr2term = { workspace = true }
+qr2term = { workspace = true, optional = true }
 rand = { workspace = true }
 ratatui = { workspace = true }
 regex-lite = { workspace = true }
@@ -74,7 +90,7 @@ tracing = { workspace = true }
 zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-oc-signer = { workspace = true, features = ["fast-kdf"] }
+oc-vault = { workspace = true, features = ["fast-kdf"] }
 proptest = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 

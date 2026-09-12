@@ -17,6 +17,7 @@
 #![deny(unsafe_code)]
 
 pub mod error;
+pub mod executable;
 pub mod native_strategy;
 pub mod secret;
 pub mod v1;

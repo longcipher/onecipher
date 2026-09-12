@@ -40,6 +40,9 @@ use axum::{
     response::{IntoResponse, Response},
     routing::post,
 };
+// `ChainSigner` trait must be in scope for `EvmSigner::sign_transaction` /
+// `encode_signed_transaction` (trait methods, not inherent).
+use oc_signer::ChainSigner as _;
 use serde_json::{Value, json};
 pub(crate) use state::SignerState;
 
@@ -47,7 +50,7 @@ use crate::CliError;
 
 /// Run a synchronous handler on tokio's blocking thread pool (H-06).
 ///
-/// The `ledgerflow_*` handlers perform Argon2id KDF work and vault/passkey
+/// The `ledgerflow_*` handlers perform age scrypt KDF work and vault/passkey
 /// file I/O; running them inline on an async worker would stall the reactor.
 /// A cancelled or panicked blocking task maps to a generic -32603 (L-07: no
 /// internal detail leaks to the client).
@@ -82,6 +85,125 @@ async fn sign_async(state: SignerState, params: Value) -> Result<Value, state::R
 /// H-06: [`handlers::handle_sign_payment`] off the async path.
 async fn sign_payment_async(state: SignerState, params: Value) -> Result<Value, state::RpcError> {
     run_blocking(move || handlers::handle_sign_payment(&state, &params)).await
+}
+
+/// Intent pre-flight on the wallet-rpc hot path (read-only, no auth).
+///
+/// Shares `oc_netagent::intent::hot_path` with the WC/HTTP-RPC surfaces:
+/// `simulate_for_hot_path` over a real RPC endpoint (fail-closed without
+/// `rpc_url` / `OC_RPC_URL`). `CrossChainTransfer` stays fail-closed.
+async fn intent_simulate_async(params: Value) -> Result<Value, state::RpcError> {
+    run_blocking(move || {
+        let chain_id = params
+            .get("chain_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| state::RpcError::new(-32602, "missing 'chain_id'"))?;
+        let session_key_id = params
+            .get("session_key_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| state::RpcError::new(-32602, "missing 'session_key_id'"))?;
+        let kind_value =
+            params.get("kind").ok_or_else(|| state::RpcError::new(-32602, "missing 'kind'"))?;
+        let kind: oc_netagent::intent::IntentKind = serde_json::from_value(kind_value.clone())
+            .map_err(|e| state::RpcError::new(-32602, format!("invalid kind: {e}")))?;
+        let intent = oc_netagent::intent::Intent::new(
+            kind,
+            chain_id.to_string(),
+            session_key_id.to_string(),
+        );
+        let rpc_url = params.get("rpc_url").and_then(serde_json::Value::as_str).map(String::from);
+        let cfg = oc_netagent::intent::HotPathConfig::new(rpc_url);
+        let rpc = oc_netagent::intent::select_rpc_client(&intent.chain_id, &cfg)
+            .map_err(|e| state::RpcError::new(-32603, format!("intent RPC unavailable: {e}")))?;
+        let summary = crate::shared_runtime()
+            .block_on(oc_netagent::intent::simulate_for_hot_path(&intent, &*rpc))
+            .map_err(|e| state::RpcError::new(-32603, format!("intent simulate: {e}")))?;
+        serde_json::to_value(&summary)
+            .map_err(|e| state::RpcError::new(-32603, format!("summary encode: {e}")))
+    })
+    .await
+}
+
+/// Intent execution on the wallet-rpc hot path (auth-gated, local signing).
+///
+/// C13 trait boundary: the intent code sees opaque bytes; the `IntentSigner`
+/// impl below decrypts the EVM vault key and signs locally (loopback trust
+/// model — unlike the WC daemon, which forwards to the Key-Agent over UDS).
+async fn intent_execute_async(state: SignerState, params: Value) -> Result<Value, state::RpcError> {
+    run_blocking(move || {
+        let chain_id = params
+            .get("chain_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| state::RpcError::new(-32602, "missing 'chain_id'"))?;
+        let session_key_id = params
+            .get("session_key_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| state::RpcError::new(-32602, "missing 'session_key_id'"))?;
+        let kind_value =
+            params.get("kind").ok_or_else(|| state::RpcError::new(-32602, "missing 'kind'"))?;
+        let kind: oc_netagent::intent::IntentKind = serde_json::from_value(kind_value.clone())
+            .map_err(|e| state::RpcError::new(-32602, format!("invalid kind: {e}")))?;
+        let from_address = params
+            .get("from_address")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| state::RpcError::new(-32602, "missing 'from_address'"))?
+            .to_string();
+        let intent = oc_netagent::intent::Intent::new(
+            kind,
+            chain_id.to_string(),
+            session_key_id.to_string(),
+        );
+        let rpc_url = params.get("rpc_url").and_then(serde_json::Value::as_str).map(String::from);
+        let cfg = oc_netagent::intent::HotPathConfig::new(rpc_url);
+        let rpc = oc_netagent::intent::select_rpc_client(&intent.chain_id, &cfg)
+            .map_err(|e| state::RpcError::new(-32603, format!("intent RPC unavailable: {e}")))?;
+        // Local C13 signer: the EVM vault key signs the unsigned bytes, then
+        // the signature is encoded into a full signed RLP transaction for
+        // broadcast. Per-request enclave (default): decrypt→sign→wipe runs in
+        // a subprocess; the in-process fallback below is tests /
+        // `OC_ENCLAVE=off` only.
+        let signer = |_key: &oc_netagent::intent::SigningKeyRef,
+                      unsigned_tx: &[u8]|
+         -> Result<Vec<u8>, oc_netagent::intent::IntentError> {
+            if crate::enclave_spawn::signing_enclave_enabled() {
+                let wallet_id = state
+                    .configured_wallet_id()
+                    .map_err(oc_netagent::intent::IntentError::Execution)?;
+                let mut req = crate::enclave_spawn::fresh_request(
+                    oc_keyagent::enclave::OP_SIGN_TRANSACTION,
+                    &wallet_id,
+                    "eip155:1",
+                );
+                req.payload_hex = hex::encode(unsigned_tx);
+                req.index = state.index();
+                req.credential_hex = Some(state.passphrase_credential_hex());
+                let resp = crate::enclave_spawn::spawn_enclave(&req)
+                    .map_err(oc_netagent::intent::IntentError::Execution)?;
+                return crate::enclave_spawn::response_hex(resp.signed_tx_hex.as_ref(), "signed tx")
+                    .map_err(oc_netagent::intent::IntentError::Execution);
+            }
+            let secret = state
+                .secret_key(oc_core::ChainType::Evm)
+                .map_err(oc_netagent::intent::IntentError::Execution)?;
+            let evm = oc_signer::chains::EvmSigner;
+            let sig = evm
+                .sign_transaction(secret.expose(), unsigned_tx)
+                .map_err(|e| oc_netagent::intent::IntentError::Execution(e.to_string()))?;
+            evm.encode_signed_transaction(unsigned_tx, &sig)
+                .map_err(|e| oc_netagent::intent::IntentError::Execution(e.to_string()))
+        };
+        let result = crate::shared_runtime()
+            .block_on(oc_netagent::intent::execute_for_hot_path(
+                &intent,
+                &*rpc,
+                &from_address,
+                &signer,
+            ))
+            .map_err(|e| state::RpcError::new(-32603, format!("intent execute: {e}")))?;
+        serde_json::to_value(&result)
+            .map_err(|e| state::RpcError::new(-32603, format!("result encode: {e}")))
+    })
+    .await
 }
 
 /// H-06: [`auth::handle_generate_challenge`] off the async path.
@@ -119,6 +241,21 @@ async fn rpc(State(state): State<SignerState>, Json(req): Json<state::RpcRequest
         "ledgerflow_sign_payment" => match auth::validate_params(req.params()) {
             Ok(p) => match authorize_async(&state, &p).await {
                 Ok(()) => sign_payment_async(state.clone(), p).await,
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        },
+        // Intent hot path (read-only pre-flight, no auth — same adapter as
+        // WC/HTTP-RPC; fail-closed without an RPC endpoint).
+        "ledgerflow_intentSimulate" => match auth::validate_params(req.params()) {
+            Ok(p) => intent_simulate_async(p).await,
+            Err(e) => Err(e),
+        },
+        // Intent execution (auth-gated, local loopback signing via the C13
+        // `IntentSigner` boundary).
+        "ledgerflow_intentExecute" => match auth::validate_params(req.params()) {
+            Ok(p) => match authorize_async(&state, &p).await {
+                Ok(()) => intent_execute_async(state.clone(), p).await,
                 Err(e) => Err(e),
             },
             Err(e) => Err(e),

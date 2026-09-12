@@ -17,9 +17,17 @@ use oc_core::ChainType;
 #[cfg(feature = "xrpl")]
 pub use self::xrpl::XrplSigner;
 pub use self::{
-    bitcoin::BitcoinSigner, cosmos::CosmosSigner, evm::EvmSigner, filecoin::FilecoinSigner,
-    nano::NanoSigner, near::NearSigner, solana::SolanaSigner, spark::SparkSigner, sui::SuiSigner,
-    ton::TonSigner, tron::TronSigner,
+    bitcoin::BitcoinSigner,
+    cosmos::{COSMOS_HUB, ChainConfig, CosmosSigner, JUNO, OSMOSIS, STARGAZE},
+    evm::EvmSigner,
+    filecoin::FilecoinSigner,
+    nano::NanoSigner,
+    near::NearSigner,
+    solana::SolanaSigner,
+    spark::SparkSigner,
+    sui::SuiSigner,
+    ton::{TonDisplayConfig, TonSigner},
+    tron::TronSigner,
 };
 use crate::traits::ChainSigner;
 #[cfg(not(feature = "xrpl"))]
@@ -44,7 +52,7 @@ struct UnsupportedSigner {
 #[cfg(not(feature = "xrpl"))]
 impl UnsupportedSigner {
     fn err<T>(&self) -> Result<T, SignerError> {
-        Err(SignerError::SigningFailed(format!(
+        Err(SignerError::Unsupported(format!(
             "{:?} support is not compiled in; rebuild with `--features {}`",
             self.chain_type, self.feature
         )))
@@ -101,6 +109,17 @@ impl ChainSigner for UnsupportedSigner {
 }
 
 /// Get a default signer for a given chain type.
+///
+/// The explicit `match` is kept (macros cannot expand to match arms, so the
+/// registry macro cannot generate it directly). It must stay in sync with
+/// the single-table registry in `oc-core/src/chain_registry.rs`: the
+/// compiler enforces this via exhaustiveness (a new `ChainType` variant
+/// fails to compile here until an arm is added), and the
+/// `dispatch_covers_registry` test below reuses `for_each_chain!` to assert
+/// every registry row resolves to a signer with the right `chain_type`.
+/// Constructor differences (`BitcoinSigner::mainnet`,
+/// `CosmosSigner::cosmos_hub`) stay here so `oc-core` never references
+/// signer types (R56: the registry macro itself is dependency-free).
 pub fn signer_for_chain(chain: ChainType) -> Box<dyn ChainSigner> {
     match chain {
         ChainType::Evm => Box::new(EvmSigner),
@@ -120,5 +139,49 @@ pub fn signer_for_chain(chain: ChainType) -> Box<dyn ChainSigner> {
         }
         ChainType::Nano => Box::new(NanoSigner),
         ChainType::Near => Box::new(NearSigner),
+    }
+}
+
+/// Return the registry derivation-path template (`signer_path` column) for
+/// `chain`.
+///
+/// Reuses `oc-core::for_each_chain!` via an `if`-chain (statement-style
+/// callbacks, the only expansion the registry macro supports). Adding a
+/// chain updates the table plus one `check_row!` arm; a missing arm leaves
+/// the previous value, which the `dispatch_covers_registry` test catches.
+#[must_use]
+pub fn derivation_template_for_chain(chain: ChainType) -> &'static str {
+    let mut out: &'static str = "";
+    macro_rules! check_row {
+        ($variant:ident, $_d:expr, $_n:expr, $_c:expr, $_e:expr, $path:expr) => {{
+            if chain == ChainType::$variant {
+                out = $path;
+            }
+        }};
+    }
+    oc_core::for_each_chain!(check_row);
+    out
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_covers_registry() {
+        // Every registry row must resolve to a signer whose `chain_type`
+        // round-trips, and whose default path embeds the registry template
+        // with `{index}` replaced by `0`.
+        macro_rules! check_dispatch {
+            ($variant:ident, $_d:expr, $_n:expr, $_c:expr, $_e:expr, $path:expr) => {{
+                let signer = signer_for_chain(ChainType::$variant);
+                assert_eq!(signer.chain_type(), ChainType::$variant);
+                let template = derivation_template_for_chain(ChainType::$variant);
+                assert_eq!(template, $path);
+                let expected = $path.replace("{index}", "0");
+                assert_eq!(signer.default_derivation_path(0), expected);
+            }};
+        }
+        oc_core::for_each_chain!(check_dispatch);
     }
 }

@@ -37,7 +37,7 @@ const KEY_TYPE_ED25519: u8 = 0x00;
 impl NearSigner {
     fn signing_key(private_key: &[u8]) -> Result<SigningKey, SignerError> {
         let key_bytes: [u8; 32] = private_key.try_into().map_err(|_| {
-            SignerError::InvalidPrivateKey(format!("expected 32 bytes, got {}", private_key.len()))
+            SignerError::Input(format!("expected 32 bytes, got {}", private_key.len()))
         })?;
         Ok(SigningKey::from_bytes(&key_bytes))
     }
@@ -88,7 +88,7 @@ impl ChainSigner for NearSigner {
         // tx_bytes = borsh-serialized NEAR `Transaction`.
         // Signing input is sha256(tx_bytes); ed25519 signs that 32-byte digest.
         if tx_bytes.is_empty() {
-            return Err(SignerError::InvalidTransaction("empty transaction".into()));
+            return Err(SignerError::Transaction("empty transaction".into()));
         }
         let digest = Sha256::digest(tx_bytes);
         self.sign(private_key, &digest)
@@ -102,12 +102,10 @@ impl ChainSigner for NearSigner {
         // borsh(SignedTransaction) = borsh(Transaction) || borsh(Signature)
         // borsh(Signature::ED25519(sig)) = 0x00 (enum tag) || sig (64 bytes)
         if signature.signature.len() != 64 {
-            return Err(SignerError::InvalidTransaction(
-                "expected 64-byte Ed25519 signature".into(),
-            ));
+            return Err(SignerError::Transaction("expected 64-byte Ed25519 signature".into()));
         }
         if tx_bytes.is_empty() {
-            return Err(SignerError::InvalidTransaction("empty transaction".into()));
+            return Err(SignerError::Transaction("empty transaction".into()));
         }
         let mut signed = Vec::with_capacity(tx_bytes.len() + 1 + 64);
         signed.extend_from_slice(tx_bytes);
@@ -120,7 +118,7 @@ impl ChainSigner for NearSigner {
         // NEAR transactions have no envelope; the borsh-serialized Transaction
         // *is* the signable payload. sign_transaction handles the sha256 hashing.
         if tx_bytes.is_empty() {
-            return Err(SignerError::InvalidTransaction("empty transaction".into()));
+            return Err(SignerError::Transaction("empty transaction".into()));
         }
         Ok(tx_bytes)
     }

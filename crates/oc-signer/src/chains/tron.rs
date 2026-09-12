@@ -5,20 +5,28 @@ use sha3::{Digest, Keccak256};
 
 use crate::{
     curve::Curve,
+    encoding::base58check_encode,
     traits::{ChainSigner, SignOutput, SignerError},
 };
 
 /// Tron chain signer (secp256k1, base58check addresses with 0x41 prefix).
+///
+/// Boundary: Tron reuses only [`base58check_encode`] from
+/// `crate::encoding`. Its 20-byte payload is Keccak-256 (EVM-style), NOT
+/// [`crate::encoding::hash160`] (SHA-256 + RIPEMD-160) — see `address_bytes`.
 pub struct TronSigner;
 
 impl TronSigner {
     fn signing_key(private_key: &[u8]) -> Result<SigningKey, SignerError> {
         SigningKey::from_slice(private_key)
-            .map_err(|_| SignerError::InvalidPrivateKey("key parsing failed".into()))
+            .map_err(|_| SignerError::Input("key parsing failed".into()))
     }
 
     /// Derive the 20-byte address hash (same as EVM: keccak256 of uncompressed pubkey, last 20
     /// bytes).
+    ///
+    /// Independent from [`crate::encoding::hash160`] by protocol design:
+    /// Tron specifies Keccak-256 here, while Hash160 is SHA-256 + RIPEMD-160.
     fn address_bytes(private_key: &[u8]) -> Result<Vec<u8>, SignerError> {
         let signing_key = Self::signing_key(private_key)?;
         let verifying_key = signing_key.verifying_key();
@@ -47,19 +55,16 @@ impl ChainSigner for TronSigner {
     fn derive_address(&self, private_key: &[u8]) -> Result<String, SignerError> {
         let addr_bytes = Self::address_bytes(private_key)?;
 
-        // Prepend 0x41 (Tron mainnet prefix)
+        // Prepend 0x41 (Tron mainnet prefix), then shared Base58Check.
         let mut prefixed = vec![0x41u8];
         prefixed.extend_from_slice(&addr_bytes);
 
-        // Base58Check encode
-        let address = bs58::encode(&prefixed).with_check().into_string();
-
-        Ok(address)
+        Ok(base58check_encode(&prefixed))
     }
 
     fn sign(&self, private_key: &[u8], message: &[u8]) -> Result<SignOutput, SignerError> {
         if message.len() != 32 {
-            return Err(SignerError::InvalidMessage(format!(
+            return Err(SignerError::Input(format!(
                 "expected 32-byte hash, got {} bytes",
                 message.len()
             )));

@@ -18,7 +18,7 @@ const BASE32_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 impl FilecoinSigner {
     fn signing_key(private_key: &[u8]) -> Result<SigningKey, SignerError> {
         SigningKey::from_slice(private_key)
-            .map_err(|_| SignerError::InvalidPrivateKey("key parsing failed".into()))
+            .map_err(|_| SignerError::Input("key parsing failed".into()))
     }
 
     /// Encode bytes using Filecoin's lowercase base32 (no padding).
@@ -49,7 +49,7 @@ impl FilecoinSigner {
     /// Compute a Blake2b hash with a variable output length.
     ///
     /// Only the Filecoin protocol-mandated sizes (4, 20, 32 bytes) are
-    /// supported; anything else returns `SignerError::InvalidMessage`.
+    /// supported; anything else returns `SignerError::Input`.
     fn blake2b(data: &[u8], output_len: usize) -> Result<Vec<u8>, SignerError> {
         fn digest<D: Digest>(data: &[u8]) -> Vec<u8> {
             let mut hasher = D::new();
@@ -60,7 +60,7 @@ impl FilecoinSigner {
             4 => Ok(digest::<Blake2b<U4>>(data)),
             20 => Ok(digest::<Blake2b<U20>>(data)),
             32 => Ok(digest::<Blake2b256>(data)),
-            _ => Err(SignerError::InvalidMessage(format!(
+            _ => Err(SignerError::Input(format!(
                 "unsupported blake2b output length: {output_len} (expected 4, 20 or 32)"
             ))),
         }
@@ -113,7 +113,7 @@ impl ChainSigner for FilecoinSigner {
 
     fn sign(&self, private_key: &[u8], message: &[u8]) -> Result<SignOutput, SignerError> {
         if message.len() != 32 {
-            return Err(SignerError::InvalidMessage(format!(
+            return Err(SignerError::Input(format!(
                 "expected 32-byte prehash, got {} bytes",
                 message.len()
             )));

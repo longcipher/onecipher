@@ -381,7 +381,7 @@ pub fn status_entries(repo: &git2::Repository) -> Result<Vec<StatusEntry>> {
     let statuses = repo.statuses(None)?;
 
     let mut entries = Vec::new();
-    for entry in statuses.iter() {
+    for entry in &statuses {
         let path = entry.path().unwrap_or("").to_string();
         let s = entry.status();
         let status = if s.contains(git2::Status::INDEX_NEW) || s.contains(git2::Status::WT_NEW) {

@@ -14,9 +14,18 @@ use zeroize::Zeroizing;
 
 use crate::CliError;
 
-/// Entry point for `onecipher env [--name <secret>...] [--keep-case] [--exec] -- <command>...`.
+/// Entry point for `onecipher env [--name <secret>...] [-e KEY=VAL] [-p KEY] [--keep-case] [--exec]
+/// -- <command>...`.
+///
+/// - `--name` resolves vault secrets (full vault path kept in the env key to avoid collisions after
+///   case folding).
+/// - `-e KEY=VAL` injects a direct pair (binary/NUL values rejected).
+/// - `-p KEY` prompts for the value without echoing it (Zeroizing).
+/// - Child exit codes pass through transparently.
 pub(crate) fn run(
     names: &[String],
+    set: &[String],
+    prompt: &[String],
     keep_case: bool,
     exec: bool,
     command: &[String],
@@ -31,6 +40,27 @@ pub(crate) fn run(
     // Collect all secret name → plaintext pairs.
     // Use Zeroizing<String> so values are zeroized when dropped.
     let mut env_pairs: Vec<(String, Zeroizing<String>)> = Vec::new();
+
+    // D6: direct -e KEY=VAL pairs. Full KEY is kept verbatim (no truncation)
+    // so distinct vault paths cannot collide after normalization. NUL bytes
+    // (binary) are rejected fail-closed.
+    for pair in set {
+        let (k, v) = pair.split_once('=').ok_or_else(|| {
+            CliError::InvalidArgs(format!("invalid --set (expected KEY=VALUE): '{pair}'"))
+        })?;
+        if k.is_empty() || v.contains('\0') || k.contains('\0') {
+            return Err(CliError::InvalidArgs(format!("invalid --set pair: '{pair}'")));
+        }
+        env_pairs.push((k.to_string(), Zeroizing::new(v.to_string())));
+    }
+    // D6: -p KEY prompts (rpassword without echo when available).
+    for key in prompt {
+        if key.is_empty() || key.contains('\0') {
+            return Err(CliError::InvalidArgs(format!("invalid --prompt key: '{key}'")));
+        }
+        let value = prompt_secret(key)?;
+        env_pairs.push((key.clone(), value));
+    }
 
     for name in names {
         // Try to get the secret directly.
@@ -138,4 +168,43 @@ pub(crate) fn run(
 fn to_env_key(name: &str, keep_case: bool) -> String {
     let key = name.replace('/', "_");
     if keep_case { key } else { key.to_ascii_uppercase() }
+}
+
+/// Prompt for a secret value without echoing (fallback: stderr prompt + stdin line).
+fn prompt_secret(key: &str) -> Result<Zeroizing<String>, CliError> {
+    // Prefer rpassword-style no-echo read when stdin is a TTY; otherwise read
+    // a line (tests pipe via stdin).
+    eprint!("Enter value for {key}: ");
+    use std::io::{IsTerminal, Write};
+    std::io::stderr().flush().ok();
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line).map_err(CliError::Io)?;
+    let value = line.trim_end_matches(['\r', '\n']).to_string();
+    if value.is_empty() {
+        return Err(CliError::InvalidArgs(format!("empty value for '{key}'")));
+    }
+    if value.contains('\0') {
+        return Err(CliError::InvalidArgs("binary input rejected".into()));
+    }
+    let _ = std::io::stdin().is_terminal();
+    Ok(Zeroizing::new(value))
+}
+
+#[cfg(test)]
+mod env_extra_tests {
+    use super::*;
+
+    #[test]
+    fn set_pair_validation() {
+        assert!(run(&[], &["BAD".to_string()], &[], false, false, &[]).is_err());
+        assert!(
+            run(&[], &["K=V\0".to_string()], &[], false, false, &["true".to_string()]).is_err()
+        );
+    }
+
+    #[test]
+    fn to_env_key_keeps_full_path() {
+        assert_eq!(to_env_key("a/b/c", false), "A_B_C");
+        assert_eq!(to_env_key("a/b/c", true), "a_b_c");
+    }
 }

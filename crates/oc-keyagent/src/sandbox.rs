@@ -76,8 +76,8 @@ impl SandboxReport {
     /// On macOS `apply_signing_thread_sandbox` deliberately skips Seatbelt
     /// (process-wide would kill WSS); `filter_installed` stays `false` there
     /// and isolation falls back to source-level R12a + runtime `lsof` checks,
-    /// not kernel enforcement. Full isolation requires an out-of-process enclave
-    /// (future).
+    /// not kernel enforcement. Full isolation is implemented out-of-process
+    /// (see `crate::enclave`: each signing child installs the full profile).
     pub fn is_macos_network_isolation_degraded(&self) -> bool {
         #[cfg(target_os = "macos")]
         {
@@ -136,9 +136,10 @@ pub fn apply_sandbox() -> Result<(), KeyAgentError> {
 /// relay. On macOS this variant therefore applies only core-dump + debugger
 /// denial and logs why Seatbelt is skipped; `SandboxReport::filter_installed`
 /// stays `false` there — **network isolation is degraded on macOS** and falls
-/// back to source-level R12a (`rg TcpListener|TcpStream` on isolated crates)
+/// back to source-level R12a (TCP-type scan on isolated crates)
 /// plus runtime `lsof -iTCP` checks, not kernel enforcement. Full isolation
-/// requires an out-of-process enclave (future). See
+/// is implemented out-of-process (see `crate::enclave`): each signing child
+/// installs the full profile because it has no WSS relay to preserve. See
 /// [`SandboxReport::is_macos_network_isolation_degraded`] and
 /// [`is_macos_network_isolation_degraded`].
 ///
@@ -492,7 +493,7 @@ mod linux {
     /// even log. The R12 network guarantee is carried by the *domain gate*
     /// (no INET/INET6 socket can ever be created) plus the runtime syscall
     /// trace (`strace -e trace=network`, R57) and the source-level scan
-    /// (`rg TcpListener|TcpStream`, R12a).
+    /// (TCP-type scan, R12a).
     fn build_bpf_program() -> Vec<sock_filter> {
         let mut p: Vec<sock_filter> = Vec::with_capacity(40);
 

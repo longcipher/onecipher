@@ -1,46 +1,125 @@
+//! Multi-chain signing and HD key derivation for OneCipher.
+//!
+//! ## Seed-sealing policy (A2)
+//!
+//! The 64-byte BIP-39 seed is the most sensitive value in the wallet stack:
+//! anyone holding it can derive *every* chain key. This crate seals it by
+//! construction:
+//!
+//! ```text
+//! oc-vault (encrypted mnemonic blob)
+//!   → oc-keyagent::decrypt_mnemonic → HardenedBytes(mnemonic phrase)
+//!   → HdDeriver::derive_from_mnemonic (seed derived AND consumed inside
+//!     oc-signer; the 64-byte seed never crosses the crate boundary)
+//!   → HardenedBytes (32-byte chain key)
+//!   → ChainSigner::{derive_address, sign, sign_message, sign_transaction}
+//! ```
+//!
+//! Chain signers only ever receive the derived 32-byte private key — never
+//! the mnemonic, never the seed. The raw-seed escape hatch
+//! (`Mnemonic::to_seed`, `HdDeriver::derive`) is compiled only with
+//! `--features raw-seed` (off by default) for migration tooling and
+//! external KAT vectors; production paths must use the sealed
+//! `derive_from_mnemonic` / `derive_many` / `derive_range` APIs.
+//!
+//! ## Memory hardening
+//!
+//! Derived keys rest in [`HardenedBytes`] (mlock + `MADV_DONTDUMP` +
+//! zeroize-on-drop, see `oc-crypto` R51/R52). Short-lived secret wrappers
+//! ([`SealedPrivateKey`], [`WifString`], [`SealedKeypair`]) use
+//! `zeroize::Zeroizing` and redact `Debug` output. See [`secret`] for the
+//! full audit table.
 // Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+// A13 pilot: `no_std`+`alloc` layering. With default features (`std`) this is
+// a normal `std` crate. With `--no-default-features` (optionally
+// `--features alloc`) the crate is `no_std` and only the heap-light core
+// (`curve`, `traits`, `rlp`) is compiled; every module that needs OS/threads,
+// collections beyond `alloc`, or `std`-only dependencies is gated behind
+// `#[cfg(feature = "std")]`. Full per-dependency `?/std` passthrough is a
+// follow-up once each dependency's `std` gate is audited.
+#![cfg_attr(not(feature = "std"), no_std)]
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+// `std`-gated: need OS, `std` collections, or `std`-only deps
+// (`bitcoin`, `coins-*`, `signal-hook`, `serde_json` with std).
+// Wallet-file encryption lives in `oc-vault::crypto` (unified age envelope),
+// NOT here: this crate owns signing and key derivation only.
+#[cfg(feature = "std")]
+pub mod account;
+#[cfg(feature = "std")]
 pub mod chains;
-pub mod crypto;
 pub mod curve;
+#[cfg(feature = "std")]
 pub mod eip712;
+#[cfg(feature = "std")]
+pub mod encoding;
+pub mod error;
+#[cfg(feature = "std")]
 pub mod hd;
+#[cfg(feature = "std")]
 pub mod mnemonic;
+pub mod prelude;
+#[cfg(feature = "std")]
 pub mod process_hardening;
+#[cfg(feature = "std")]
+pub mod pubkey;
 pub mod rlp;
+#[cfg(feature = "std")]
+pub mod secret;
+#[cfg(feature = "std")]
+pub mod style;
 pub mod traits;
 
+#[cfg(feature = "std")]
 pub use chains::signer_for_chain;
-pub use crypto::{
-    CipherParams, CryptoEnvelope, CryptoError, HkdfKdfParams, KdfParams, KdfParamsVariant, decrypt,
-    encrypt, encrypt_with_hkdf,
-};
 pub use curve::Curve;
+#[cfg(feature = "std")]
+pub use encoding::{base58check_decode, base58check_encode, double_sha256, hash160};
+pub use error::{DeriveError, SignerError};
+#[cfg(feature = "std")]
 pub use hd::HdDeriver;
+#[cfg(feature = "std")]
 pub use mnemonic::{Mnemonic, MnemonicStrength};
 // Signer's private keys live in `oc_crypto::HardenedBytes` (page-locked,
 // DONT_DUMP-marked, zeroized on drop) per R51/R52. `SecretBytes` is kept as a
 // type alias so existing call sites and downstream crates continue to compile.
+#[cfg(feature = "std")]
 pub use oc_crypto::HardenedBytes;
-pub use traits::{ChainSigner, SignOutput, SignerError};
+#[cfg(feature = "std")]
+pub use pubkey::{
+    DerivedPublicKey, PubkeyError, PublicKeyKind, ed25519_from_private,
+    secp256k1_compressed_from_private, secp256k1_uncompressed_from_private,
+};
+#[cfg(feature = "std")]
+pub use secret::{SealedKeypair, SealedPrivateKey, WifString};
+pub use traits::{ChainSigner, SignOutput};
+#[cfg(feature = "std")]
 pub type SecretBytes = HardenedBytes;
 
 /// Type alias for the process-wide key cache.
 ///
 /// Delegates to [`oc_crypto::KeyCache`] parameterized over [`HardenedBytes`]
 /// so cached derived keys are page-locked + zeroized on eviction / drop.
+/// Requires `std` (uses `std::sync::OnceLock` + system clock).
+#[cfg(feature = "std")]
 pub type KeyCache = oc_crypto::KeyCache<HardenedBytes>;
 
+#[cfg(feature = "std")]
 use std::{sync::OnceLock, time::Duration};
 
+#[cfg(feature = "std")]
 static GLOBAL_KEY_CACHE: OnceLock<KeyCache> = OnceLock::new();
 
 /// Returns the process-wide key cache (5s TTL, max 32 entries).
+/// Requires the `std` feature (pilot `no_std` builds omit the cache).
+#[cfg(feature = "std")]
 pub fn global_key_cache() -> &'static KeyCache {
     GLOBAL_KEY_CACHE.get_or_init(|| KeyCache::new(Duration::from_secs(5), 32))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod integration_tests {
     use digest::Digest;
     use oc_core::ChainType;

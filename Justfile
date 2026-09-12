@@ -110,3 +110,32 @@ deps-duplicates:
 # Enforce the duplicate-dependency baseline.
 deps-check:
     ./scripts/check-duplicate-deps.sh
+
+# ============================================================
+# Phase3 gates (A13 / D11 / deny)
+# ============================================================
+
+# A13 pilot: host no_std check for oc-signer (must pass).
+no-std:
+    cargo check -p oc-signer --no-default-features
+
+# A13 pilot: experimental thumbv7m no_std check (allowed to fail until each
+# dependency's `std` gate is audited; CI marks it continue-on-error).
+no-std-thumbv7m:
+    rustup target add thumbv7m-none-eabi
+    cargo check -p oc-signer --no-default-features --target thumbv7m-none-eabi
+
+# D11: SKILL <-> clap consistency (change CLI => update SKILL.md + cli-reference).
+skill-check:
+    ./scripts/check-skill-consistency.sh
+
+# deny/CI: Justfile <-> Makefile mirror check.
+makefile-check:
+    ./scripts/check-makefile-mirror.sh
+
+# deny/CI: supply-chain gates (deny.toml must keep per-skip rationale comments).
+deny:
+    cargo deny check advisories licenses bans sources
+
+# deny/CI: weekly security sweep (deny + audit).
+security: deny audit

@@ -59,6 +59,15 @@ impl SignerState {
         })
     }
 
+    /// Hex-encoded owner passphrase for enclave pipe requests.
+    ///
+    /// The loopback server holds the owner passphrase (not a device key), so
+    /// wallet-rpc signing uses passphrase-mode enclave requests; the child
+    /// zeroizes the decoded bytes on drop.
+    pub(crate) fn passphrase_credential_hex(&self) -> String {
+        hex::encode(self.passphrase.as_bytes())
+    }
+
     /// Resolve the configured wallet name/id to the canonical wallet ID.
     ///
     /// L-07: see [`SignerState::secret_key`] — details stay in the log.

@@ -5,25 +5,26 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Wallet vault (filesystem 700/600, Keystore v3, .ocbk BackupContainer) for OneCipher"
+description = "Wallet vault (filesystem 700/600, age-encrypted wallets, age backup bundles) for OneCipher"
 
 [features]
-# Exposes test-only helpers (e.g. `set_backoff_override`) to downstream
-# test crates that live in separate crates and therefore do not have
-# `cfg(test)` set for `oc-vault`.
-test-utils = []
+# Test-only low age scrypt work factor for fast unit tests. NEVER enable in
+# release: the `compile_error!` in `src/crypto/envelope.rs` fails the build if
+# `fast-kdf` meets `not(debug_assertions)`.
+fast-kdf = []
 
 [dependencies]
-argon2 = { workspace = true }
-chacha20poly1305 = { workspace = true }
+age = { workspace = true }
+base64 = { workspace = true }
+bech32 = { workspace = true }
+hex = { workspace = true }
 oc-core = { workspace = true, features = ["hardened"] }
 oc-crypto = { workspace = true }
-oc-signer = { workspace = true }
-rand = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

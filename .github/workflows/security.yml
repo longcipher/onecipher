@@ -1,0 +1,39 @@
+name: Security
+
+on:
+  schedule:
+    # Weekly supply-chain sweep (Monday 06:00 UTC).
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "deny.toml"
+      - "Cargo.lock"
+      - "supply-chain/**"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: ""
+
+jobs:
+  deny:
+    name: cargo-deny (advisories/licenses/bans/sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-deny
+      # Each deny.toml skip/ignore MUST carry a dated rationale comment —
+      # a bare waiver is a policy failure (see deny.toml header).
+      - run: cargo deny check advisories licenses bans sources
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit
+      - run: cargo audit

@@ -19,7 +19,7 @@ onecipher wallet create --name "verify-once" --show-mnemonic   # DANGEROUS: prin
 2. Encode as BIP-39 mnemonic (12/15/18/21/24 words)
 3. Derive master seed via PBKDF2
 4. Derive one account per supported chain using each chain's BIP-44 path
-5. Encrypt mnemonic with vault passphrase (Argon2id + AES-256-GCM-SIV)
+5. Encrypt mnemonic with vault passphrase (age scrypt)
 6. Write encrypted wallet file to `~/.onecipher/wallets/<uuid>.json`
 7. Wipe mnemonic, seed, and private keys from memory
 8. Print only public information (addresses, IDs, derivation paths)
@@ -112,18 +112,18 @@ deletion is not reversible.
 
 ## Backup
 
-OneCipher ships an encrypted `.ocbk` backup container format
-(Argon2id + XChaCha20-Poly1305, separate passphrase from the vault):
+OneCipher ships an age-encrypted `.ocbk` backup bundle format
+(multi-X25519-recipient, `ocenv/1` `tag:backup` envelope):
 
 ```bash
-# Export an encrypted backup of the wallet
-onecipher backup export --out ~/backups/treasury.ocbk
+# Export an age-encrypted backup of the wallet to two recipients
+onecipher backup export --out ~/backups/treasury.ocbk --recipient <age1...> [--recipient ...]
 
-# Restore from a backup container
-onecipher backup import --in ~/backups/treasury.ocbk
+# Restore from a backup bundle (identity of one of the export recipients)
+onecipher backup import --in ~/backups/treasury.ocbk --identity <AGE-SECRET-KEY-1...>
 ```
 
-The `.ocbk` container is self-contained and safe to store on any media —
+The `.ocbk` bundle is self-contained and safe to store on any media —
 it is encrypted at rest.
 
 ## Recovery

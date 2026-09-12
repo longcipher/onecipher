@@ -35,7 +35,7 @@ cross-chain routing via ERC-7683, and Cedar-policy full integration.
 
 ### 4.1 Motivation
 
-- The current architecture is wallet-specific, with three parallel encryption stacks running side by side: Argon2id + AES-GCM-SIV for wallets, Argon2id + XChaCha20 for `.ocbk` backups, and HKDF + AES-GCM for API tokens.
+- The pre-unification architecture was wallet-specific, with three parallel encryption stacks running side by side (since removed by the age flag day: Argon2id + AES-GCM-SIV for wallets, Argon2id + XChaCha20 for `.ocbk` backups, and HKDF + AES-GCM for API tokens).
 - The goal is to unify these into a general-purpose secret vault that supports private keys, passwords, and TOTP secrets.
 - Inspiration: ripasso (one file per secret + directory-tree namespaces + git integration) and sops (age with multiple recipients).
 - age is chosen as the single encryption layer: pure Rust, no system gpg dependency, native multi-recipient support, and interoperable with rage.
@@ -68,7 +68,7 @@ cross-chain routing via ERC-7683, and Cedar-policy full integration.
 
 - New `oc-secret` crate: `age.rs` / `entry.rs` / `store.rs` / `recipients.rs` / `totp.rs` / `migrate.rs` / `git.rs`.
 - Dependencies: `age` / `totp-rs` / `oc-core` / `oc-crypto` / `oc-keyagent` (audit) — all synchronous, R56-compliant.
-- `oc-vault`: generalize the `Vault` wrapper; reuse `BackupContainer`.
+- `oc-vault`: generalize the `Vault` wrapper; age backup bundles (`export_backup` / `import_backup`, the former `BackupContainer` removed by the age flag day).
 - `oc-wallet`: remove the duplicated `vault.rs`; route `decrypt_signing_key` through `oc-secret`.
 - `oc-policy`: extend with `read_secret` / `write_secret` operations.
 - `oc-keyagent`: extend audit `EventType` with `SecretRead` / `SecretWritten` / `SecretDeleted` / `SecretMigrated` / `AgeRecipientAdded` / `AgeReencrypted`.

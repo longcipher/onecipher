@@ -328,14 +328,14 @@ impl App {
     #[cfg(feature = "git")]
     pub(crate) fn git_pull(&mut self) {
         let root = crate::commands::secret_store_root();
-        self.git_message = Some((format!("git pull: running..."), Instant::now() + MESSAGE_TTL));
+        self.git_message = Some(("git pull: running...".to_string(), Instant::now() + MESSAGE_TTL));
         match oc_secret::git::pull_at(&root) {
             Ok(()) => {
-                self.git_message = Some((format!("git pull: ok"), Instant::now() + MESSAGE_TTL))
+                self.git_message = Some(("git pull: ok".to_string(), Instant::now() + MESSAGE_TTL));
             }
             Err(e) => {
                 self.git_message =
-                    Some((format!("git pull failed: {e}"), Instant::now() + MESSAGE_TTL))
+                    Some((format!("git pull failed: {e}"), Instant::now() + MESSAGE_TTL));
             }
         }
         self.reload_git();
@@ -346,14 +346,14 @@ impl App {
     #[cfg(feature = "git")]
     pub(crate) fn git_push(&mut self) {
         let root = crate::commands::secret_store_root();
-        self.git_message = Some((format!("git push: running..."), Instant::now() + MESSAGE_TTL));
+        self.git_message = Some(("git push: running...".to_string(), Instant::now() + MESSAGE_TTL));
         match oc_secret::git::push_at(&root) {
             Ok(()) => {
-                self.git_message = Some((format!("git push: ok"), Instant::now() + MESSAGE_TTL))
+                self.git_message = Some(("git push: ok".to_string(), Instant::now() + MESSAGE_TTL));
             }
             Err(e) => {
                 self.git_message =
-                    Some((format!("git push failed: {e}"), Instant::now() + MESSAGE_TTL))
+                    Some((format!("git push failed: {e}"), Instant::now() + MESSAGE_TTL));
             }
         }
         self.reload_git();
@@ -670,12 +670,22 @@ impl App {
                     notes: if notes.is_empty() { None } else { Some(notes) },
                     extra: None,
                 };
+                let generation = match self.store.next_generation(&name) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        if let Some(f) = self.form.as_mut() {
+                            f.error = Some(format!("Create failed: {e}"));
+                        }
+                        return;
+                    }
+                };
                 let entry = match oc_secret::SecretEntry::new(
                     &name,
                     item_type,
                     &payload,
                     metadata,
                     &recipients,
+                    generation,
                 ) {
                     Ok(e) => e,
                     Err(e) => {
@@ -705,19 +715,10 @@ impl App {
                 let store = &self.store;
 
                 let result = (|| -> Result<(), String> {
-                    let mut entry =
-                        store.get(&old_name).map_err(|e| format!("Load failed: {e}"))?;
+                    let entry = store.get(&old_name).map_err(|e| format!("Load failed: {e}"))?;
                     let old_payload = entry
                         .decrypt(identity.ok_or("no age identity")?)
                         .map_err(|e| format!("Decrypt failed: {e}"))?;
-
-                    // Rename first if the name changed (moves file + index atomically).
-                    if old_name != name {
-                        store
-                            .rename(&old_name, &name)
-                            .map_err(|e| format!("Rename failed: {e}"))?;
-                        entry = store.get(&name).map_err(|e| format!("Reload failed: {e}"))?;
-                    }
 
                     // Preserve stored values when the corresponding field is empty.
                     let payload = SecretPayload {
@@ -730,12 +731,36 @@ impl App {
                         extra: old_payload.extra.clone(),
                     };
 
+                    if old_name != name {
+                        // Rename rebinds the envelope: create under the new
+                        // name (preserving id/created_at), then tombstone old.
+                        let dst_gen =
+                            store.next_generation(&name).map_err(|e| format!("Gen failed: {e}"))?;
+                        let mut new_entry = oc_secret::SecretEntry::new(
+                            &name,
+                            item_type,
+                            &payload,
+                            metadata,
+                            &recipients,
+                            dst_gen,
+                        )
+                        .map_err(|e| format!("Encrypt failed: {e}"))?;
+                        new_entry.id.clone_from(&entry.id);
+                        new_entry.created_at.clone_from(&entry.created_at);
+                        store.put(&new_entry).map_err(|e| format!("Save failed: {e}"))?;
+                        store.delete(&old_name).map_err(|e| format!("Delete failed: {e}"))?;
+                        return Ok(());
+                    }
+
+                    let next_gen =
+                        store.next_generation(&name).map_err(|e| format!("Gen failed: {e}"))?;
                     let mut new_entry = oc_secret::SecretEntry::new(
                         &name,
                         item_type,
                         &payload,
                         metadata,
                         &recipients,
+                        next_gen,
                     )
                     .map_err(|e| format!("Encrypt failed: {e}"))?;
                     // Preserve the original identity fields across the edit.
@@ -840,6 +865,8 @@ mod tests {
             created_at: "2026-01-01T00:00:00Z".to_string(),
             updated_at: "2026-01-01T00:00:00Z".to_string(),
             metadata: SecretMetadata::default(),
+            r#generation: 1,
+            tombstone: false,
         }
     }
 

@@ -8,8 +8,41 @@ publish.workspace = true
 description = "Cryptographic signing and key management for OneCipher"
 
 [features]
-default = []
-fast-kdf = []
+default = ["std"]
+# A13 pilot: `std` (default) keeps the full signer; `--no-default-features`
+# builds the `no_std`+`alloc` core (`curve`, `traits`, `rlp` only).
+# `alloc` is the base for heap types (`Vec`, `String`) without `std`.
+# Weak `?/std`-style passthrough is R56-gated: `std` enables
+# `xrpl-rust?/utils` (empty, no `tokio`) only when `xrpl` is also on. Full
+# per-dependency `?/std` (e.g. `bitcoin/std`, `k256/std`) is a follow-up:
+# those crates' `std` gates are not yet audited, so the pilot gates std-only
+# modules behind `#[cfg(feature="std")]` instead. See `src/lib.rs`.
+std = ["alloc", "xrpl-rust?/utils"]
+alloc = []
+# Raw 64-byte BIP-39 seed access (`Mnemonic::to_seed`, `HdDeriver::derive`).
+# OFF by default: production paths must use the sealed
+# `HdDeriver::derive_from_mnemonic` so the seed never leaves `oc-signer`.
+# Enable only for migration tooling, external KAT vectors, and tests that
+# exercise BIP-32 / SLIP-10 vectors with raw hex seeds.
+raw-seed = []
+# Per-chain marker features (A12 umbrella). Empty today: they reserve the
+# gating points for a future where exotic chains compile out. `mainstream`
+# covers the high-traffic families; `all-chains` adds the rest. Keeping them
+# as no-op markers now guarantees `cargo build --workspace` (default
+# features) keeps working while the feature graph is already in place.
+evm = []
+solana = []
+bitcoin = []
+cosmos = []
+tron = []
+ton = []
+sui = []
+spark = []
+filecoin = []
+nano = []
+near = []
+mainstream = ["std", "evm", "solana", "bitcoin", "cosmos", "tron", "ton", "sui"]
+all-chains = ["mainstream", "spark", "filecoin", "nano", "near", "xrpl"]
 # XRPL support is OFF by default. `xrpl-rust` pulls a 125-crate subtree that is
 # the workspace's single largest source of duplicate dependencies: it is the
 # only consumer of `chrono` (workspace standardizes on `jiff`) and `regex`
@@ -24,8 +57,6 @@ fast-kdf = []
 xrpl = ["dep:xrpl-rust"]
 
 [dependencies]
-aes-gcm-siv = { workspace = true }
-argon2 = { workspace = true }
 base64 = { workspace = true }
 bech32 = { workspace = true }
 bitcoin = { workspace = true, features = ["base64"] }
@@ -36,7 +67,6 @@ coins-bip39 = { workspace = true }
 digest = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["hazmat"] }
 hex = { workspace = true }
-hkdf = { workspace = true }
 hmac = { workspace = true }
 k256 = { workspace = true, features = ["ecdsa", "arithmetic"] }
 libc = { workspace = true }

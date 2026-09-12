@@ -10,7 +10,11 @@
 //! - Pairing URI generation + Passkey confirmation gate.
 //! - WC session state persistence.
 
-#![forbid(unsafe_code)]
+// Deny (not forbid) `unsafe_code` so unit tests can opt in to the
+// toolchain's `std::env::set_var` unsafety contract with an explicit
+// `#[allow]` + SAFETY comment (same pattern as `bin/oc-cli/src/test_util.rs`).
+// Production code contains no `unsafe` blocks.
+#![deny(unsafe_code)]
 
 pub mod approval;
 pub mod error;
@@ -19,6 +23,8 @@ pub mod intent;
 pub mod key_agent_client;
 pub mod otlp;
 pub mod rpc_client;
+#[cfg(feature = "real-rpc")]
+pub mod session_key_rpc;
 pub mod sim;
 pub mod telemetry_drain;
 pub mod wc_method_router;
@@ -32,8 +38,10 @@ pub use approval::{
 pub use error::NetAgentError;
 pub use http_rpc::{LocalRpcServer, LocalRpcServerConfig};
 pub use intent::{
-    CallData, Intent, IntentError, IntentKind, IntentResult, IntentStatus, IntentSummary,
-    MessageEncoding, MockRpcClient, RpcClient, RpcError, execute_intent, simulate_intent,
+    CallData, HotPathConfig, Intent, IntentError, IntentKind, IntentResult, IntentSigner,
+    IntentStatus, IntentSummary, MessageEncoding, MockRpcClient, RpcClient, RpcError,
+    execute_for_hot_path, execute_intent, select_rpc_client, simulate_for_hot_path,
+    simulate_intent,
 };
 pub use key_agent_client::KeyAgentClient;
 // The approval log (JSONL WAL for crash recovery) lives in `oc-core` so the
@@ -41,6 +49,8 @@ pub use key_agent_client::KeyAgentClient;
 pub use oc_core::approval_log::ApprovalLog;
 pub use otlp::{OtlpSink, OtlpSinkConfig};
 pub use rpc_client::HpxRpcClient;
+#[cfg(feature = "real-rpc")]
+pub use session_key_rpc::{NetAgentBundlerClient, NetAgentEvmRpcClient, NetAgentSolanaRpcClient};
 pub use sim::{SimError, simulate_evm_tx};
 pub use telemetry_drain::{
     DEFAULT_BATCH_SIZE as TELEMETRY_BATCH_SIZE, DEFAULT_DRAIN_INTERVAL, DrainStats, MemorySink,

@@ -72,6 +72,18 @@ pub(crate) fn show(id: &str) -> Result<(), CliError> {
                 oc_core::PolicyRule::AllowedTypedDataContracts { contracts } => {
                     format!("  allowed_typed_data_contracts: {}", contracts.join(", "))
                 }
+                oc_core::PolicyRule::MaxAmount { max_value } => {
+                    format!("  max_amount: {max_value}")
+                }
+                oc_core::PolicyRule::AllowedAddresses { addresses } => {
+                    format!("  allowed_addresses: {}", addresses.join(", "))
+                }
+                oc_core::PolicyRule::AllowedAssets { assets } => {
+                    format!("  allowed_assets: {}", assets.join(", "))
+                }
+                oc_core::PolicyRule::Executable { path } => {
+                    format!("  executable: {path}")
+                }
             };
             println!("{desc}");
         }

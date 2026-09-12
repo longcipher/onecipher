@@ -50,7 +50,7 @@ pub(crate) fn run(
 
     // API tokens are not supported yet; the owner passphrase is used.
     if let Some(passphrase) = commands::peek_passphrase() &&
-        passphrase.starts_with(oc_wallet::key_store::TOKEN_PREFIX)
+        oc_core::Credential::parse(&passphrase).is_token()
     {
         return Err(CliError::InvalidArgs(
             "send requires the owner passphrase (API tokens are not supported yet)".into(),

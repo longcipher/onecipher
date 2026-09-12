@@ -48,12 +48,13 @@ use crate::{error::KeyAgentError, global_key_cache};
 /// returns `HardenedBytes` directly — we do not re-wrap; the bytes never
 /// leave the hardened wrapper.
 ///
-/// `key` is the user-supplied passphrase (UTF-8 bytes inside `HardenedBytes`).
+/// `key` holds the raw passphrase bytes inside `HardenedBytes` (arbitrary
+/// bytes — owner UTF-8 passphrases and device-derived secrets alike).
 /// `vault` is a loaded wallet file (`Vault::load(path)`).
 ///
 /// Errors:
 /// - `KeyAgentError::Internal` if the vault's crypto envelope fails to decrypt (wrong passphrase,
-///   corrupt envelope, argon2id/AES-GCM-SIV failure, mlock failure on the output buffer).
+///   corrupt envelope, age scrypt failure, mlock failure on the output buffer).
 pub fn decrypt_mnemonic(
     vault: &Vault,
     key: &HardenedBytes,

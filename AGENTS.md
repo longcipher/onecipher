@@ -1,5 +1,13 @@
 # OneCipher Agent Instructions
 
+> **TL;DR (30s):** Pre-1.0, `publish = false` — NO backward-compat guarantee.
+> Minimal implementation first: smallest correct change, no speculative APIs.
+> Grow layer by layer: core → crypto/signer → wallet/keyagent → netagent/webui/CLI.
+> Delete old paths when replacing them (retired crates leave no skeleton behind).
+> Secrets via `HardenedBytes`, never `String`/`Vec<u8>`; R56/R12 gates are non-negotiable.
+> Details: [layout](#workspace-layout) · [hard gates](#onecipher-hard-gates) · [workflow](#development-workflow).
+> Storage split: `oc-vault` = bytes, `oc-wallet` = ops, `oc-secret` = user secrets ([boundary](#storage-boundary-authoritative)).
+
 ## Scope
 
 This is the OneCipher workspace — a policy-gated, local-key-custody signing
@@ -45,9 +53,9 @@ deliberately disjoint — do NOT merge them and do NOT add cross-calls:
 
 | Crate | Owns | Format | Notes |
 |-------|------|--------|-------|
-| `oc-wallet::key_store` | API tokens (`oc_key_…`) | JSON, 0600 | Agent/CLI auth tokens; agent-mode tokens additionally carry HKDF(token)-re-encrypted wallet-key copies (intentional design — NOT user secrets). |
+| `oc-wallet::key_store` | API tokens (`oc_key_…`) | JSON, 0600 | Agent/CLI auth tokens; agent-mode tokens additionally carry age-X25519-encrypted wallet-key copies for the token recipient (intentional design — NOT user secrets). |
 | `oc-secret` | User secrets (age-encrypted) + TOTP | age ciphertext | Never holds keys; keys live in `oc-vault`. |
-| `oc-vault` | Wallet keyfiles (encrypted mnemonics/keys) | age/JSON, 0700 dir / 0600 file, `.ocbk` backup | The persistence *format*; `oc-wallet::ops` is the *operation* layer that reads/writes it. |
+| `oc-vault` | Wallet keyfiles (age-encrypted mnemonics/keys) | age/JSON, 0700 dir / 0600 file, `.ocbk` age bundle | The persistence *format*; `oc-wallet::ops` is the *operation* layer that reads/writes it. |
 | `oc-wallet::policy_store` | Signed policy docs | JSON, 0600 (+ `.sig` sidecar) | Policies are signed on save with a dedicated Ed25519 key (`policy_signing.key`); load verifies the sidecar `.sig` (fail-closed on mismatch; legacy unsigned files load with a loud warning). Counters live in `oc-policy` state. |
 
 Rule of thumb: `oc-vault` = *how* bytes are stored on disk; `oc-wallet` =

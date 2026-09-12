@@ -296,11 +296,23 @@ fn test_local_stubs_return_ok() {
     // NOTE: `vault unlock` is excluded — it depends on the real vault at
     // ~/.onecipher and the wallet's KDF format. Covered by integration tests.
 
-    let cli = Cli::parse_from(["onecipher", "backup", "export", "--out", "/tmp/wallet.ocbk"]);
+    // Backup export needs at least one age recipient; generate an ephemeral
+    // one (the bundle itself is discarded — this only asserts Ok dispatch).
+    let recipient = oc_vault::crypto::AgeIdentity::generate().to_recipient_string();
+    let cli = Cli::parse_from([
+        "onecipher",
+        "backup",
+        "export",
+        "--out",
+        "/tmp/wallet.ocbk",
+        "--recipient",
+        recipient.as_str(),
+    ]);
     assert!(crate::run(cli, &mock).is_ok());
 
-    let cli = Cli::parse_from(["onecipher", "backup", "import", "--in", "/tmp/wallet.ocbk"]);
-    assert!(crate::run(cli, &mock).is_ok());
+    // Import without an identity would prompt on the terminal; the full
+    // export/import round trip (with identity) is covered by
+    // `test_backup_export_import` below.
 }
 
 // -----------------------------------------------------------------------
@@ -816,7 +828,8 @@ fn test_sign_transaction_bad_hex() {
     run_ok(&["onecipher", "wallet", "create", "--name", "st", "--words", "12"]);
     let res = run_cli(&[
         "onecipher",
-        "sign-transaction",
+        "sign",
+        "tx",
         "--chain",
         "evm",
         "--wallet",
@@ -838,7 +851,8 @@ fn test_sign_auth_runs_on_valid_inputs() {
     // Bad delegate address hex → error path exercised.
     let res = run_cli(&[
         "onecipher",
-        "sign-auth",
+        "sign",
+        "auth",
         "--chain",
         "evm",
         "--wallet",
@@ -861,8 +875,17 @@ fn test_sign_auth_runs_on_valid_inputs() {
 fn test_send_tx_bad_hex() {
     let _home = HomeGuard::new();
     run_ok(&["onecipher", "wallet", "create", "--name", "stx", "--words", "12"]);
-    let res =
-        run_cli(&["onecipher", "send-tx", "--chain", "evm", "--wallet", "stx", "--tx", "!!bad"]);
+    let res = run_cli(&[
+        "onecipher",
+        "sign",
+        "send-tx",
+        "--chain",
+        "evm",
+        "--wallet",
+        "stx",
+        "--tx",
+        "!!bad",
+    ]);
     assert!(res.is_err());
 }
 
@@ -898,7 +921,7 @@ fn test_secret_full_lifecycle() {
     run_ok(&["onecipher", "secret", "update", "github/personal", "--field", "secret"]);
     remove_env("ONECIPHER_SECRET");
 
-    run_ok(&["onecipher", "secret", "rename", "--old", "github/personal", "--new", "github/work"]);
+    run_ok(&["onecipher", "secret", "rename", "github/personal", "github/work"]);
 
     run_ok(&["onecipher", "secret", "copy", "github/work", "github/copy"]);
     // copy over existing without --force must fail
@@ -909,9 +932,13 @@ fn test_secret_full_lifecycle() {
     run_ok(&["onecipher", "secret", "move", "github/copy", "github/moved"]);
     run_ok(&["onecipher", "secret", "move", "github/copy2", "github/moved2", "--force"]);
 
-    run_ok(&["onecipher", "secret", "delete", "github/work"]);
-    run_ok(&["onecipher", "secret", "delete", "github/moved"]);
-    run_ok(&["onecipher", "secret", "delete", "github/moved2"]);
+    // delete without --force must fail (destructive action gate)
+    let res = run_cli(&["onecipher", "secret", "delete", "github/work"]);
+    assert!(res.is_err(), "delete without --force must fail");
+
+    run_ok(&["onecipher", "secret", "delete", "--force", "github/work"]);
+    run_ok(&["onecipher", "secret", "delete", "--force", "github/moved"]);
+    run_ok(&["onecipher", "secret", "delete", "--force", "github/moved2"]);
 }
 
 // -----------------------------------------------------------------------
@@ -976,7 +1003,7 @@ fn test_password_add_and_get() {
         "24",
     ]);
     run_ok(&["onecipher", "password", "get", "site"]);
-    run_ok(&["onecipher", "secret", "delete", "site"]);
+    run_ok(&["onecipher", "secret", "delete", "--force", "site"]);
 }
 
 // -----------------------------------------------------------------------
@@ -1074,7 +1101,11 @@ fn test_policy_lifecycle() {
     // Create a policy JSON file.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("policy.json");
-    std::fs::write(&path, r#"{"id":"pol-1","name":"test","rules":[],"version":2}"#).unwrap();
+    std::fs::write(
+        &path,
+        r#"{"id":"pol-1","name":"test","rules":[],"version":2,"created_at":"2026-01-01T00:00:00Z","action":"deny"}"#,
+    )
+    .unwrap();
     run_ok(&["onecipher", "policy", "create", "--file", &path.to_string_lossy()]);
     run_ok(&["onecipher", "policy", "list"]);
     run_ok(&["onecipher", "policy", "show", "--id", "pol-1"]);
@@ -1298,7 +1329,7 @@ fn test_grep_and_find() {
     run_ok(&["onecipher", "find", "grep", "--json"]);
     run_ok(&["onecipher", "find", "--type", "password"]);
 
-    run_ok(&["onecipher", "secret", "delete", "grep/target"]);
+    run_ok(&["onecipher", "secret", "delete", "--force", "grep/target"]);
 }
 
 // -----------------------------------------------------------------------
@@ -1309,10 +1340,29 @@ fn test_grep_and_find() {
 fn test_backup_export_import() {
     let _home = HomeGuard::new();
     run_ok(&["onecipher", "wallet", "create", "--name", "bk", "--words", "12"]);
+    let identity = oc_vault::crypto::AgeIdentity::generate();
+    let recipient = identity.to_recipient_string();
+    let secret = identity.to_secret_string();
     let out = _home.path().join("wallet.ocbk");
-    run_ok(&["onecipher", "backup", "export", "--out", &out.to_string_lossy()]);
+    run_ok(&[
+        "onecipher",
+        "backup",
+        "export",
+        "--out",
+        &out.to_string_lossy(),
+        "--recipient",
+        recipient.as_str(),
+    ]);
     assert!(out.exists(), "backup file must be created");
-    run_ok(&["onecipher", "backup", "import", "--in", &out.to_string_lossy()]);
+    run_ok(&[
+        "onecipher",
+        "backup",
+        "import",
+        "--in",
+        &out.to_string_lossy(),
+        "--identity",
+        secret.as_str(),
+    ]);
 }
 
 // -----------------------------------------------------------------------
@@ -1480,9 +1530,11 @@ fn test_wc_parse_and_dispatch() {
 #[test]
 fn test_uninstall_parses() {
     let cli = Cli::parse_from(["onecipher", "uninstall", "--purge"]);
-    assert!(matches!(cli.command, Some(Commands::Uninstall { purge: true })));
+    assert!(matches!(cli.command, Some(Commands::Uninstall { purge: true, force: false })));
     let cli = Cli::parse_from(["onecipher", "uninstall"]);
-    assert!(matches!(cli.command, Some(Commands::Uninstall { purge: false })));
+    assert!(matches!(cli.command, Some(Commands::Uninstall { purge: false, force: false })));
+    let cli = Cli::parse_from(["onecipher", "uninstall", "--purge", "--force"]);
+    assert!(matches!(cli.command, Some(Commands::Uninstall { purge: true, force: true })));
 }
 
 // -----------------------------------------------------------------------
@@ -1514,28 +1566,31 @@ fn test_webui_parses() {
 fn test_secret_add_via_stdin_payload() {
     let _home = HomeGuard::new();
     age_init();
-    // Write a payload to a temp file and feed via stdin.
-    let dir = tempfile::tempdir().unwrap();
-    let payload = dir.path().join("payload.json");
-    std::fs::write(&payload, r#"{"secret":"stdin-secret","notes":"n","extra":null}"#).unwrap();
-    let input = std::fs::read_to_string(&payload).unwrap();
-    // Use a child process invocation through the binary to pipe stdin.
-    let out = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["onecipher", "secret", "add", "stdin/sec", "--type", "password", "--stdin"])
-        .env("HOME", _home.path())
-        .env("ONECIPHER_SECRET", "") // unused but keep env shaped
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
-            child.wait()
-        });
-    assert!(out.is_ok_and(|s| s.success()), "stdin secret add must succeed");
+    // The --stdin contract is a JSON SecretPayload. Spawning
+    // `current_exe()` cannot exercise it (`current_exe()` here is the test
+    // harness, not the CLI binary, so libtest chokes on the CLI args), so
+    // the same shape is driven in-process: parse the payload exactly as
+    // `--stdin` intake does, persist it through the unified CRUD plane, then
+    // read it back through the real CLI dispatch.
+    let mut payload: oc_core::SecretPayload =
+        serde_json::from_str(r#"{"secret":"stdin-secret","notes":"n","extra":null}"#).unwrap();
+    assert_eq!(payload.secret, "stdin-secret");
+    let store = crate::commands::open_secret_store().unwrap();
+    let recipients = crate::commands::load_recipients().unwrap();
+    let hardened = oc_signer::SecretBytes::from_slice(payload.secret.as_bytes()).unwrap();
+    oc_secret::create_entry_full(
+        &store,
+        oc_core::SecretKind::Password,
+        "stdin/sec",
+        &hardened,
+        payload.notes.take(),
+        payload.extra.take(),
+        Default::default(),
+        &recipients,
+    )
+    .unwrap();
     run_ok(&["onecipher", "secret", "get", "stdin/sec", "--json"]);
-    run_ok(&["onecipher", "secret", "delete", "stdin/sec"]);
+    run_ok(&["onecipher", "secret", "delete", "--force", "stdin/sec"]);
 }
 
 // ===========================================================================
@@ -2333,7 +2388,7 @@ fn test_secret_edit_with_noop_editor() {
 
     // The secret still decrypts to the original value.
     run_ok(&["onecipher", "secret", "get", "edit/sec", "--json"]);
-    run_ok(&["onecipher", "secret", "delete", "edit/sec"]);
+    run_ok(&["onecipher", "secret", "delete", "--force", "edit/sec"]);
 }
 
 // ===========================================================================

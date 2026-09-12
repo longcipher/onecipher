@@ -20,6 +20,24 @@ pub enum PolicyRule {
     /// Deny typed data signing if `domain.verifyingContract` is not in the allowlist.
     /// Passes through for non-typed-data signing operations.
     AllowedTypedDataContracts { contracts: Vec<String> },
+
+    /// Deny if the native value exceeds `max_value` (both decimal strings in
+    /// the smallest unit, compared as u128 to avoid f64 rounding).
+    MaxAmount { max_value: String },
+
+    /// Deny if the destination address is not in the allowlist
+    /// (case-insensitive comparison).
+    AllowedAddresses { addresses: Vec<String> },
+
+    /// Deny if the asset symbol is not in the allowlist. An empty list or a
+    /// missing asset (`None`) allows (fail-open on absence, fail-closed on
+    /// mismatch).
+    AllowedAssets { assets: Vec<String> },
+
+    /// Delegate the decision to an external executable (absolute path, no
+    /// `..`, stdin JSON, 5s timeout, fail-closed). Evaluated by
+    /// `oc-policy::executable` with `std::process` only (R56: no tokio).
+    Executable { path: String },
 }
 
 /// A stored policy definition.
@@ -119,6 +137,42 @@ impl PolicyResult {
     pub fn denied(policy_id: impl Into<String>, reason: impl Into<String>) -> Self {
         Self { allow: false, reason: Some(reason.into()), policy_id: Some(policy_id.into()) }
     }
+}
+
+/// Compare decimal integer strings as u128.
+///
+/// Returns true if `actual` exceeds `limit`. Unparseable inputs fail closed
+/// (treated as exceeding) so a malformed value can never bypass a cap.
+pub fn amount_exceeds(actual: Option<&str>, limit: &str) -> bool {
+    let limit_val: u128 = match limit.trim().parse() {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    let Some(s) = actual else { return false };
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    // Strip optional 0x hex prefix by parsing as decimal only; hex fails
+    // closed (exceeds) to avoid silent base confusion.
+    match s.parse::<u128>() {
+        Ok(v) => v > limit_val,
+        Err(_) => true,
+    }
+}
+
+/// Case-insensitive address equality.
+pub fn address_eq(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// Asset allowlist check: empty list or missing asset allows.
+pub fn asset_allowed(assets: &[String], asset: Option<&str>) -> bool {
+    if assets.is_empty() {
+        return true;
+    }
+    let Some(a) = asset else { return true };
+    assets.iter().any(|x| x.eq_ignore_ascii_case(a))
 }
 
 #[cfg(test)]
@@ -323,5 +377,46 @@ mod tests {
 
         let json = serde_json::to_string(&ctx).unwrap();
         assert!(!json.contains("typed_data"));
+    }
+
+    #[test]
+    fn test_new_rule_variants_serde() {
+        let max: PolicyRule = serde_json::from_value(serde_json::json!({
+            "type": "max_amount", "max_value": "100"
+        }))
+        .unwrap();
+        assert_eq!(max, PolicyRule::MaxAmount { max_value: "100".into() });
+        let exe: PolicyRule =
+            serde_json::from_value(serde_json::json!({"type": "executable", "path": "/bin/p"}))
+                .unwrap();
+        assert_eq!(exe, PolicyRule::Executable { path: "/bin/p".into() });
+    }
+
+    #[test]
+    fn test_amount_exceeds_u128_strings() {
+        assert!(amount_exceeds(Some("101"), "100"));
+        assert!(!amount_exceeds(Some("100"), "100"));
+        assert!(!amount_exceeds(Some("99"), "100"));
+        assert!(!amount_exceeds(None, "100"));
+        assert!(!amount_exceeds(Some(""), "100"));
+        // Fail-closed on malformed input.
+        assert!(amount_exceeds(Some("not-a-number"), "100"));
+        assert!(amount_exceeds(Some("100"), "bad-limit"));
+        // u128 range beyond f64 precision still compares exactly.
+        assert!(amount_exceeds(Some("340282366920938463463374607431768211455"), "1"));
+    }
+
+    #[test]
+    fn test_address_eq_case_insensitive() {
+        assert!(address_eq("0xABC", "0xabc"));
+        assert!(!address_eq("0xABC", "0xABD"));
+    }
+
+    #[test]
+    fn test_asset_allowed_defaults_open() {
+        assert!(asset_allowed(&[], Some("ETH")));
+        assert!(asset_allowed(&["USDC".into()], None));
+        assert!(asset_allowed(&["USDC".into()], Some("usdc")));
+        assert!(!asset_allowed(&["USDC".into()], Some("ETH")));
     }
 }

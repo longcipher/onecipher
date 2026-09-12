@@ -67,7 +67,24 @@ impl Mnemonic {
     }
 
     /// Derive a BIP-39 seed from this mnemonic with an optional passphrase.
+    ///
+    /// Raw-seed escape hatch: compiled only with `--features raw-seed`.
+    /// Production code must use
+    /// [`HdDeriver::derive_from_mnemonic`](crate::HdDeriver::derive_from_mnemonic),
+    /// which consumes the seed internally via [`Self::to_seed_sealed`] so the
+    /// 64-byte seed never leaves `oc-signer`.
+    #[cfg(feature = "raw-seed")]
     pub fn to_seed(&self, passphrase: &str) -> Result<SecretBytes, MnemonicError> {
+        self.to_seed_sealed(passphrase)
+    }
+
+    /// Sealed seed accessor for the HD derivation kernel.
+    ///
+    /// Always compiled; the only sanctioned path for
+    /// [`HdDeriver::derive_from_mnemonic`](crate::HdDeriver::derive_from_mnemonic)
+    /// so raw 64-byte seeds never cross crate boundaries except through the
+    /// `raw-seed`-gated [`Self::to_seed`].
+    pub(crate) fn to_seed_sealed(&self, passphrase: &str) -> Result<SecretBytes, MnemonicError> {
         let pass = if passphrase.is_empty() { None } else { Some(passphrase) };
         let seed = self
             .inner
@@ -172,7 +189,7 @@ mod tests {
     fn test_seed_vector_no_passphrase() {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let mnemonic = Mnemonic::from_phrase(phrase).unwrap();
-        let seed = mnemonic.to_seed("").unwrap();
+        let seed = mnemonic.to_seed_sealed("").unwrap();
         let seed_hex = hex::encode(seed.expose());
         assert_eq!(
             seed_hex,
@@ -184,8 +201,8 @@ mod tests {
     fn test_seed_with_passphrase_trezor() {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let mnemonic = Mnemonic::from_phrase(phrase).unwrap();
-        let seed_no_pass = mnemonic.to_seed("").unwrap();
-        let seed_with_pass = mnemonic.to_seed("TREZOR").unwrap();
+        let seed_no_pass = mnemonic.to_seed_sealed("").unwrap();
+        let seed_with_pass = mnemonic.to_seed_sealed("TREZOR").unwrap();
         // Seeds should differ with different passphrases
         assert_ne!(seed_no_pass.expose(), seed_with_pass.expose());
         // Known BIP-39 test vector for "TREZOR" passphrase

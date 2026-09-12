@@ -21,6 +21,9 @@ oc-signer = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# keccak256 for the ERC-7715 permission Merkle root (EVM canonical hash).
+# R56-safe (pure hash, no async/network).
+sha3 = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

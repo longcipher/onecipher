@@ -15,6 +15,11 @@ use crate::{
 };
 
 /// XRPL hash: the first 32 bytes of SHA-512 ("SHA512Half").
+///
+/// XRPL-specific; intentionally NOT in `crate::encoding` (no other chain
+/// uses SHA512-Half). Address payload hashing (compressed pubkey → SHA-256
+/// → RIPEMD-160) matches [`crate::encoding::hash160`] but stays inside the
+/// audited `xrpl::core::keypairs::derive_classic_address` provider below.
 fn sha512_half(data: &[u8]) -> [u8; 32] {
     let hash = Sha512::digest(data);
     let mut out = [0u8; 32];
@@ -24,8 +29,8 @@ fn sha512_half(data: &[u8]) -> [u8; 32] {
 
 /// secp256k1 public key (33 bytes) — XRPL's `SigningPubKey` value.
 fn derive_public_key(private_key: &[u8]) -> Result<Vec<u8>, SignerError> {
-    let signing_key = SigningKey::from_slice(private_key)
-        .map_err(|e| SignerError::InvalidPrivateKey(e.to_string()))?;
+    let signing_key =
+        SigningKey::from_slice(private_key).map_err(|e| SignerError::Input(e.to_string()))?;
     Ok(PublicKey::from(signing_key.verifying_key()).to_sec1_bytes().to_vec())
 }
 
@@ -34,7 +39,7 @@ fn derive_public_key(private_key: &[u8]) -> Result<Vec<u8>, SignerError> {
 fn ensure_unsigned(json_tx: &serde_json::Value) -> Result<(), SignerError> {
     for field in ["SigningPubKey", "TxnSignature"] {
         if json_tx.get(field).is_some() {
-            return Err(SignerError::InvalidTransaction(format!(
+            return Err(SignerError::Transaction(format!(
                 "unsigned transaction must not contain {field}"
             )));
         }
@@ -78,22 +83,18 @@ impl ChainSigner for XrplSigner {
         let pubkey_bytes = derive_public_key(private_key)?;
 
         derive_classic_address(&hex::encode_upper(&pubkey_bytes))
-            .map_err(|e| SignerError::InvalidPrivateKey(e.to_string()))
+            .map_err(|e| SignerError::Input(e.to_string()))
     }
 
     /// Sign a pre-hashed 32-byte message with secp256k1 (DER output).
     fn sign(&self, private_key: &[u8], message: &[u8]) -> Result<SignOutput, SignerError> {
         let digest: [u8; 32] = message.try_into().map_err(|_| {
-            SignerError::InvalidMessage(format!(
-                "expected 32-byte hash, got {} bytes",
-                message.len()
-            ))
+            SignerError::Input(format!("expected 32-byte hash, got {} bytes", message.len()))
         })?;
-        let signing_key = SigningKey::from_slice(private_key)
-            .map_err(|e| SignerError::InvalidPrivateKey(e.to_string()))?;
-        let sig: k256::ecdsa::Signature = signing_key
-            .sign_prehash(&digest)
-            .map_err(|e| SignerError::SigningFailed(e.to_string()))?;
+        let signing_key =
+            SigningKey::from_slice(private_key).map_err(|e| SignerError::Input(e.to_string()))?;
+        let sig: k256::ecdsa::Signature =
+            signing_key.sign_prehash(&digest).map_err(|e| SignerError::Crypto(e.to_string()))?;
         let public_key = PublicKey::from(signing_key.verifying_key()).to_sec1_bytes().to_vec();
         Ok(SignOutput {
             signature: sig.to_der().as_bytes().to_vec(),
@@ -122,9 +123,7 @@ impl ChainSigner for XrplSigner {
         tx_bytes: &[u8],
     ) -> Result<SignOutput, SignerError> {
         if tx_bytes.is_empty() {
-            return Err(SignerError::InvalidTransaction(
-                "transaction bytes must not be empty".into(),
-            ));
+            return Err(SignerError::Transaction("transaction bytes must not be empty".into()));
         }
 
         let public_key = derive_public_key(private_key)?;
@@ -132,14 +131,13 @@ impl ChainSigner for XrplSigner {
         // Inject SigningPubKey, then re-encode: these are the bytes the signature covers.
         let tx_hex = hex::encode_upper(tx_bytes);
         let mut json_tx = xrpl_decode(&tx_hex)
-            .map_err(|e| SignerError::InvalidTransaction(format!("xrpl decode failed: {}", e)))?;
+            .map_err(|e| SignerError::Transaction(format!("xrpl decode failed: {}", e)))?;
         ensure_unsigned(&json_tx)?;
         json_tx["SigningPubKey"] = serde_json::Value::String(hex::encode_upper(&public_key));
         let signable_hex = xrpl_encode(&json_tx)
-            .map_err(|e| SignerError::InvalidTransaction(format!("xrpl encode failed: {}", e)))?;
-        let signable = hex::decode(&signable_hex).map_err(|e| {
-            SignerError::InvalidTransaction(format!("invalid hex from encode: {}", e))
-        })?;
+            .map_err(|e| SignerError::Transaction(format!("xrpl encode failed: {}", e)))?;
+        let signable = hex::decode(&signable_hex)
+            .map_err(|e| SignerError::Transaction(format!("invalid hex from encode: {}", e)))?;
 
         // STX\0 (0x53545800) is the XRPL single-signing hash prefix, prepended to
         // the serialized fields before the SHA512-half digest that gets signed.
@@ -173,11 +171,11 @@ impl ChainSigner for XrplSigner {
     ) -> Result<Vec<u8>, SignerError> {
         let tx_hex = hex::encode_upper(tx_bytes);
         let mut json_tx = xrpl_decode(&tx_hex)
-            .map_err(|e| SignerError::InvalidTransaction(format!("xrpl decode failed: {}", e)))?;
+            .map_err(|e| SignerError::Transaction(format!("xrpl decode failed: {}", e)))?;
         ensure_unsigned(&json_tx)?;
 
         let public_key = signature.public_key.as_ref().ok_or_else(|| {
-            SignerError::InvalidTransaction(
+            SignerError::Transaction(
                 "encode_signed_transaction requires public_key in SignOutput".into(),
             )
         })?;
@@ -186,10 +184,10 @@ impl ChainSigner for XrplSigner {
             serde_json::Value::String(hex::encode_upper(&signature.signature));
 
         let hex_encoded = xrpl_encode(&json_tx)
-            .map_err(|e| SignerError::InvalidTransaction(format!("xrpl encode failed: {}", e)))?;
+            .map_err(|e| SignerError::Transaction(format!("xrpl encode failed: {}", e)))?;
 
         hex::decode(&hex_encoded)
-            .map_err(|e| SignerError::InvalidTransaction(format!("invalid hex from encode: {}", e)))
+            .map_err(|e| SignerError::Transaction(format!("invalid hex from encode: {}", e)))
     }
 
     /// Off-chain message signing is not yet supported for XRPL.
@@ -201,7 +199,7 @@ impl ChainSigner for XrplSigner {
         _private_key: &[u8],
         _message: &[u8],
     ) -> Result<SignOutput, SignerError> {
-        Err(SignerError::SigningFailed(
+        Err(SignerError::Crypto(
             "XRPL off-chain message signing is not supported: no canonical standard exists. \
              Define a convention (e.g. SHA512Half(XMSG\\0 || message)) before enabling this."
                 .into(),

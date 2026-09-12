@@ -9,7 +9,7 @@ description = "High-level wallet API for the OneCipher project"
 
 [features]
 default = ["rpc", "sui-grpc"]
-fast-kdf = ["oc-signer/fast-kdf"]
+fast-kdf = ["oc-vault/fast-kdf"]
 rpc = ["dep:hpx", "dep:tokio"]
 sui-grpc = ["dep:tokio"]
 # Passthrough for oc-signer's off-by-default XRPL support. Enabled
@@ -43,7 +43,8 @@ zeroize = { workspace = true }
 bs58 = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["hazmat", "rand_core"] }
 k256 = { workspace = true, features = ["ecdsa"] }
-oc-signer = { workspace = true, features = ["fast-kdf", "xrpl"] }
+oc-signer = { workspace = true, features = ["xrpl"] }
+oc-vault = { workspace = true, features = ["fast-kdf"] }
 sha3 = { workspace = true }
 tempfile = { workspace = true }
 

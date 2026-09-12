@@ -503,4 +503,44 @@ mod tests {
         // Default relay URL preserved when not overridden.
         assert_eq!(config.wc.relay_url, WcConfig::default_relay_url());
     }
+
+    #[test]
+    fn test_load_rejects_corrupt_json_with_err() {
+        // `Config::load` is the strict entry point: a present-but-corrupt
+        // file is an error, never silent defaults. (The lenient
+        // `load_or_default_from` merge helper warns and keeps defaults
+        // instead — covered by its own tests.)
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.json");
+        std::fs::write(&config_path, b"{ not valid json").unwrap();
+
+        let err = Config::load(&config_path).unwrap_err();
+        assert!(
+            format!("{err}").contains("failed to parse config"),
+            "corrupt config must fail with a parse error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_load_or_default_without_home_uses_builtin_defaults() {
+        // With `HOME` unset there is no user config to merge: built-in
+        // defaults apply, and no world-writable fallback location is read.
+        let _guard = crate::test_support::env_lock();
+        let original = std::env::var("HOME").ok();
+
+        // SAFETY: guarded by `env_lock()`; the original value is restored
+        // before the guard is released.
+        unsafe { std::env::remove_var("HOME") };
+
+        let config = Config::load_or_default();
+        assert_eq!(config.rpc_url("eip155:1"), Some("https://eth.llamarpc.com"));
+        assert_eq!(config.wc.relay_url, WcConfig::default_relay_url());
+
+        match original {
+            // SAFETY: see above.
+            Some(v) => unsafe { std::env::set_var("HOME", v) },
+            // SAFETY: see above.
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
 }

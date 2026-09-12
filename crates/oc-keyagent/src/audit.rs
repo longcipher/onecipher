@@ -91,6 +91,13 @@ pub enum EventType {
     TransactionSigned,
     AuthSigned,
     PasskeyRegistered,
+    // Per-request enclave lifecycle: the parent appends `EnclavePending`
+    // before spawning the child and `EnclaveResolved` after (success, child
+    // failure, or timeout kill — always with the child pid). A `pending`
+    // entry with no matching `resolved` entry means the parent died
+    // mid-request and must alert, not silently drop.
+    EnclavePending,
+    EnclaveResolved,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -754,6 +761,34 @@ mod tests {
         // Drop log before dir to release the file handle.
         drop(log);
         let _ = dir;
+    }
+
+    #[test]
+    fn reopen_skips_corrupt_lines_and_preserves_tail() {
+        // Read-skip-bad-lines: a torn/corrupt JSONL line (crash mid-append,
+        // hand edit) must not reset the chain tail on reopen; the next
+        // append resumes at seq 2 instead of forking the chain at seq 1.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let mut key_bytes = [0u8; 32];
+        rand::rng().fill(&mut key_bytes);
+        let device_key = SigningKey::from_bytes(&key_bytes);
+        let mut log = AuditLog::open(&path, "test-device", device_key.clone()).unwrap();
+        assert_eq!(log.log_secret_read("a", "password").unwrap(), 1);
+
+        // Inject a blank line and a corrupt line directly.
+        {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+            f.write_all(b"\n{not json}\n").unwrap();
+        }
+
+        let mut reopened = AuditLog::open(&path, "test-device", device_key).unwrap();
+        assert_eq!(
+            reopened.log_secret_read("b", "password").unwrap(),
+            2,
+            "tail must survive corrupt lines"
+        );
     }
 }
 

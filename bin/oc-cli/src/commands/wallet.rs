@@ -114,7 +114,8 @@ pub(crate) fn change_password(
 
     // Load the raw wallet file, update the crypto envelope
     let wallet_file = oc_vault::load_wallet_by_name_or_id(wallet_name, None)?;
-    let new_envelope = oc_signer::encrypt(decrypted.expose(), new_pass.as_bytes())?;
+    let new_envelope =
+        oc_vault::crypto::encrypt_with_passphrase(decrypted.expose(), new_pass.as_bytes())?;
     let new_crypto_json = serde_json::to_value(&new_envelope)?;
 
     // Build updated wallet
@@ -372,9 +373,11 @@ pub(crate) fn export(wallet_name: &str) -> Result<(), CliError> {
 
 pub(crate) fn delete(wallet_name: &str, confirm: bool) -> Result<(), CliError> {
     if !confirm {
-        eprintln!("To delete a wallet, pass --confirm.");
+        eprintln!("To delete a wallet, pass --confirm (or --force).");
         eprintln!("Consider exporting it first: onecipher wallet export --wallet {wallet_name}");
-        return Err(CliError::InvalidArgs("--confirm is required to delete a wallet".into()));
+        return Err(CliError::InvalidArgs(
+            "--confirm (or --force) is required to delete a wallet".into(),
+        ));
     }
 
     let info = oc_wallet::get_wallet(wallet_name, None)?;
@@ -394,8 +397,16 @@ pub(crate) fn rename(wallet_name: &str, new_name: &str) -> Result<(), CliError> 
     Ok(())
 }
 
-pub(crate) fn list() -> Result<(), CliError> {
+pub(crate) fn list(json: bool) -> Result<(), CliError> {
     let wallets = oc_wallet::list_wallets(None)?;
+
+    // Same `--json` contract as the secret plane: machine output on stdout,
+    // human text otherwise.
+    if json {
+        let json_str = serde_json::to_string_pretty(&wallets)?;
+        println!("{json_str}");
+        return Ok(());
+    }
 
     if wallets.is_empty() {
         println!("No wallets found.");

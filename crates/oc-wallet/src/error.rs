@@ -1,4 +1,5 @@
-use oc_signer::{CryptoError, SignerError, hd::HdError, mnemonic::MnemonicError};
+use oc_signer::{SignerError, hd::HdError, mnemonic::MnemonicError};
+use oc_vault::crypto::CryptoError;
 
 /// Unified error type for oc-wallet operations.
 #[derive(Debug, thiserror::Error)]

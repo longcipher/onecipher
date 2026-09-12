@@ -19,13 +19,17 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 │  │         └─────────────────────┘                                │    │
 │  │                          ▼                                     │    │
 │  │              ┌───────────────────────┐                         │    │
-│  │              │   Intent Engine *     │                         │    │
-│  │              │ (CLI-only, off hot    │                         │    │
-│  │              │  path — see footnote) │                         │    │
+│  │              │   Intent Engine       │                         │    │
+│  │              │ (hot path via C13    │                         │    │
+│  │              │  trait boundary)      │                         │    │
 │  │              └───────────┬───────────┘                         │    │
-│  │              * dashed = CLI-only (`intent` cmd); WC/HTTP-RPC    │    │
-│  │                hot path forwards directly to Key-Agent via      │    │
-│  │                UDS frames, NOT through `execute_intent`.        │    │
+│  │              `simulate_for_hot_path` / `execute_for_hot_path`  │    │
+│  │              (`oc-netagent::intent::hot_path`) serve WC        │    │
+│  │              (`onecipher_intentSimulate/Execute`), HTTP-RPC    │    │
+│  │              (same router), and wallet-rpc                     │    │
+│  │              (`ledgerflow_intentSimulate/Execute`). Signing    │    │
+│  │              crosses the C13 `IntentSigner` trait — the intent │    │
+│  │              code never sees `HardenedBytes`.                  │    │
 │  └──────────────────────────┼─────────────────────────────────────┘    │
 │                             │ UDS frames (KeyAgentRequest)            │
 │  ┌──────────────────────────▼────────────────────────────────────┐    │
@@ -40,6 +44,12 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 │  │  └─────────────────────────────────────────────────────────┘ │    │
 │  │  ┌─────────────────────────────────────────────────────────┐ │    │
 │  │  │ Audit Log (append-only JSONL, persistent device key)    │ │    │
+│  │  └─────────────────────────────────────────────────────────┘ │    │
+│  │       │ per-request `onecipher --enclave-child`               │    │
+│  │       ▼                                                       │    │
+│  │  ┌─────────────────────────────────────────────────────────┐ │    │
+│  │  │ Enclave child: decrypt → sign → wipe, then exit         │ │    │
+│  │  │ (own seccomp/Seatbelt profile; parent never holds keys) │ │    │
 │  │  └─────────────────────────────────────────────────────────┘ │    │
 │  └─────────────────────────────────────────────────────────────────┘    │
 │                                                                      │
@@ -67,7 +77,14 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 - **Compile-time isolation**: The signing crates (`oc-policy`, `oc-crypto`, `oc-signer`, `oc-vault`) have zero async/network dependencies. CI enforces this via R56.
 - **`spawn_blocking` bridge**: async layer calls signing-core via `tokio::task::spawn_blocking`, avoiding reactor blockage.
 - **Local First**: All signing and policy evaluation happen locally. The server never touches plaintext private keys.
-- **Intent Layer is CLI-only**: `oc-netagent::intent` (`simulate_intent`/`execute_intent`) is NOT on the production hot path. The WC v2, HTTP-RPC, and WalletSigner flows forward directly to the Key-Agent via UDS `KeyAgentRequest` frames; wiring Intent in is tracked behind an opt-in feature (see Integration status below).
+- **Intent Layer is on the hot path (via C13):** `oc-netagent::intent::hot_path`
+  (`simulate_for_hot_path` / `execute_for_hot_path`) serves WC
+  (`onecipher_intentSimulate` / `onecipher_intentExecute`), HTTP-RPC (same
+  `WcMethodRouter`), and wallet-rpc (`ledgerflow_intentSimulate` /
+  `ledgerflow_intentExecute`). Signing crosses the C13 `IntentSigner` trait —
+  the intent code never touches `HardenedBytes`. RPC selection is fail-closed
+  (requires `rpc_url` / `OC_RPC_URL`); `CrossChainTransfer` stays fail-closed
+  (`Unsupported` — no bridge integration yet).
 
 > **Daemon module layout:** daemon lifecycle lives in `bin/oc-cli/src/daemon/`
 > (`mod.rs` lifecycle + control socket), extracted from `main.rs`. Signal
@@ -105,7 +122,7 @@ These are non-negotiable invariants enforced by CI:
 | Gate | Rule | Scope | Enforcement |
 |------|------|-------|-------------|
 | **R56** | No `tokio`, `reqwest`, `tungstenite`, `hyper`, `async-std`, `smol` | `oc-crypto`, `oc-policy`, `oc-session-key` (even as dev-deps) | `cargo tree -p <crate> -e features` |
-| **R12** | No TCP in isolated crates; loopback-only binds in the daemon | `oc-keyagent`, `oc-crypto`, `oc-policy`, `oc-session-key` sources; `onecipher` daemon | Five sub-rules: **R12a** source isolation — isolated crate sources must not contain `TcpListener`/`TcpStream` (`rg 'TcpListener\|TcpStream'`); **R12b** the daemon binary MAY contain TCP symbols (axum/hyper for the Web UI HTTP server and WC relay); **R12c** any daemon `TcpListener` must bind `127.0.0.1` exclusively (`lsof -iTCP -sTCP:LISTEN`); **R12d** at runtime the Key-Agent's seccomp BPF filter denies `connect(2)`/`bind(2)` to non-UDS sockets; **R12e** a non-loopback `[webui] listen` address is rejected at startup and the Web UI server refuses to start. **Note (macOS):** `apply_signing_thread_sandbox` skips Seatbelt on macOS (process-wide would kill WSS); network isolation falls back to source scan + `lsof`, not kernel enforcement. Full isolation requires out-of-process enclave (future) |
+| **R12** | No TCP in isolated crates; loopback-only binds in the daemon | `oc-keyagent`, `oc-crypto`, `oc-policy`, `oc-session-key` sources; `onecipher` daemon | Five sub-rules: **R12a** source isolation — isolated crate sources must not contain `TcpListener`/`TcpStream` (`rg 'TcpListener\|TcpStream'`); **R12b** the daemon binary MAY contain TCP symbols (axum/hyper for the Web UI HTTP server and WC relay); **R12c** any daemon `TcpListener` must bind `127.0.0.1` exclusively (`lsof -iTCP -sTCP:LISTEN`); **R12d** at runtime the Key-Agent's seccomp BPF filter denies `connect(2)`/`bind(2)` to non-UDS sockets; **R12e** a non-loopback `[webui] listen` address is rejected at startup and the Web UI server refuses to start. **Note (macOS):** `apply_signing_thread_sandbox` skips Seatbelt on macOS (process-wide would kill WSS); network isolation falls back to source scan + `lsof`, not kernel enforcement. Full isolation is implemented via the out-of-process enclave: every signing request spawns `onecipher --enclave-child`, which installs the full profile (including macOS Seatbelt) because it has no WSS relay to preserve |
 | **R51/R52** | Zero I/O, zero network dependencies | `oc-crypto` | Architecture + review |
 | **R55** | Signing core uses sync `std::thread` only | `oc-keyagent` crate | `cargo tree -p <crate> -e features` |
 | **R53** | Drop all capabilities except `CAP_IPC_LOCK` | `onecipher` binary (Linux, when enclave enabled) | `sandbox.rs` |
@@ -173,6 +190,15 @@ bin/oc-cli (single binary)
 >   accepting requests (fail-closed on error). Linux seccomp is per-thread,
 >   so the tokio relay is unaffected; macOS skips Seatbelt deliberately
 >   because `sandbox_init` is process-wide and would sever the WSS relay.
+> - **Per-request enclave is default-on.** Every signing surface (Key-Agent
+>   handlers, CLI owner paths, wallet-rpc handlers + intent signer, and
+>   WC/HTTP-RPC intent Execute via the Key-Agent UDS path) runs
+>   decrypt→sign→wipe in a `onecipher --enclave-child` subprocess over a
+>   versioned JSON pipe (`oc_version = 1`). The parent keeps
+>   UDS/policy-pre-check/audit/rate-limit duties and never holds decrypted
+>   keys; audit carries `request_id → pid → sig hash → latency` with
+>   `pending`/`resolved` pairing. In-process signing remains only behind
+>   `OC_ENCLAVE=off` (tests / escape hatch).
 > - **Policy v2 is wired into the WC router** behind an opt-in file:
 >   `~/.onecipher/wc-policy.json` (a serialized `PolicyV2`). When the file is
 >   present, chain-whitelist and expiry rules deny non-conforming requests
@@ -191,7 +217,13 @@ bin/oc-cli (single binary)
 >   passkey↔wallet binding.
 > - Policy v3 remains a hand-rolled Cedar-*like* rule tree gated behind the
 >   `experimental-v3` feature (off by default).
-> - **Intent Layer:** `oc-netagent::intent` is CLI-only (`onecipher intent simulate/execute`); the WC, HTTP-RPC, and WalletSigner hot paths forward directly to the Key-Agent via UDS frames, not through `execute_intent`. `simulate_intent`/`execute_intent` are exercised only by unit tests and `HpxRpcClient::native_price_usd` remains a stub. Wiring the Intent Layer into the signing path is tracked behind an explicit opt-in feature to avoid breaking existing dApp clients.
+> - **Intent Layer:** `oc-netagent::intent::hot_path` serves the WC, HTTP-RPC,
+>   and wallet-rpc hot paths (`simulate_for_hot_path` / `execute_for_hot_path`
+>   via the C13 `IntentSigner` boundary). `HpxRpcClient::native_price_usd` is
+>   fail-closed without a feed (`OC_PRICE_FEED_URL` / `with_price_feed`) —
+>   simulation degrades USD figures to "unknown" instead of guessing.
+>   `CrossChainTransfer` remains fail-closed (`Unsupported`) until bridge
+>   integration lands; the CLI (`onecipher intent ...`) uses the same adapter.
 
 ## Testing Strategy
 

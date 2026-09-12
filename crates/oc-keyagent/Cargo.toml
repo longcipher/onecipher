@@ -33,6 +33,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+zeroize = { workspace = true }
 # R56: NO tokio, NO reqwest, NO hyper, NO async-std, NO smol — even as dev-deps.
 # tracing is a pure log facade (no I/O, no async runtime) — R56-safe.
 # IPC wire types live in `src/proto.rs` (replaces the former `oc-proto` crate).
@@ -53,6 +54,9 @@ libc = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["hazmat", "rand_core"] }
 hex = { workspace = true }
 oc-core = { workspace = true, features = ["hardened"] }
+# Fast age scrypt work factor so wallet-decrypting tests stay in the
+# millisecond range (test-only; release builds reject this feature).
+oc-vault = { workspace = true, features = ["fast-kdf"] }
 proptest = { workspace = true }
 rand = { workspace = true }
 serde_json = { workspace = true }

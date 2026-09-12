@@ -693,4 +693,49 @@ mod tests {
             "interner must reject new IDs once the cap is reached"
         );
     }
+
+    /// C1 single-table guarantee: every `for_each_chain!` entry must match
+    /// the corresponding `ChainType` impl (`Display`, `namespace`,
+    /// `default_coin_type`, `from_namespace`) and every `ChainType` variant
+    /// must appear exactly once in the table.
+    #[test]
+    fn registry_matches_chain_type_impls() {
+        macro_rules! check_entry {
+            ($variant:ident, $display:expr, $ns:expr, $coin:expr, $ed:expr, $_path:expr) => {{
+                let ct = ChainType::$variant;
+                assert_eq!(ct.to_string(), $display, "display mismatch for {:?}", ct);
+                assert_eq!(ct.namespace(), $ns, "namespace mismatch for {:?}", ct);
+                assert_eq!(ct.default_coin_type(), $coin, "coin_type mismatch for {:?}", ct);
+                assert_eq!(
+                    ChainType::from_namespace($ns),
+                    Some(ct),
+                    "from_namespace mismatch for {}",
+                    $ns
+                );
+                // Ed25519 flag must agree with the documented curve families.
+                let expect_ed = matches!(
+                    ct,
+                    ChainType::Solana |
+                        ChainType::Ton |
+                        ChainType::Sui |
+                        ChainType::Nano |
+                        ChainType::Near
+                );
+                assert_eq!($ed, expect_ed, "is_ed25519 mismatch for {:?}", ct);
+            };};
+        }
+        // Statement-style expansion (`;`-separated): each callback is a
+        // bare block statement, so invoke without array wrapping.
+        crate::for_each_chain!(check_entry);
+
+        // Completeness: table length equals variant count (statement counter).
+        let mut table_len = 0usize;
+        macro_rules! bump {
+            ($_v:ident, $_d:expr, $_n:expr, $_c:expr, $_e:expr, $_p:expr) => {{
+                table_len += 1;
+            }};
+        }
+        crate::for_each_chain!(bump);
+        assert_eq!(table_len, ALL_CHAIN_TYPES.len());
+    }
 }

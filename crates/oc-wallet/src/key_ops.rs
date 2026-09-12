@@ -14,8 +14,10 @@ use oc_core::{ApiKeyFile, EncryptedWallet, OcError, SecretPermissions};
 // `oc_core::PolicyContext` → `PayRequest` and declarative `PolicyRule` →
 // Cedar-like `PolicyRule` without loss of semantics.
 use oc_policy::v1 as policy_engine;
-use oc_signer::{
-    CryptoEnvelope, SecretBytes, decrypt, eip712, encrypt_with_hkdf, signer_for_chain,
+use oc_signer::{SecretBytes, eip712, signer_for_chain};
+use oc_vault::crypto::{
+    AgeEnvelope, decrypt_with_identity, decrypt_with_passphrase, encrypt_to_recipients,
+    token_identity, token_recipient,
 };
 
 use crate::{error::OcWalletError, key_store, policy_store};
@@ -29,8 +31,8 @@ use crate::{error::OcWalletError, key_store, policy_store};
 /// 1. Authenticates with the owner's passphrase
 /// 2. Decrypts the wallet secret for each wallet
 /// 3. Generates a random token (`oc_key_...`)
-/// 4. Re-encrypts each secret under HKDF(token)
-/// 5. Stores the key file with token hash, policy IDs, and encrypted copies
+/// 4. Re-encrypts each secret to the token's age recipient
+/// 5. Stores the key file with token hash, recipient, policy IDs, and encrypted copies
 /// 6. Returns the raw token (shown once to the user)
 pub fn create_api_key(
     name: &str,
@@ -68,14 +70,17 @@ pub fn create_api_key_with_secret_permissions(
 
     for wallet_id in wallet_ids {
         let wallet = oc_vault::load_wallet_by_name_or_id(wallet_id, vault_path)?;
-        let envelope: CryptoEnvelope = serde_json::from_value(wallet.crypto.clone())?;
+        let envelope: AgeEnvelope = serde_json::from_value(wallet.crypto.clone())?;
 
         // Decrypt with owner's passphrase to verify it works
-        let secret = decrypt(&envelope, passphrase.as_bytes())?;
+        let secret = decrypt_with_passphrase(&envelope, passphrase.as_bytes())?;
 
-        // Re-encrypt under HKDF(token)
-        let hkdf_envelope = encrypt_with_hkdf(secret.expose(), token.as_bytes())?;
-        let envelope_json = serde_json::to_value(&hkdf_envelope)?;
+        // Re-encrypt to the token's age recipient (the token bytes ARE the
+        // X25519 static secret; only the recipient is stored)
+        let recipient = token_recipient(&token)?;
+        let age_envelope =
+            encrypt_to_recipients(secret.expose(), std::slice::from_ref(&recipient))?;
+        let envelope_json = serde_json::to_value(&age_envelope)?;
 
         wallet_secrets.insert(wallet.id.clone(), envelope_json);
         // Always persist canonical wallet IDs (UUIDs). Callers may pass names or IDs;
@@ -93,6 +98,7 @@ pub fn create_api_key_with_secret_permissions(
         id,
         name: name.to_string(),
         token_hash: key_store::hash_token(&token),
+        recipient: token_recipient(&token)?,
         created_at: jiff::Timestamp::now().to_string(),
         wallet_ids: resolved_wallet_ids,
         policy_ids: policy_ids.to_vec(),
@@ -115,7 +121,7 @@ pub fn create_api_key_with_secret_permissions(
 /// 1. Look up key file by SHA256(token)
 /// 2. Check expiry and wallet scope
 /// 3. Load and evaluate policies
-/// 4. HKDF(token) → decrypt wallet secret
+/// 4. Token identity → decrypt age wallet copy
 /// 5. Resolve signing key → sign
 pub fn sign_with_api_key(
     token: &str,
@@ -431,22 +437,29 @@ fn decrypt_key_from_api_key(
         ))
     })?;
 
-    let envelope: CryptoEnvelope = serde_json::from_value(envelope_value.clone())?;
-    let secret = decrypt(&envelope, token.as_bytes())?;
+    let envelope: AgeEnvelope = serde_json::from_value(envelope_value.clone())?;
+    let identity = token_identity(token)?;
+    // The presented token must map to the recipient stored at creation;
+    // otherwise this token is not the one the copy was encrypted for.
+    if !oc_core::credential::ct_eq(&identity.to_recipient_string(), &key_file.recipient) {
+        return Err(OcWalletError::InvalidInput("API token does not match key recipient".into()));
+    }
+    let secret = decrypt_with_identity(&envelope, &identity)?;
     crate::ops::secret_to_signing_key(&secret, &wallet.key_type, chain_type, index)
 }
 
 #[cfg(test)]
 mod tests {
     use oc_core::{EncryptedWallet, KeyType, PolicyAction, PolicyRule, WalletAccount};
-    use oc_signer::encrypt;
+    use oc_vault::crypto::encrypt_with_passphrase;
 
     use super::*;
 
     /// Create a test wallet in the vault, return its ID.
     fn setup_test_wallet(vault: &Path, passphrase: &str) -> String {
         let mnemonic_phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
-        let envelope = encrypt(mnemonic_phrase.as_bytes(), passphrase.as_bytes()).unwrap();
+        let envelope =
+            encrypt_with_passphrase(mnemonic_phrase.as_bytes(), passphrase.as_bytes()).unwrap();
         let crypto = serde_json::to_value(&envelope).unwrap();
 
         let wallet = EncryptedWallet::new(
@@ -509,12 +522,14 @@ mod tests {
         assert_eq!(key_file.policy_ids, vec![policy_id]);
         assert_eq!(key_file.token_hash, key_store::hash_token(&token));
         assert!(key_file.expires_at.is_none());
+        // Only the recipient is stored; the token plaintext never is.
+        assert_eq!(key_file.recipient, oc_vault::crypto::token_recipient(&token).unwrap());
 
         // Wallet secret is present and decryptable
         assert!(key_file.wallet_secrets.contains_key(&wallet_id));
-        let envelope: CryptoEnvelope =
+        let envelope: AgeEnvelope =
             serde_json::from_value(key_file.wallet_secrets[&wallet_id].clone()).unwrap();
-        let decrypted = decrypt(&envelope, token.as_bytes()).unwrap();
+        let decrypted = decrypt_with_identity(&envelope, &token_identity(&token).unwrap()).unwrap();
         assert_eq!(
             std::str::from_utf8(decrypted.expose()).unwrap(),
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
@@ -810,7 +825,8 @@ mod tests {
 
         // Create a second wallet
         let mnemonic2 = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
-        let envelope2 = encrypt(mnemonic2.as_bytes(), passphrase.as_bytes()).unwrap();
+        let envelope2 =
+            encrypt_with_passphrase(mnemonic2.as_bytes(), passphrase.as_bytes()).unwrap();
         let crypto2 = serde_json::to_value(&envelope2).unwrap();
         let wallet2 = EncryptedWallet::new(
             "wallet-2-id".to_string(),
@@ -1045,7 +1061,8 @@ mod tests {
         let wallet_id = setup_test_wallet(&vault, passphrase);
         let policy_id = setup_test_policy(&vault);
         let mnemonic2 = "zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo zoo wrong";
-        let envelope2 = encrypt(mnemonic2.as_bytes(), passphrase.as_bytes()).unwrap();
+        let envelope2 =
+            encrypt_with_passphrase(mnemonic2.as_bytes(), passphrase.as_bytes()).unwrap();
         let crypto2 = serde_json::to_value(&envelope2).unwrap();
         let wallet2 = EncryptedWallet::new(
             "wallet-2-id".to_string(),

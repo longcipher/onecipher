@@ -168,8 +168,15 @@ pub(crate) fn reencrypt() -> Result<(), CliError> {
     let mut count = 0usize;
     for index_entry in &entries {
         let mut entry = store.get(&index_entry.name).map_err(super::secret::map_store_error)?;
+        // Rotation bumps the generation so the pre-rotation ciphertext
+        // cannot be replayed as current (B4).
+        let payload = entry
+            .decrypt(&identity)
+            .map_err(|e| CliError::InvalidArgs(format!("decryption failed: {e}")))?;
+        let next_gen =
+            store.next_generation(&entry.name).map_err(super::secret::map_store_error)?;
         entry
-            .re_encrypt(&identity, &recipients)
+            .set_payload(&payload, &recipients, next_gen)
             .map_err(|e| CliError::InvalidArgs(format!("re-encryption failed: {e}")))?;
         store.put(&entry).map_err(super::secret::map_store_error)?;
         count += 1;

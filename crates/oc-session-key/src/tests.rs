@@ -447,6 +447,25 @@ fn test_merkle_root_differs_for_different_policies() {
     assert_ne!(root_a, root_b, "different policies must produce different merkle roots");
 }
 
+#[test]
+fn test_merkle_root_is_keccak256_merkle_not_legacy_sha256() {
+    // Lock test: the root is a keccak256 Merkle (0x + 64 hex), deterministic,
+    // and NOT the legacy SHA-256-of-JSON placeholder.
+    let policy = test_policy("sk-keccak-lock", 1_800_000_000);
+    let root = crate::compute_merkle_root(&policy).expect("root");
+    assert!(root.starts_with("0x"), "root must be 0x-prefixed: {root}");
+    assert_eq!(root.len(), 66, "root must be 0x + 64 hex chars: {root}");
+    let legacy_json = serde_json::to_string(&policy).expect("json");
+    let legacy = {
+        use sha2::Digest;
+        format!("0x{}", hex::encode(sha2::Sha256::digest(legacy_json.as_bytes())))
+    };
+    assert_ne!(root, legacy, "root must not equal the legacy SHA-256 placeholder");
+    // Second computation pins determinism including leaf-sort order.
+    let again = crate::compute_merkle_root(&policy).expect("root again");
+    assert_eq!(root, again);
+}
+
 // ===========================================================================
 // Phase 2 — real providers (`crate::mock_v1`)
 // ===========================================================================

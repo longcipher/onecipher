@@ -3,9 +3,9 @@ use std::path::Path;
 use oc_core::{
     ALL_CHAIN_TYPES, ChainType, EncryptedWallet, KeyType, WalletAccount, default_chain_for_type,
 };
-use oc_signer::{
-    CryptoEnvelope, CryptoError, Curve, HdDeriver, Mnemonic, MnemonicStrength, SecretBytes,
-    decrypt, encrypt, signer_for_chain,
+use oc_signer::{Curve, HdDeriver, Mnemonic, MnemonicStrength, SecretBytes, signer_for_chain};
+use oc_vault::crypto::{
+    AgeEnvelope, CryptoError, decrypt_with_passphrase, encrypt_with_passphrase,
 };
 use zeroize::Zeroize;
 
@@ -259,7 +259,7 @@ pub fn create_wallet(
     let accounts = derive_all_accounts(&mnemonic, 0)?;
 
     let phrase = mnemonic.phrase()?;
-    let crypto_envelope = encrypt(phrase.expose(), passphrase.as_bytes())?;
+    let crypto_envelope = encrypt_with_passphrase(phrase.expose(), passphrase.as_bytes())?;
     let crypto_json = serde_json::to_value(&crypto_envelope)?;
 
     let wallet_id = uuid::Uuid::new_v4().to_string();
@@ -309,7 +309,7 @@ pub fn import_wallet_mnemonic(
     let accounts = derive_all_accounts(&mnemonic, index)?;
 
     let phrase = mnemonic.phrase()?;
-    let crypto_envelope = encrypt(phrase.expose(), passphrase.as_bytes())?;
+    let crypto_envelope = encrypt_with_passphrase(phrase.expose(), passphrase.as_bytes())?;
     let crypto_json = serde_json::to_value(&crypto_envelope)?;
 
     let wallet_id = uuid::Uuid::new_v4().to_string();
@@ -426,7 +426,7 @@ pub fn import_wallet_private_key(
     let accounts = derive_all_accounts_from_keys(&keys)?;
 
     let payload = keys.to_json_bytes()?;
-    let crypto_envelope = encrypt(payload.expose(), passphrase.as_bytes())?;
+    let crypto_envelope = encrypt_with_passphrase(payload.expose(), passphrase.as_bytes())?;
     let crypto_json = serde_json::to_value(&crypto_envelope)?;
 
     let wallet_id = uuid::Uuid::new_v4().to_string();
@@ -481,8 +481,8 @@ pub fn export_wallet(
 ) -> Result<SecretBytes, OcWalletError> {
     let passphrase = passphrase.unwrap_or("");
     let wallet = oc_vault::load_wallet_by_name_or_id(name_or_id, vault_path)?;
-    let envelope: CryptoEnvelope = serde_json::from_value(wallet.crypto)?;
-    let secret = decrypt(&envelope, passphrase.as_bytes())?;
+    let envelope: AgeEnvelope = serde_json::from_value(wallet.crypto)?;
+    let secret = decrypt_with_passphrase(&envelope, passphrase.as_bytes())?;
     // Return the HardenedBytes directly — do not copy the decrypted mnemonic /
     // key material into an un-hardened String. Callers obtain &str via
     // `std::str::from_utf8(secret.expose())` when needed.
@@ -548,7 +548,7 @@ fn sign_hash_with_credential(
         )));
     }
 
-    if credential.starts_with(crate::key_store::TOKEN_PREFIX) {
+    if oc_core::Credential::parse(credential).is_token() {
         return crate::key_ops::sign_hash_with_api_key(
             credential,
             wallet,
@@ -571,7 +571,8 @@ fn sign_hash_with_credential(
 ///
 /// The `passphrase` parameter accepts either the owner's passphrase or an
 /// API token (`oc_key_...`). When a token is provided, policy enforcement
-/// kicks in and the mnemonic is decrypted via HKDF instead of argon2id.
+/// kicks in and the wallet secret is decrypted via the token's age recipient
+/// instead of the owner passphrase.
 pub fn sign_transaction(
     wallet: &str,
     chain: &str,
@@ -587,7 +588,7 @@ pub fn sign_transaction(
         .map_err(|e| OcWalletError::InvalidInput(format!("invalid hex transaction: {e}")))?;
 
     // Agent mode: token-based signing with policy enforcement
-    if credential.starts_with(crate::key_store::TOKEN_PREFIX) {
+    if oc_core::Credential::parse(credential).is_token() {
         let chain = parse_chain(chain)?;
         return crate::key_ops::sign_with_api_key(
             credential, wallet, &chain, &tx_bytes, index, vault_path,
@@ -688,7 +689,7 @@ pub fn sign_message(
     };
 
     // Agent mode
-    if credential.starts_with(crate::key_store::TOKEN_PREFIX) {
+    if oc_core::Credential::parse(credential).is_token() {
         let chain = parse_chain(chain)?;
         return crate::key_ops::sign_message_with_api_key(
             credential, wallet, &chain, &msg_bytes, index, vault_path,
@@ -727,7 +728,7 @@ pub fn sign_typed_data(
         ));
     }
 
-    if credential.starts_with(crate::key_store::TOKEN_PREFIX) {
+    if oc_core::Credential::parse(credential).is_token() {
         return crate::key_ops::sign_typed_data_with_api_key(
             credential,
             wallet,
@@ -758,8 +759,8 @@ pub fn decrypt_signing_key(
     vault_path: Option<&Path>,
 ) -> Result<SecretBytes, OcWalletError> {
     let wallet = oc_vault::load_wallet_by_name_or_id(wallet_name_or_id, vault_path)?;
-    let envelope: CryptoEnvelope = serde_json::from_value(wallet.crypto)?;
-    let secret = decrypt(&envelope, passphrase)?;
+    let envelope: AgeEnvelope = serde_json::from_value(wallet.crypto)?;
+    let secret = decrypt_with_passphrase(&envelope, passphrase)?;
     secret_to_signing_key(&secret, &wallet.key_type, chain_type, index)
 }
 
@@ -795,7 +796,8 @@ mod tests {
         };
         let accounts = derive_all_accounts_from_keys(&keys).unwrap();
         let payload = keys.to_json_bytes().unwrap();
-        let crypto_envelope = encrypt(payload.expose(), passphrase.as_bytes()).unwrap();
+        let crypto_envelope =
+            encrypt_with_passphrase(payload.expose(), passphrase.as_bytes()).unwrap();
         let crypto_json = serde_json::to_value(&crypto_envelope).unwrap();
         let wallet = EncryptedWallet::new(
             uuid::Uuid::new_v4().to_string(),
@@ -2580,7 +2582,7 @@ mod tests {
         let bad = sign_transaction("reg-pass", "evm", tx_hex, Some(""), None, Some(vault));
         assert!(bad.is_err());
         match bad.unwrap_err() {
-            OcWalletError::Crypto(_) => {} // correct: argon2id decryption failed
+            OcWalletError::Crypto(_) => {} // correct: age scrypt decryption failed
             other => panic!("expected Crypto error for wrong passphrase, got: {other}"),
         }
 

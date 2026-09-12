@@ -1,11 +1,8 @@
 //! Unified error type for oc-vault operations.
 //!
-//! Fully designed and implemented in accordance with the Open Wallet Standard's error types and
-//! trimmed to the variants actually raised by the vault + backup-container code paths. `Crypto` and
-//! `InvalidFormat` carry a String because the underlying crypto / format
-//! errors come from several different crates (`chacha20poly1305`,
-//! `argon2`, `serde_json`) and we don't want to leak their concrete error
-//! types into the public API.
+//! `Crypto` and `InvalidFormat` carry a String because the underlying crypto /
+//! format errors come from several different crates (`age`, `serde_json`)
+//! and we don't want to leak their concrete error types into the public API.
 
 #[derive(Debug, thiserror::Error)]
 pub enum OcVaultError {
@@ -32,15 +29,6 @@ pub enum OcVaultError {
 
     #[error("crypto error: {0}")]
     Crypto(String),
-
-    #[error("vault is locked due to too many failed passphrase attempts")]
-    Locked,
-
-    #[error("too many failed backup passphrase attempts; retry in {retry_after_secs}s")]
-    LockedOut { retry_after_secs: u64 },
-
-    #[error("wrong passphrase")]
-    WrongPassphrase,
 
     #[error("invalid format: {0}")]
     InvalidFormat(String),

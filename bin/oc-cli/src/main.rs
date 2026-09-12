@@ -4,7 +4,10 @@ mod audit;
 mod cli;
 mod commands;
 mod daemon;
+mod enclave_spawn;
+mod exit;
 mod netagent;
+pub(crate) mod output;
 #[cfg(test)]
 mod test_util;
 #[cfg(test)]
@@ -58,6 +61,21 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // Per-request enclave child: decrypt→sign→wipe for exactly one piped
+    // request, then exit. This branch runs before any daemon/client setup so
+    // the child stays minimal (no tokio runtime, no UDS listeners). Stdout
+    // carries only the single JSON response line.
+    if cli.enclave_child {
+        let code = match oc_keyagent::enclave::run_enclave_child() {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("enclave child failed: {e}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
+
     // Daemon mode: start the WC v2 server + signing engine (Stage 1 stub).
     if cli.daemon {
         // C-01: the daemon installs its own signal handling inside
@@ -96,8 +114,16 @@ fn main() {
     let code = match run(cli, &*client) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("error: {e}");
-            1
+            // Agent JSON single stream: success and failure both speak
+            // stdout. With ONECIPHER_JSON_ERRORS=1 the failure is one JSON
+            // object carrying the stable SCREAMING_SNAKE code (C10 keeps
+            // the numeric sysexits mapping unchanged).
+            if output::is_json_mode() {
+                output::emit_error(&e.to_envelope());
+            } else {
+                eprintln!("error: {e}");
+            }
+            e.exit_code()
         }
     };
 
@@ -113,6 +139,9 @@ fn dispatch_wallet(subcommand: cli::WalletCommands) -> Result<(), CliError> {
         }
         cli::WalletCommands::Import { name, mnemonic, private_key, chain, index, interactive } => {
             if interactive {
+                // Interactive import blocks on TTY prompts; refuse
+                // explicitly under agent JSON mode.
+                output::reject_interactive_if_json("wallet import --interactive")?;
                 commands::wallet::import_interactive(&name, chain.as_deref())
             } else {
                 commands::wallet::import(&name, mnemonic, private_key, chain.as_deref(), index)
@@ -125,13 +154,16 @@ fn dispatch_wallet(subcommand: cli::WalletCommands) -> Result<(), CliError> {
                 commands::wallet::export(&wallet)
             }
         }
-        cli::WalletCommands::Delete { wallet, confirm } => {
-            commands::wallet::delete(&wallet, confirm)
+        cli::WalletCommands::Delete { wallet, confirm, force } => {
+            // Unified destructive-action contract: `--force` aliases `--confirm`.
+            let confirmed = confirm || force;
+            output::require_confirm(confirmed, &format!("delete wallet '{wallet}'"))?;
+            commands::wallet::delete(&wallet, confirmed)
         }
         cli::WalletCommands::Rename { wallet, new_name } => {
             commands::wallet::rename(&wallet, &new_name)
         }
-        cli::WalletCommands::List => commands::wallet::list(),
+        cli::WalletCommands::List { json } => commands::wallet::list(json),
         cli::WalletCommands::Info => commands::info::run(),
         cli::WalletCommands::ChangePassword { wallet, passphrase, new_passphrase } => {
             commands::wallet::change_password(
@@ -188,7 +220,11 @@ fn dispatch_policy(subcommand: cli::PolicyCommands) -> Result<(), CliError> {
         cli::PolicyCommands::Create { file } => commands::policy::create(&file),
         cli::PolicyCommands::List => commands::policy::list(),
         cli::PolicyCommands::Show { id } => commands::policy::show(&id),
-        cli::PolicyCommands::Delete { id, confirm } => commands::policy::delete(&id, confirm),
+        cli::PolicyCommands::Delete { id, confirm, force } => {
+            let confirmed = confirm || force;
+            output::require_confirm(confirmed, &format!("delete policy '{id}'"))?;
+            commands::policy::delete(&id, confirmed)
+        }
     }
 }
 
@@ -198,7 +234,11 @@ fn dispatch_key(subcommand: cli::KeyCommands) -> Result<(), CliError> {
             commands::key::create(&name, &wallets, &policies, expires_at.as_deref())
         }
         cli::KeyCommands::List => commands::key::list(),
-        cli::KeyCommands::Revoke { id, confirm } => commands::key::revoke(&id, confirm),
+        cli::KeyCommands::Revoke { id, confirm, force } => {
+            let confirmed = confirm || force;
+            output::require_confirm(confirmed, &format!("revoke API key '{id}'"))?;
+            commands::key::revoke(&id, confirmed)
+        }
     }
 }
 
@@ -257,8 +297,12 @@ fn dispatch_vault(subcommand: cli::VaultCommands) -> Result<(), CliError> {
 
 fn dispatch_backup(subcommand: cli::BackupCommands) -> Result<(), CliError> {
     match subcommand {
-        cli::BackupCommands::Export { out } => commands::backup::export(&out),
-        cli::BackupCommands::Import { r#in } => commands::backup::import(&r#in),
+        cli::BackupCommands::Export { out, recipients } => {
+            commands::backup::export(&out, &recipients)
+        }
+        cli::BackupCommands::Import { r#in, identity } => {
+            commands::backup::import(&r#in, identity.as_deref())
+        }
     }
 }
 
@@ -351,9 +395,11 @@ fn dispatch_secret(subcommand: cli::SecretCommands) -> Result<(), CliError> {
         cli::SecretCommands::Update { name, field, stdin } => {
             commands::secret::update(&name, field.as_deref(), stdin)
         }
-        cli::SecretCommands::Delete { name } => commands::secret::delete(&name),
+        cli::SecretCommands::Delete { name, force } => commands::secret::delete(&name, force),
         cli::SecretCommands::Rename { old, new } => commands::secret::rename(&old, &new),
         cli::SecretCommands::Edit { name, editor } => {
+            // $EDITOR cannot run under agent JSON mode; refuse explicitly.
+            output::reject_interactive_if_json("secret edit")?;
             commands::secret::edit(&name, editor.as_deref())
         }
         cli::SecretCommands::Copy { src, dst, force } => commands::secret::copy(&src, &dst, force),
@@ -366,8 +412,8 @@ fn dispatch_password(subcommand: cli::PasswordCommands) -> Result<(), CliError> 
         cli::PasswordCommands::Add { name, url, username, generate, length, symbols } => {
             commands::password::add(&name, &url, &username, generate, length, symbols)
         }
-        cli::PasswordCommands::Get { name, copy, timeout } => {
-            commands::password::get(&name, copy, timeout)
+        cli::PasswordCommands::Get { name, copy, timeout, json } => {
+            commands::password::get(&name, copy, timeout, json)
         }
         cli::PasswordCommands::Generate {
             length,
@@ -389,10 +435,10 @@ fn dispatch_totp(subcommand: cli::TotpCommands) -> Result<(), CliError> {
             issuer.as_deref(),
             account.as_deref(),
         ),
-        cli::TotpCommands::Generate { name, qr } => commands::totp::generate(&name, qr),
-        cli::TotpCommands::Uris { name } => commands::totp::uris(&name),
-        cli::TotpCommands::Hotp { name, counter, increment } => {
-            commands::totp::hotp(&name, counter, increment)
+        cli::TotpCommands::Generate { name, qr, json } => commands::totp::generate(&name, qr, json),
+        cli::TotpCommands::Uris { name, json } => commands::totp::uris(&name, json),
+        cli::TotpCommands::Hotp { name, counter, increment, json } => {
+            commands::totp::hotp(&name, counter, increment, json)
         }
     }
 }
@@ -460,11 +506,13 @@ fn dispatch_send(
 
 fn dispatch_env(
     names: Vec<String>,
+    set: Vec<String>,
+    prompt: Vec<String>,
     keep_case: bool,
     exec: bool,
     command: Vec<String>,
 ) -> Result<(), CliError> {
-    commands::env_cmd::run(&names, keep_case, exec, &command)
+    commands::env_cmd::run(&names, &set, &prompt, keep_case, exec, &command)
 }
 
 fn dispatch_tui() -> Result<(), CliError> {
@@ -562,19 +610,26 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
             chain,
         ),
         Commands::Update { force } => commands::update::run(force),
-        Commands::Uninstall { purge } => commands::uninstall::run(purge),
+        Commands::Uninstall { purge, force } => commands::uninstall::run(purge, force),
         Commands::Status => commands::status::run(),
         Commands::Migrate { dry_run, rollback } => commands::migrate::run(dry_run, rollback),
         Commands::Grep { pattern, regex, json } => commands::grep::run(&pattern, regex, json),
         Commands::Find { query, regex, json, r#type } => {
             commands::find::run(query.as_deref(), regex, json, r#type.as_deref())
         }
-        Commands::Tui => dispatch_tui(),
-        Commands::Doctor { verbose } => commands::doctor::run(verbose),
+        Commands::Tui => {
+            // The fullscreen TUI cannot speak the single-object JSON
+            // stream; refuse explicitly instead of hanging the agent.
+            output::reject_interactive_if_json("tui")?;
+            dispatch_tui()
+        }
+        Commands::Doctor { verbose, json, repair_generations } => {
+            commands::doctor::run_ext(verbose, json, repair_generations)
+        }
         Commands::Fsck { fix, decrypt } => commands::fsck::run(fix, decrypt),
         Commands::Completion { shell } => commands::completion::run(&shell),
-        Commands::Env { names, keep_case, exec, command } => {
-            dispatch_env(names, keep_case, exec, command)
+        Commands::Env { names, set, prompt, keep_case, exec, command } => {
+            dispatch_env(names, set, prompt, keep_case, exec, command)
         }
         Commands::Send { chain, to, token, amount, wallet, rpc_url, index, gas_limit, json } => {
             dispatch_send(chain, to, token, amount, wallet, rpc_url, index, gas_limit, json)

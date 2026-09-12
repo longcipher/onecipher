@@ -59,25 +59,18 @@ Each wallet is stored as a single JSON file extending the Ethereum Keystore v3 s
     }
   ],
   "crypto": {
-    "cipher": "aes-256-gcm",
-    "cipherparams": {
-      "iv": "6087dab2f9fdbbfaddc31a90"
-    },
-    "ciphertext": "5318b4d5bcd28de64ee5559e671353e16f075ecae9f99c7a79a38af5f869aa46",
-    "auth_tag": "3c5d8c2f1a4b6e9d0f2a5c8b",
-    "kdf": "argon2id",
-    "kdfparams": {
-      "dklen": 32,
-      "m_cost": 65536,
-      "t_cost": 3,
-      "p_cost": 4,
-      "salt": "ae3cd4e7013836a3df6bd7241b12db061dbe2c6785853cce422d148a624ce0bd"
-    }
+    "cipher": "age",
+    "ciphertext": "YWdlLWVuY3J5cHRpb24ub3JnL3YxLT4..."
   },
   "key_type": "mnemonic",
   "metadata": {}
 }
 ```
+
+The `crypto` object is an age envelope (`oc-vault::crypto::AgeEnvelope`):
+`cipher` is always `"age"` and `ciphertext` is the base64-encoded age binary
+(age scrypt passphrase for owner/device secrets). Any other `cipher` value
+fails closed at decrypt time.
 
 ### Field Definitions
 
@@ -101,18 +94,15 @@ Each API key is stored as a JSON file in `~/.onecipher/keys/`. The key file cont
   "id": "7a2f1b3c-4d5e-6f7a-8b9c-0d1e2f3a4b5c",
   "name": "claude-agent",
   "token_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "recipient": "age1ql3z7hj432v2jl2z8alunwwun8hm4s4h6h6h6h6h6h6h6h6h6",
   "created_at": "2026-03-22T10:30:00Z",
   "wallet_ids": ["3198bc9c-6672-5ab3-d995-4942343ae5b6"],
   "policy_ids": ["spending-limit", "base-only"],
   "expires_at": null,
   "wallet_secrets": {
     "3198bc9c-6672-5ab3-d995-4942343ae5b6": {
-      "cipher": "aes-256-gcm",
-      "cipherparams": { "iv": "a1b2c3d4e5f6a7b8c9d0e1f2" },
-      "ciphertext": "...",
-      "auth_tag": "...",
-      "kdf": "hkdf-sha256",
-      "kdfparams": { "dklen": 32, "salt": "...", "info": "ows-api-key-v1" }
+      "cipher": "age",
+      "ciphertext": "YWdlLWVuY3J5cHRpb24ub3JnL3YxLT4..."
     }
   }
 }
@@ -124,12 +114,13 @@ Each API key is stored as a JSON file in `~/.onecipher/keys/`. The key file cont
 |---|---|---|---|
 | `id` | string | yes | UUID v4 key identifier |
 | `name` | string | yes | Human-readable label for the key |
-| `token_hash` | string | yes | SHA-256 hex digest of the raw token. The raw token (`ows_key_<64 hex chars>`) is shown once at creation and never stored. |
+| `token_hash` | string | yes | SHA-256 hex digest of the raw token. The raw token (`oc_key_<64 hex chars>`) is shown once at creation and never stored. |
+| `recipient` | string | yes | Age X25519 recipient (`age1...`) derived from the token bytes at creation. Wallet copies in `wallet_secrets` are age-encrypted to this recipient. |
 | `created_at` | string | yes | ISO 8601 creation timestamp |
 | `wallet_ids` | array | yes | Wallet IDs this key is authorized to access |
 | `policy_ids` | array | yes | Policy IDs evaluated on every request made with this key |
 | `expires_at` | string | no | ISO 8601 expiry timestamp. `null` means no expiry. |
-| `wallet_secrets` | object | yes | Map of wallet ID → CryptoEnvelope. Each entry is the wallet's decrypted secret re-encrypted under HKDF(token), whether that secret is a mnemonic phrase or private-key JSON. |
+| `wallet_secrets` | object | yes | Map of wallet ID → age envelope. Each entry is the wallet's decrypted secret re-encrypted to the key's age `recipient` (one X25519 stanza), whether that secret is a mnemonic phrase or private-key JSON. |
 
 The `keys/` directory and its contents use the same strict permissions as `wallets/` (`700` for the directory, `600` for files) because `wallet_secrets` contains encrypted key material and `token_hash` must be protected against local reads.
 
@@ -137,39 +128,25 @@ Revoking an API key means deleting the key file. The encrypted secret copies are
 
 ### Crypto Object
 
-The `crypto` object follows Keystore v3 conventions with two upgrades:
+The `crypto` object is an age envelope (one format for wallet files and API
+key copies):
 
-1. **AES-256-GCM-SIV** is the default cipher (nonce-misuse-resistant, replacing AES-256-GCM). Provides authenticated encryption with nonce-reuse safety.
-2. **Argon2id** (RFC 9106) is the recommended KDF for wallet files (passphrase-derived). **HKDF-SHA256** is used for API key files (token-derived). Post-quantum: **ML-KEM-768** (FIPS 203) and **ML-DSA-65** (FIPS 204) are available in `oc-crypto`.
-
-| Field | Type | Description |
-|---|---|---|
-| `cipher` | string | `aes-256-gcm` (recommended) or `aes-128-ctr` (v3 compat) |
-| `cipherparams.iv` | string | Hex-encoded initialization vector |
-| `ciphertext` | string | Hex-encoded encrypted key material |
-| `auth_tag` | string | Hex-encoded GCM auth tag (only for `aes-256-gcm`) |
-| `kdf` | string | `argon2id`, `hkdf-sha256`, or `pbkdf2` |
-| `kdfparams` | object | KDF-specific parameters (see below) |
-
-**argon2id kdfparams** (wallet files — passphrase input):
+1. **age scrypt** is the passphrase path for wallet files: the raw
+   passphrase bytes (owner UTF-8 passphrase or device-derived 32-byte
+   secret) are hex-mapped into the scrypt passphrase input. Provides memory-
+   hard offline-guessing resistance (auto-calibrated ~1 s work factor).
+2. **age X25519** is the recipient path for API key copies and `.ocbk`
+   backup bundles: each API token's 32 random bytes ARE the X25519 static
+   secret, and the key file stores only the public recipient.
 
 | Field | Type | Description |
 |---|---|---|
-| `dklen` | integer | Derived key length in bytes (32) |
-| `m_cost` | integer | Memory cost in KiB (RFC 9106, default 64 MiB = 65536) |
-| `t_cost` | integer | Time cost / iterations (RFC 9106, default 3) |
-| `p_cost` | integer | Parallelism (RFC 9106, default 4) |
-| `salt` | string | Hex-encoded random salt (32 bytes) |
+| `cipher` | string | Always `"age"` — any other value fails closed |
+| `ciphertext` | string | Base64-encoded age binary (self-describing recipient stanzas) |
 
-**hkdf-sha256 kdfparams** (API key files — token input):
-
-| Field | Type | Description |
-|---|---|---|
-| `dklen` | integer | Derived key length in bytes (32) |
-| `salt` | string | Hex-encoded random salt (32 bytes) |
-| `info` | string | Context string (`"ows-api-key-v1"`) |
-
-For `aes-128-ctr` (backward compat), a `mac` field with `keccak-256(dk[16..31] ++ ciphertext)` is required, following the Keystore v3 spec.
+There is no `kdfparams`/`auth_tag`/`cipherparams` anymore: the age binary
+carries its own recipient stanzas (scrypt work factor or X25519 ephemeral
+share) and authentication tag internally.
 
 ### What Gets Encrypted
 
@@ -182,7 +159,7 @@ Storing the mnemonic (rather than individual private keys) enables a single encr
 
 ## Passphrase Management
 
-The vault passphrase is used to derive the encryption key via the configured KDF. OneCipher does NOT define how the passphrase is obtained — this is deliberately left to the implementation:
+The vault passphrase feeds the age scrypt recipient (after an injective hex mapping). OneCipher does NOT define how the passphrase is obtained — this is deliberately left to the implementation:
 
 - **Interactive CLI**: Prompt at first use, optionally cache in OS keychain for a session
 - **Agent/daemon mode**: Read from a file descriptor (RECOMMENDED), an environment variable (`ONECIPHER_PASSPHRASE`), or a hardware token. Environment variables are the least secure option — they are readable via `/proc/[pid]/environ` by same-user processes and leak into crash dumps and child process environments. Implementations using `ONECIPHER_PASSPHRASE` MUST clear it from the process environment immediately after reading.
@@ -204,7 +181,15 @@ All signing operations are appended to `~/.onecipher/logs/audit.jsonl`:
 }
 ```
 
-Current CLI audit operations include `create_wallet`, `import_wallet`, `export_wallet`, `broadcast_transaction`, `delete_wallet`, and `rename_wallet`.
+Current CLI audit operations use the unified dotted taxonomy (`AuditOp` in
+`oc_core::secret`, shared by wallet, secret, password and TOTP commands):
+`wallet.create`, `wallet.import`, `wallet.export`, `wallet.broadcast`,
+`wallet.delete`, `wallet.rename`, `secret.create`, `secret.read`,
+`secret.update`, `secret.delete`, `secret.rename`, `secret.copy`,
+`password.add`, `password.generate`, `totp.add`, `totp.generate`, `totp.hotp`,
+and the other `wallet.*` / `secret.*` operations. Signing operations
+(`wallet.sign`, `wallet.broadcast`) ride the strong track
+(`audit-strong.jsonl`); everything else rides the light track (`audit.jsonl`).
 
 All fields except `timestamp`, `wallet_id`, and `operation` are optional.
 
@@ -212,17 +197,18 @@ The audit log is append-only. Implementations MUST NOT allow deletion or modific
 
 ## Backward Compatibility
 
-Any valid Ethereum Keystore v3 file can be imported into an OneCipher vault. The importer:
+BREAKING: the age flag day removed all legacy cipher support. Wallet files,
+`.ocbk` bundles and API key files minted before the migration are NOT
+readable by this build — they fail closed at parse/decrypt time and must be
+recreated (re-import the mnemonic or private key, re-export backups,
+re-issue API tokens). There is no migration path by design.
 
-1. Reads the v3 JSON
-2. Wraps it in the OneCipher envelope (adds `oc_version`, `name`, `accounts`)
-3. Optionally re-encrypts with AES-256-GCM
-
-Exported OneCipher wallets with `cipher: "aes-128-ctr"` and `key_type: "private_key"` are valid Keystore v3 files (minus the OneCipher envelope fields, which are ignored by v3 parsers).
+Ethereum Keystore v3 interchange still works at the edges: a v3 file can be
+imported by reading its payload and wrapping it in a fresh age envelope
+(adds `oc_version`, `name`, `accounts`).
 
 ## References
 
 - [Ethereum Web3 Secret Storage Definition](https://ethereum.org/developers/docs/data-structures-and-encoding/web3-secret-storage)
 - [ERC-2335: BLS12-381 Keystore](https://eips.ethereum.org/EIPS/eip-2335)
 - [BIP-39: Mnemonic Seed Phrases](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki)
-- [NIST SP 800-38D: GCM Mode](https://csrc.nist.gov/publications/detail/sp/800-38d/final)

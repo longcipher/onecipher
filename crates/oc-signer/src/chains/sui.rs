@@ -29,7 +29,7 @@ pub const WIRE_SIG_LEN: usize = 1 + 64 + 32; // 97
 impl SuiSigner {
     fn signing_key(private_key: &[u8]) -> Result<SigningKey, SignerError> {
         let key_bytes: [u8; 32] = private_key.try_into().map_err(|_| {
-            SignerError::InvalidPrivateKey(format!("expected 32 bytes, got {}", private_key.len()))
+            SignerError::Input(format!("expected 32 bytes, got {}", private_key.len()))
         })?;
         Ok(SigningKey::from_bytes(&key_bytes))
     }
@@ -128,17 +128,15 @@ impl ChainSigner for SuiSigner {
         signature: &SignOutput,
     ) -> Result<Vec<u8>, SignerError> {
         if signature.signature.len() != 64 {
-            return Err(SignerError::InvalidTransaction(
-                "expected 64-byte Ed25519 signature".into(),
-            ));
+            return Err(SignerError::Transaction("expected 64-byte Ed25519 signature".into()));
         }
         let pubkey = signature.public_key.as_ref().ok_or_else(|| {
-            SignerError::InvalidTransaction(
+            SignerError::Transaction(
                 "Sui encode_signed_transaction requires public_key in SignOutput".into(),
             )
         })?;
         if pubkey.len() != 32 {
-            return Err(SignerError::InvalidTransaction("expected 32-byte public key".into()));
+            return Err(SignerError::Transaction("expected 32-byte public key".into()));
         }
 
         // Wire signature: flag(0x00) || sig(64) || pubkey(32) = 97 bytes

@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use oc_core::OcError;
-use oc_signer::{CryptoError, SignerError, hd::HdError, mnemonic::MnemonicError};
+use oc_signer::{SignerError, hd::HdError, mnemonic::MnemonicError};
+use oc_vault::crypto::CryptoError;
 
 /// OneCipher CLI (Phase 1 — fully designed and implemented in accordance with the WalletConnect v2
 /// protocol and the Open Wallet Standard, R77/AD-02/ponytail step 4).
@@ -12,6 +13,12 @@ pub(crate) struct Cli {
     /// v2 relay and accepts pairing injection via a local control UDS.
     #[arg(long)]
     pub(crate) daemon: bool,
+
+    /// Internal: run as a one-shot per-request enclave child
+    /// (`oc_keyagent::enclave::run_enclave_child`). Spawned by the parent via
+    /// `current_exe --enclave-child`; never invoked directly by users.
+    #[arg(long, hide = true)]
+    pub(crate) enclave_child: bool,
 
     #[command(subcommand)]
     pub(crate) command: Option<Commands>,
@@ -108,6 +115,10 @@ pub(crate) enum Commands {
         /// Also remove all wallet data and config (~/.onecipher)
         #[arg(long)]
         purge: bool,
+        /// Skip the interactive confirmation prompt (required with
+        /// ONECIPHER_JSON_ERRORS=1, which refuses to prompt)
+        #[arg(long)]
+        force: bool,
     },
     // === OneCipher Phase 1 subcommands (R50, R21-R27, R7, R33, R42) ===
     /// Audit log operations (R50; LOCAL — no RPC, reads audit log file)
@@ -191,6 +202,14 @@ pub(crate) enum Commands {
         /// Secret names to inject (repeatable, or directory prefix for batch)
         #[arg(long = "name")]
         names: Vec<String>,
+        /// Direct `KEY=VALUE` pairs to inject (repeatable; full KEY kept as-is
+        /// to avoid collisions after case/`.` normalization)
+        #[arg(long = "set", short = 'e')]
+        set: Vec<String>,
+        /// Prompt for a value for KEY on stdin without echoing (repeatable;
+        /// value is `Zeroizing` and binary/NUL input is rejected)
+        #[arg(long = "prompt", short = 'p')]
+        prompt: Vec<String>,
         /// Keep original key case (default: uppercase)
         #[arg(long)]
         keep_case: bool,
@@ -243,6 +262,13 @@ pub(crate) enum Commands {
         /// Show passing checks too
         #[arg(long, short)]
         verbose: bool,
+        /// Render the report as JSON (single-source with the human view)
+        #[arg(long)]
+        json: bool,
+        /// Rebuild the generations floor from readable secrets; unreadable
+        /// entries are reported as `skipped[]` (remove + re-insert them)
+        #[arg(long = "repair-generations")]
+        repair_generations: bool,
     },
     /// Generate shell completion scripts
     Completion {
@@ -403,17 +429,26 @@ pub(crate) enum ServiceCommands {
 
 #[derive(Subcommand)]
 pub(crate) enum BackupCommands {
-    /// Export wallet to .ocbk backup container
+    /// Export wallets to an age-encrypted .ocbk backup bundle
     Export {
         /// Output file path
         #[arg(long)]
         out: String,
+        /// Age recipient (`age1...`) to encrypt the bundle to.
+        /// Repeat for multiple recipients; every listed recipient can
+        /// independently decrypt the bundle.
+        #[arg(long = "recipient")]
+        recipients: Vec<String>,
     },
-    /// Import wallet from .ocbk backup container
+    /// Import wallets from an age-encrypted .ocbk backup bundle
     Import {
         /// Input file path
         #[arg(long)]
         r#in: String,
+        /// Age identity (`AGE-SECRET-KEY-1...`) of one of the export
+        /// recipients. When omitted, it is read hidden from the terminal.
+        #[arg(long)]
+        identity: Option<String>,
     },
 }
 
@@ -668,6 +703,9 @@ pub(crate) enum SecretCommands {
     Delete {
         /// Secret name
         name: String,
+        /// Confirm deletion (required: deletion is irreversible)
+        #[arg(long)]
+        force: bool,
     },
     /// Rename a secret
     Rename {
@@ -738,6 +776,9 @@ pub(crate) enum PasswordCommands {
         /// Clipboard auto-clear timeout in seconds (default 45, 0 = never clear)
         #[arg(long, default_value_t = 45)]
         timeout: u64,
+        /// Output the unified secret envelope as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Generate a random password
     Generate {
@@ -771,7 +812,8 @@ pub(crate) enum TotpCommands {
         /// otpauth URI
         #[arg(long)]
         otpauth: Option<String>,
-        /// Base32 secret (alternative to --otpauth)
+        /// Bare base32 secret (alternative to --otpauth). Short 80/96-bit
+        /// seeds are accepted; defaults to SHA-1, 6 digits, 30s period.
         #[arg(long)]
         secret: Option<String>,
         /// Issuer (required with --secret)
@@ -788,11 +830,17 @@ pub(crate) enum TotpCommands {
         /// Display TOTP code as QR code in terminal
         #[arg(long)]
         qr: bool,
+        /// Output `{"name","kind","code"}` as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Output otpauth URI for a secret
     Uris {
         /// Secret name
         name: String,
+        /// Output the unified secret envelope as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Generate HOTP code
     Hotp {
@@ -804,6 +852,9 @@ pub(crate) enum TotpCommands {
         /// Increment counter after generation
         #[arg(long)]
         increment: bool,
+        /// Output `{"name","kind","counter","code"}` as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -942,9 +993,12 @@ pub(crate) enum WalletCommands {
         /// Wallet name or ID
         #[arg(long)]
         wallet: String,
-        /// Confirm deletion (required)
+        /// Confirm deletion (required; `--force` is accepted as an alias)
         #[arg(long)]
         confirm: bool,
+        /// Alias for `--confirm` (unified destructive-action contract)
+        #[arg(long)]
+        force: bool,
     },
     /// Rename a wallet
     Rename {
@@ -956,7 +1010,11 @@ pub(crate) enum WalletCommands {
         new_name: String,
     },
     /// List all saved wallets
-    List,
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show vault path and supported chains
     Info,
     /// Change wallet encryption passphrase
@@ -1141,9 +1199,12 @@ pub(crate) enum PolicyCommands {
         /// Policy ID
         #[arg(long)]
         id: String,
-        /// Confirm deletion (required)
+        /// Confirm deletion (required; `--force` is accepted as an alias)
         #[arg(long)]
         confirm: bool,
+        /// Alias for `--confirm` (unified destructive-action contract)
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1171,9 +1232,12 @@ pub(crate) enum KeyCommands {
         /// API key ID
         #[arg(long)]
         id: String,
-        /// Confirm revocation (required)
+        /// Confirm revocation (required; `--force` is accepted as an alias)
         #[arg(long)]
         confirm: bool,
+        /// Alias for `--confirm` (unified destructive-action contract)
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1231,4 +1295,116 @@ pub(crate) enum CliError {
 
 pub(crate) fn parse_chain(s: &str) -> Result<oc_core::Chain, CliError> {
     oc_core::parse_chain(s).map_err(CliError::InvalidArgs)
+}
+
+impl CliError {
+    /// Stable SCREAMING_SNAKE code for `--json` error envelopes (C10).
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Lws(e) => match e {
+                oc_core::OcError::WalletNotFound { .. } => "WALLET_NOT_FOUND",
+                oc_core::OcError::ChainNotSupported { .. } => "CHAIN_NOT_SUPPORTED",
+                oc_core::OcError::InvalidPassphrase => "INVALID_PASSPHRASE",
+                oc_core::OcError::InvalidInput { .. } => "INVALID_INPUT",
+                oc_core::OcError::CaipParseError { .. } => "CAIP_PARSE_ERROR",
+                oc_core::OcError::PolicyDenied { .. } => "POLICY_DENIED",
+                oc_core::OcError::ApiKeyNotFound => "API_KEY_NOT_FOUND",
+                oc_core::OcError::ApiKeyExpired { .. } => "API_KEY_EXPIRED",
+            },
+            Self::Lib(e) => match e {
+                oc_wallet::OcWalletError::WalletNotFound(_) => "WALLET_NOT_FOUND",
+                oc_wallet::OcWalletError::AmbiguousWallet { .. } => "AMBIGUOUS_WALLET",
+                oc_wallet::OcWalletError::WalletNameExists(_) => "WALLET_NAME_EXISTS",
+                oc_wallet::OcWalletError::InvalidInput(_) => "INVALID_INPUT",
+                oc_wallet::OcWalletError::BroadcastFailed(_) => "BROADCAST_FAILED",
+                _ => "WALLET_ERROR",
+            },
+            Self::Vault(_) => "VAULT_ERROR",
+            Self::Mnemonic(_) => "MNEMONIC_ERROR",
+            Self::Hd(_) => "HD_ERROR",
+            Self::Signer(_) => "SIGNER_ERROR",
+            Self::Crypto(_) => "CRYPTO_ERROR",
+            Self::Io(_) => "IO_ERROR",
+            Self::Json(_) => "JSON_ERROR",
+            #[cfg(feature = "git")]
+            Self::Git(_) => "GIT_ERROR",
+            Self::SecretStore(_) => "SECRET_STORE_ERROR",
+            Self::Recipient(_) => "RECIPIENT_ERROR",
+            Self::Migration(_) => "MIGRATION_ERROR",
+            Self::InvalidArgs(_) => "INVALID_ARGS",
+            Self::NetAgentUnavailable => "NET_AGENT_UNAVAILABLE",
+            Self::DaemonInit(_) => "DAEMON_INIT_FAILED",
+            Self::KeyAgent(_) => "KEY_AGENT_ERROR",
+        }
+    }
+
+    /// BSD `sysexits(3)` mapping (Phase 1: 64 usage / 65 data / 66 noinput /
+    /// 70 software / 73 cantcreat / 77 noperm).
+    ///
+    /// I/O errors inspect the [`std::io::ErrorKind`] (`NotFound` -> 66,
+    /// `PermissionDenied` -> 77, anything else -> 73); every other variant
+    /// delegates to [`crate::exit::exit_code_for`] via its stable
+    /// [`CliError::code`], so new variants fail closed to 70.
+    pub(crate) fn exit_code(&self) -> i32 {
+        match self {
+            Self::Io(e) => match e.kind() {
+                std::io::ErrorKind::NotFound => crate::exit::EX_NOINPUT,
+                std::io::ErrorKind::PermissionDenied => crate::exit::EX_NOPERM,
+                _ => crate::exit::EX_CANTCREAT,
+            },
+            _ => crate::exit::exit_code_for(self.code()),
+        }
+    }
+
+    /// JSON error envelope: `{ code, message }` with the stable code.
+    pub(crate) fn to_envelope(&self) -> serde_json::Value {
+        serde_json::json!({"code": self.code(), "message": self.to_string()})
+    }
+}
+
+#[cfg(test)]
+mod error_envelope_tests {
+    use super::*;
+
+    #[test]
+    fn envelope_has_code_and_message() {
+        let e = CliError::InvalidArgs("bad flag".into());
+        let v = e.to_envelope();
+        assert_eq!(v["code"], "INVALID_ARGS");
+        assert!(v["message"].as_str().unwrap().contains("bad flag"));
+        assert_eq!(e.exit_code(), crate::exit::EX_USAGE);
+    }
+
+    #[test]
+    fn wallet_not_found_maps_to_code() {
+        let e = CliError::Lib(oc_wallet::OcWalletError::WalletNotFound("w".into()));
+        assert_eq!(e.code(), "WALLET_NOT_FOUND");
+    }
+
+    #[test]
+    fn policy_denied_maps_to_code() {
+        let e = CliError::Lws(oc_core::OcError::PolicyDenied {
+            policy_id: "p".into(),
+            reason: "r".into(),
+        });
+        assert_eq!(e.code(), "POLICY_DENIED");
+    }
+
+    #[test]
+    fn exit_codes_follow_sysexits() {
+        // 64 usage, 77 permission, 66 missing input.
+        assert_eq!(CliError::InvalidArgs("x".into()).exit_code(), 64);
+        let denied = CliError::Lws(oc_core::OcError::PolicyDenied {
+            policy_id: "p".into(),
+            reason: "r".into(),
+        });
+        assert_eq!(denied.exit_code(), 77);
+        let missing = CliError::Lib(oc_wallet::OcWalletError::WalletNotFound("w".into()));
+        assert_eq!(missing.exit_code(), 66);
+        let io_missing = CliError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "nope"));
+        assert_eq!(io_missing.exit_code(), 66);
+        let io_denied =
+            CliError::Io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"));
+        assert_eq!(io_denied.exit_code(), 77);
+    }
 }

@@ -1,20 +1,24 @@
 // Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
-//! Wallet vault (filesystem 700/600, Keystore v3, .ocbk BackupContainer).
+//! Wallet vault (filesystem 700/600, age-encrypted wallets, age backup bundles).
 //!
-//! Fully designed and implemented in accordance with the Open Wallet Standard (renamed `ows_core` →
-//! `oc_core`, `OwsLibError` → `OcVaultError`) plus the new `BackupContainer`
-//! implementing Argon2id + XChaCha20-Poly1305 AEAD (R42 / AD-05).
+//! Wallet files carry an [`AgeEnvelope`](crypto::AgeEnvelope) (age scrypt
+//! passphrase); `.ocbk` backup bundles are age multi-recipient files (see
+//! [`backup`]).
 
+pub mod atomic;
 pub mod backup;
+pub mod crypto;
 pub mod error;
 pub mod vault;
 
-pub use backup::{
-    Argon2idParams, BackupContainer, LOCKOUT_COOLDOWN_SECS, MAGIC, MAX_FAILED_ATTEMPTS, VERSION,
+pub use atomic::write_atomic_secret;
+pub use backup::{BACKUP_PATH, BACKUP_TAG, export_backup, import_backup};
+pub use crypto::{
+    AGE_CIPHER, AgeEnvelope, AgeIdentity, CryptoError, decrypt_with_identity,
+    decrypt_with_passphrase, encrypt_to_recipients, encrypt_with_passphrase, token_identity,
+    token_recipient,
 };
-#[cfg(any(test, feature = "test-utils"))]
-pub use backup::{set_attempts_state_override, set_backoff_override};
 pub use error::OcVaultError;
 pub use vault::{
     SecretVault, Vault, check_vault_permissions, delete_wallet_file, list_encrypted_wallets,

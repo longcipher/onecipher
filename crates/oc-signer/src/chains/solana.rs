@@ -13,9 +13,7 @@ fn decode_compact_u16(data: &[u8]) -> Result<(usize, usize), SignerError> {
     let mut shift: u32 = 0;
     for (i, &byte) in data.iter().enumerate() {
         if i >= 3 {
-            return Err(SignerError::InvalidTransaction(
-                "compact-u16 encoding exceeds 3 bytes".into(),
-            ));
+            return Err(SignerError::Transaction("compact-u16 encoding exceeds 3 bytes".into()));
         }
         value |= ((byte & 0x7F) as usize) << shift;
         if byte & 0x80 == 0 {
@@ -23,7 +21,7 @@ fn decode_compact_u16(data: &[u8]) -> Result<(usize, usize), SignerError> {
         }
         shift += 7;
     }
-    Err(SignerError::InvalidTransaction("truncated compact-u16".into()))
+    Err(SignerError::Transaction("truncated compact-u16".into()))
 }
 
 /// Solana chain signer (Ed25519).
@@ -32,7 +30,7 @@ pub struct SolanaSigner;
 impl SolanaSigner {
     fn signing_key(private_key: &[u8]) -> Result<SigningKey, SignerError> {
         let key_bytes: [u8; 32] = private_key.try_into().map_err(|_| {
-            SignerError::InvalidPrivateKey(format!("expected 32 bytes, got {}", private_key.len()))
+            SignerError::Input(format!("expected 32 bytes, got {}", private_key.len()))
         })?;
         Ok(SigningKey::from_bytes(&key_bytes))
     }
@@ -87,12 +85,12 @@ impl ChainSigner for SolanaSigner {
         // are not accepted — callers should always provide the serialized
         // transaction as produced by Solana SDKs.
         if tx_bytes.is_empty() {
-            return Err(SignerError::InvalidTransaction("empty transaction".into()));
+            return Err(SignerError::Transaction("empty transaction".into()));
         }
         let (num_sigs, header_len) = decode_compact_u16(tx_bytes)?;
         let message_start = header_len + num_sigs * 64;
         if tx_bytes.len() <= message_start {
-            return Err(SignerError::InvalidTransaction(
+            return Err(SignerError::Transaction(
                 "transaction too short for declared signature slots".into(),
             ));
         }
@@ -108,23 +106,19 @@ impl ChainSigner for SolanaSigner {
         // [compact-u16: num_signatures] [64-byte signatures...] [message...]
         // Replace the first 64-byte zero-signature with the real signature.
         if signature.signature.len() != 64 {
-            return Err(SignerError::InvalidTransaction(
-                "expected 64-byte Ed25519 signature".into(),
-            ));
+            return Err(SignerError::Transaction("expected 64-byte Ed25519 signature".into()));
         }
         if tx_bytes.is_empty() {
-            return Err(SignerError::InvalidTransaction("empty transaction".into()));
+            return Err(SignerError::Transaction("empty transaction".into()));
         }
 
         let (num_sigs, header_len) = decode_compact_u16(tx_bytes)?;
         if num_sigs == 0 {
-            return Err(SignerError::InvalidTransaction(
-                "transaction has no signature slots".into(),
-            ));
+            return Err(SignerError::Transaction("transaction has no signature slots".into()));
         }
         let sigs_end = header_len + num_sigs * 64;
         if tx_bytes.len() < sigs_end {
-            return Err(SignerError::InvalidTransaction(
+            return Err(SignerError::Transaction(
                 "transaction too short for declared signature slots".into(),
             ));
         }

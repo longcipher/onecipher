@@ -10,6 +10,7 @@ use std::{
 };
 
 use prost::Message;
+use sha2::{Digest as _, Sha256};
 use tracing::warn;
 
 use crate::{
@@ -43,7 +44,7 @@ pub mod err_code {
 }
 
 /// Format a coded error message: `"E_CODE: detail"`.
-fn coded(code: &str, detail: impl std::fmt::Display) -> String {
+pub(crate) fn coded(code: &str, detail: impl std::fmt::Display) -> String {
     format!("{code}: {detail}")
 }
 
@@ -162,10 +163,20 @@ fn attempt_decrypt_with_token(
     chain_type: oc_core::ChainType,
     token: &oc_core::UnlockToken,
 ) -> Result<oc_signer::SecretBytes, String> {
+    attempt_decrypt_with_token_at(wallet_id, chain_type, token, vault_path())
+}
+
+/// [`attempt_decrypt_with_token`] with an explicit vault root.
+fn attempt_decrypt_with_token_at(
+    wallet_id: &str,
+    chain_type: oc_core::ChainType,
+    token: &oc_core::UnlockToken,
+    vault: Option<&std::path::Path>,
+) -> Result<oc_signer::SecretBytes, String> {
     let pp = token
         .to_passphrase()
         .map_err(|e| coded(err_code::DECRYPT, format!("passphrase derivation: {e}")))?;
-    oc_wallet::ops::decrypt_signing_key(wallet_id, chain_type, pp.as_bytes(), None, vault_path())
+    oc_wallet::ops::decrypt_signing_key(wallet_id, chain_type, pp.as_bytes(), None, vault)
         .map_err(|e| coded(err_code::DECRYPT, format!("wallet decrypt failed: {e}")))
 }
 
@@ -184,12 +195,57 @@ fn wallet_decrypts_with_token(wallet_id: &str, token: &oc_core::UnlockToken) -> 
     .any(|ct| attempt_decrypt_with_token(wallet_id, *ct, token).is_ok())
 }
 
+/// Borrow the chain signing key inside a closure; the key never escapes.
+///
+/// The decrypted key material lives in a [`oc_signer::SecretBytes`]
+/// (mlock + zeroize on drop) that is created inside this function, lent to
+/// `f` as `&[u8]`, and dropped (zeroized) when `f` returns. Callers receive
+/// only `R` — typically a signature or address — never the key itself.
+/// Do NOT copy the borrowed slice into a long-lived buffer inside `f`;
+/// any copy escapes the burn-after-use scope.
+///
+/// Callers MUST have verified a fresh Passkey authorization (or the
+/// daemon-internal SignAuth token) before calling — this function performs
+/// no authentication itself.
+///
+/// The vault passphrase derives from the **device key** via
+/// [`oc_core::UnlockToken`] (HKDF-SHA256, wallet-bound). The resulting bytes
+/// unlock the wallet's age scrypt envelope. See [`load_chain_key`] for the
+/// derivation rationale.
+pub fn with_signing_key<R>(
+    wallet_id: &str,
+    chain_id: &str,
+    f: impl FnOnce(&[u8]) -> R,
+) -> Result<R, String> {
+    with_signing_key_at(None, wallet_id, chain_id, f)
+}
+
+/// [`with_signing_key`] with an explicit vault root (test isolation).
+///
+/// Production callers pass `None` (default `~/.onecipher`); tests pass
+/// `Some(tempdir)` so they never touch the real vault.
+pub fn with_signing_key_at<R>(
+    vault_path: Option<&std::path::Path>,
+    wallet_id: &str,
+    chain_id: &str,
+    f: impl FnOnce(&[u8]) -> R,
+) -> Result<R, String> {
+    let (key, _signer) = load_chain_key_at(wallet_id, chain_id, vault_path)?;
+    let out = f(key.expose());
+    // `key` (SecretBytes) is zeroized on drop here, immediately after `f`
+    // returns — the borrow cannot outlive this scope.
+    Ok(out)
+}
+
 /// Load a wallet from the vault, decrypt it, and derive the chain signing key.
 /// Returns `(key, signer)`. Key is zeroized on drop.
 ///
+/// Prefer [`with_signing_key`] for new code so key material never leaves the
+/// vault scope as a return value.
+///
 /// The vault passphrase is derived from the **device key** via
-/// [`oc_core::UnlockToken`] (v2 HKDF derivation first, legacy SHA-256
-/// fallback for wallets created before the v2 migration). Callers MUST have
+/// [`oc_core::UnlockToken`] (HKDF-SHA256, wallet-bound) and unlocks the
+/// wallet's age scrypt envelope. Callers MUST have
 /// verified a fresh Passkey authorization (or the daemon-internal SignAuth
 /// token) before calling — this function performs no authentication itself.
 ///
@@ -199,35 +255,31 @@ fn load_chain_key(
     wallet_id: &str,
     chain_id: &str,
 ) -> Result<(oc_signer::SecretBytes, Box<dyn oc_signer::ChainSigner>), String> {
+    load_chain_key_at(wallet_id, chain_id, vault_path())
+}
+
+/// [`load_chain_key`] with an explicit vault root.
+///
+/// `pub(crate)` so the enclave child ([`crate::enclave`]) reuses the exact
+/// same device-key derivation — parent and child must never drift on which
+/// secret unlocks a wallet.
+pub(crate) fn load_chain_key_at(
+    wallet_id: &str,
+    chain_id: &str,
+    vault: Option<&std::path::Path>,
+) -> Result<(oc_signer::SecretBytes, Box<dyn oc_signer::ChainSigner>), String> {
     let chain = oc_core::parse_chain(chain_id)
         .map_err(|e| coded(err_code::PARAM, format!("invalid chain: {e}")))?;
     let device_key = load_device_key()?;
 
-    // Primary: v2 HKDF derivation.
-    let v2_err = match oc_core::UnlockToken::new(wallet_id.to_string(), &device_key)
-        .map_err(|e| coded(err_code::DECRYPT, format!("token derivation: {e}")))
-        .and_then(|t| attempt_decrypt_with_token(wallet_id, chain.chain_type, &t))
-    {
-        Ok(key) => {
-            let signer = oc_signer::signer_for_chain(chain.chain_type);
-            return Ok((key, signer));
-        }
-        Err(e) => e,
-    };
-
-    // Fallback: legacy SHA-256 derivation (pre-v2 wallets).
-    match oc_core::UnlockToken::new_legacy_sha256(wallet_id.to_string(), &device_key)
-        .map_err(|e| coded(err_code::DECRYPT, format!("legacy token derivation: {e}")))
-        .and_then(|t| attempt_decrypt_with_token(wallet_id, chain.chain_type, &t))
-    {
-        Ok(key) => {
-            let signer = oc_signer::signer_for_chain(chain.chain_type);
-            Ok((key, signer))
-        }
-        // Report the primary (v2) failure — it is what a freshly migrated
-        // wallet would hit again.
-        Err(_) => Err(v2_err),
-    }
+    // Single derivation: HKDF(device key, wallet id) unlocks the wallet's
+    // age scrypt envelope. There is no fallback — pre-age wallets are not
+    // readable by this build (flag-day migration, no compat layer).
+    let token = oc_core::UnlockToken::new(wallet_id.to_string(), &device_key)
+        .map_err(|e| coded(err_code::DECRYPT, format!("token derivation: {e}")))?;
+    let key = attempt_decrypt_with_token_at(wallet_id, chain.chain_type, &token, vault)?;
+    let signer = oc_signer::signer_for_chain(chain.chain_type);
+    Ok((key, signer))
 }
 
 /// Append an audit entry.
@@ -270,6 +322,154 @@ fn log_audit(
     log.append(event_type, session_key_id.map(String::from), payload)
         .map(|_| ())
         .map_err(|e| KeyAgentError::Internal(format!("audit append: {e}")))
+}
+
+// ---------------------------------------------------------------------------
+// Per-request enclave dispatch (parent side)
+// ---------------------------------------------------------------------------
+
+/// Arguments for one enclaved signing call (parent side).
+struct EnclaveSignArgs<'a> {
+    action: &'a str,
+    session_key_id: Option<&'a str>,
+    op: &'a str,
+    wallet_id: &'a str,
+    chain_id: &'a str,
+    payload_hex: &'a str,
+    extra_json: &'a str,
+}
+
+/// Parent-side result of one enclaved signing op.
+struct EnclaveSignOutput {
+    signature: Vec<u8>,
+    signed_tx_hex: Option<String>,
+    address: Option<String>,
+    public_key: Option<Vec<u8>>,
+}
+
+/// Map an enclave call failure to a coded handler error.
+///
+/// Child-reported errors already carry `E_...` codes (the child reuses
+/// [`coded`]); spawn/timeout/pipe failures are parent-side `E_INTERNAL`.
+/// Either way the child pid stays in the message for audit correlation.
+fn enclave_call_error(e: &crate::enclave::EnclaveError) -> String {
+    let rendered = e.to_string();
+    if e.message().starts_with("E_") { rendered } else { coded(err_code::INTERNAL, rendered) }
+}
+
+/// Route one signing op through the per-request subprocess enclave.
+///
+/// Parent-side duties only: audit `pending` append, spawn with the enclave
+/// timeout, audit `resolved` append (fail-closed when the context opts in)
+/// carrying `request_id → pid → sig hash → latency`, and hex-decoding of the
+/// response fields. Any spawn/timeout/child failure maps to a coded error —
+/// there is deliberately NO silent fallback to in-process signing here; that
+/// fallback lives in the individual handlers behind `OC_ENCLAVE=off` /
+/// `cfg(test)` only.
+fn sign_via_enclave(
+    ctx: &AgentContext,
+    args: EnclaveSignArgs<'_>,
+) -> Result<EnclaveSignOutput, String> {
+    let req = crate::enclave::EnclaveRequest {
+        oc_version: crate::enclave::ENCLAVE_PROTOCOL_VERSION,
+        request_id: crate::enclave::new_request_id(),
+        op: args.op.to_string(),
+        wallet_id: args.wallet_id.to_string(),
+        chain_id: args.chain_id.to_string(),
+        payload_hex: args.payload_hex.to_string(),
+        extra_json: args.extra_json.to_string(),
+        index: 0,
+        credential_hex: None,
+        vault_dir: None,
+    };
+    // Pending attribution first: even a spawn failure lands an audit trail.
+    record_audit(
+        ctx,
+        EventType::EnclavePending,
+        args.session_key_id,
+        serde_json::json!({
+            "action": args.action,
+            "op": args.op,
+            "request_id": req.request_id,
+            "wallet_id": args.wallet_id,
+            "chain_id": args.chain_id,
+        }),
+    );
+    let exe = crate::enclave::enclave_exe()
+        .map_err(|e| coded(err_code::INTERNAL, format!("enclave unavailable: {e}")))?;
+    let start = std::time::Instant::now();
+    let outcome =
+        crate::enclave::spawn_enclave_child(&exe, &req, crate::enclave::enclave_timeout());
+    let latency_ms = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    match outcome {
+        Ok(resp) => {
+            let signature = match resp.signature_hex.as_deref() {
+                Some(h) => hex::decode(h).map_err(|e| {
+                    coded(err_code::INTERNAL, format!("enclave bad signature hex: {e}"))
+                })?,
+                None => {
+                    return Err(coded(err_code::INTERNAL, "enclave omitted signature"));
+                }
+            };
+            let public_key =
+                resp.public_key_hex.as_deref().map(hex::decode).transpose().map_err(|e| {
+                    coded(err_code::INTERNAL, format!("enclave bad public key hex: {e}"))
+                })?;
+            // The signature itself goes back to the caller; the log keeps
+            // only its hash (compact, and no raw auth material in audit).
+            let sig_hash = hex::encode(Sha256::digest(&signature));
+            let audit_result = record_audit_strict(
+                ctx,
+                EventType::EnclaveResolved,
+                args.session_key_id,
+                serde_json::json!({
+                    "action": args.action,
+                    "op": args.op,
+                    "request_id": req.request_id,
+                    "pid": resp.pid,
+                    "ok": true,
+                    "sig_hash": sig_hash,
+                    "latency_ms": latency_ms,
+                }),
+            );
+            if ctx.audit_fail_closed &&
+                let Err(e) = audit_result
+            {
+                return Err(e);
+            }
+            Ok(EnclaveSignOutput {
+                signature,
+                signed_tx_hex: resp.signed_tx_hex,
+                address: resp.address,
+                public_key,
+            })
+        }
+        Err(e) => {
+            // A killed or failed child MUST still resolve its pending entry —
+            // pending-without-resolved alerts, never silently drops.
+            let failed = record_audit_strict(
+                ctx,
+                EventType::EnclaveResolved,
+                args.session_key_id,
+                serde_json::json!({
+                    "action": args.action,
+                    "op": args.op,
+                    "request_id": req.request_id,
+                    "pid": e.pid,
+                    "ok": false,
+                    "latency_ms": latency_ms,
+                    "error": e.message(),
+                    "alert": "enclave child failed mid-request",
+                }),
+            );
+            if ctx.audit_fail_closed &&
+                let Err(ae) = failed
+            {
+                return Err(ae);
+            }
+            Err(enclave_call_error(&e))
+        }
+    }
 }
 
 /// Reject the request when `session_key_id` is non-empty but does not refer
@@ -611,6 +811,42 @@ fn handle_sign_transaction(
         return Ok(resp);
     }
 
+    // Per-request enclave (default): decrypt→sign→wipe runs in a subprocess;
+    // the parent only authorized, audited, and forwarded. The in-process path
+    // below is the test / `OC_ENCLAVE=off` fallback only.
+    if crate::enclave::enclave_enabled() {
+        match sign_via_enclave(
+            ctx,
+            EnclaveSignArgs {
+                action: "sign_transaction",
+                session_key_id: Some(&req.session_key_id),
+                op: crate::enclave::OP_SIGN_TRANSACTION,
+                wallet_id: &req.wallet_id,
+                chain_id: &req.chain_id,
+                payload_hex: &req.raw_tx_hex,
+                extra_json: "",
+            },
+        ) {
+            Ok(out) => {
+                let signed_tx_hex = match out.signed_tx_hex {
+                    Some(h) => h,
+                    None => {
+                        return Ok(KeyAgentResponse::error(coded(
+                            err_code::INTERNAL,
+                            "enclave omitted signed tx",
+                        )));
+                    }
+                };
+                let resp = crate::proto::SignTransactionResponse {
+                    signature: out.signature,
+                    signed_tx_hex,
+                };
+                return Ok(KeyAgentResponse::ok(resp.encode_to_vec()));
+            }
+            Err(e) => return Ok(KeyAgentResponse::error(e)),
+        }
+    }
+
     // C2 fix: the decryption passphrase derives from the stable device key
     // (see load_chain_key). The verified passkey above is the authorization
     // gate; it no longer feeds the key-derivation input.
@@ -619,7 +855,8 @@ fn handle_sign_transaction(
         Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
 
-    let tx_bytes = match hex::decode(&req.raw_tx_hex) {
+    let tx_hex = req.raw_tx_hex.strip_prefix("0x").unwrap_or(&req.raw_tx_hex);
+    let tx_bytes = match hex::decode(tx_hex) {
         Ok(b) => b,
         Err(e) => {
             return Ok(KeyAgentResponse::error(coded(
@@ -698,6 +935,29 @@ fn handle_sign_message(
         return Ok(resp);
     }
 
+    // Per-request enclave (default); in-process fallback below is test /
+    // `OC_ENCLAVE=off` only.
+    if crate::enclave::enclave_enabled() {
+        match sign_via_enclave(
+            ctx,
+            EnclaveSignArgs {
+                action: "sign_message",
+                session_key_id: Some(&req.session_key_id),
+                op: crate::enclave::OP_SIGN_MESSAGE,
+                wallet_id: &req.wallet_id,
+                chain_id: "eip155:1",
+                payload_hex: &hex::encode(&req.message),
+                extra_json: "",
+            },
+        ) {
+            Ok(out) => {
+                let resp = crate::proto::SignMessageResponse { signature: out.signature };
+                return Ok(KeyAgentResponse::ok(resp.encode_to_vec()));
+            }
+            Err(e) => return Ok(KeyAgentResponse::error(e)),
+        }
+    }
+
     // SignMessage has no chain_id field on the wire; default to EVM
     // (personal_sign semantics). Non-EVM message signing goes through
     // `SignAuth`, which carries an explicit chain_id.
@@ -745,16 +1005,29 @@ fn sign_message_core(
     chain_id: &str,
     message: &[u8],
 ) -> Result<(Vec<u8>, String, Vec<u8>), String> {
-    let (key, signer) = load_chain_key(wallet_id, chain_id)?;
-    let output =
-        signer.sign_message(key.expose(), message).map_err(|e| format!("signing failed: {e}"))?;
-    let address =
-        signer.derive_address(key.expose()).map_err(|e| format!("address derivation: {e}"))?;
-    let public_key = output
-        .public_key
-        .clone()
-        .unwrap_or_else(|| derive_public_key(signer.curve(), key.expose()).unwrap_or_default());
-    Ok((output.signature, address, public_key))
+    // C5: burn-after-use — the key is borrowed inside the closure and
+    // zeroized on return; only signature/address leave the vault scope.
+    let chain = oc_core::parse_chain(chain_id)
+        .map_err(|e| coded(err_code::PARAM, format!("invalid chain: {e}")))?;
+    let signer = oc_signer::signer_for_chain(chain.chain_type);
+    let curve = signer.curve();
+    with_signing_key(wallet_id, chain_id, |key| {
+        let output = signer.sign_message(key, message);
+        let address = signer.derive_address(key);
+        match (output, address) {
+            (Ok(output), Ok(address)) => {
+                let public_key = output
+                    .public_key
+                    .clone()
+                    .unwrap_or_else(|| derive_public_key(curve, key).unwrap_or_default());
+                Ok((output.signature, address, public_key))
+            }
+            // Coded like every other handler error so callers can branch on
+            // `E_INTERNAL` instead of string-matching prose.
+            (Err(e), _) => Err(coded(err_code::INTERNAL, format!("signing failed: {e}"))),
+            (_, Err(e)) => Err(coded(err_code::INTERNAL, format!("address derivation: {e}"))),
+        }
+    })?
 }
 
 /// Derive raw public key bytes from a private key when the signer did not
@@ -762,7 +1035,9 @@ fn sign_message_core(
 ///
 /// Returns 33-byte compressed secp256k1 keys and 32-byte ed25519 keys, or
 /// `None` if the private key cannot be parsed.
-fn derive_public_key(curve: oc_signer::Curve, private_key: &[u8]) -> Option<Vec<u8>> {
+///
+/// `pub(crate)` so the enclave child reuses the same derivation.
+pub(crate) fn derive_public_key(curve: oc_signer::Curve, private_key: &[u8]) -> Option<Vec<u8>> {
     match curve {
         oc_signer::Curve::Secp256k1 => {
             let sk = k256::ecdsa::SigningKey::from_slice(private_key).ok()?;
@@ -832,6 +1107,43 @@ fn handle_sign_auth(
         }
     }
 
+    // Per-request enclave (default); in-process fallback below is test /
+    // `OC_ENCLAVE=off` only.
+    if crate::enclave::enclave_enabled() {
+        match sign_via_enclave(
+            ctx,
+            EnclaveSignArgs {
+                action: "sign_auth",
+                session_key_id: None,
+                op: crate::enclave::OP_SIGN_AUTH,
+                wallet_id: &req.wallet_id,
+                chain_id: &req.chain_id,
+                payload_hex: &hex::encode(&req.message),
+                extra_json: "",
+            },
+        ) {
+            Ok(out) => {
+                let (address, public_key) = match (out.address, out.public_key) {
+                    (Some(a), Some(p)) => (a, p),
+                    _ => {
+                        return Ok(KeyAgentResponse::error(coded(
+                            err_code::INTERNAL,
+                            "enclave omitted address/public key",
+                        )));
+                    }
+                };
+                let resp = crate::proto::SignAuthResponse {
+                    signature: out.signature,
+                    address,
+                    chain_id: req.chain_id.clone(),
+                    public_key,
+                };
+                return Ok(KeyAgentResponse::ok(resp.encode_to_vec()));
+            }
+            Err(e) => return Ok(KeyAgentResponse::error(e)),
+        }
+    }
+
     let (signature, address, public_key) =
         match sign_message_core(&req.wallet_id, &req.chain_id, &req.message) {
             Ok(v) => v,
@@ -882,6 +1194,29 @@ fn handle_sign_typed_data(
     }
     if let Err(resp) = ensure_session_key_active(ctx, &req.session_key_id) {
         return Ok(resp);
+    }
+
+    // Per-request enclave (default); in-process fallback below is test /
+    // `OC_ENCLAVE=off` only.
+    if crate::enclave::enclave_enabled() {
+        match sign_via_enclave(
+            ctx,
+            EnclaveSignArgs {
+                action: "sign_typed_data",
+                session_key_id: Some(&req.session_key_id),
+                op: crate::enclave::OP_SIGN_TYPED_DATA,
+                wallet_id: &req.wallet_id,
+                chain_id: "eip155:1",
+                payload_hex: "",
+                extra_json: &req.typed_data_json,
+            },
+        ) {
+            Ok(out) => {
+                let resp = crate::proto::SignTypedDataResponse { signature: out.signature };
+                return Ok(KeyAgentResponse::ok(resp.encode_to_vec()));
+            }
+            Err(e) => return Ok(KeyAgentResponse::error(e)),
+        }
     }
 
     // EIP-712 typed data is EVM-only.
@@ -943,12 +1278,49 @@ fn handle_sign_user_op(
     if let Err(resp) = ensure_session_key_active(ctx, &req.session_key_id) {
         return Ok(resp);
     }
+
+    // Per-request enclave (default); in-process fallback below is test /
+    // `OC_ENCLAVE=off` only.
+    if crate::enclave::enclave_enabled() {
+        match sign_via_enclave(
+            ctx,
+            EnclaveSignArgs {
+                action: "sign_user_op",
+                session_key_id: Some(&req.session_key_id),
+                op: crate::enclave::OP_SIGN_USER_OP,
+                wallet_id: &req.wallet_id,
+                chain_id: &req.chain_id,
+                payload_hex: &req.user_op_hex,
+                extra_json: "",
+            },
+        ) {
+            Ok(out) => {
+                let signed_user_op_hex = match out.signed_tx_hex {
+                    Some(h) => h,
+                    None => {
+                        return Ok(KeyAgentResponse::error(coded(
+                            err_code::INTERNAL,
+                            "enclave omitted signed user op",
+                        )));
+                    }
+                };
+                let resp = crate::proto::SignUserOpResponse {
+                    signature: out.signature,
+                    signed_user_op_hex,
+                };
+                return Ok(KeyAgentResponse::ok(resp.encode_to_vec()));
+            }
+            Err(e) => return Ok(KeyAgentResponse::error(e)),
+        }
+    }
+
     let (key, signer) = match load_chain_key(&req.wallet_id, &req.chain_id) {
         Ok(v) => v,
         Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
 
-    let user_op_bytes = match hex::decode(&req.user_op_hex) {
+    let user_op_hex = req.user_op_hex.strip_prefix("0x").unwrap_or(&req.user_op_hex);
+    let user_op_bytes = match hex::decode(user_op_hex) {
         Ok(b) => b,
         Err(e) => {
             return Ok(KeyAgentResponse::error(coded(
@@ -1171,9 +1543,9 @@ fn handle_unlock_vault(
     }
 
     // 2. Issue UnlockToken derived from the device key (C2 fix: stable decryption secret; the
-    //    verified passkey is the authorization gate). Probe both derivations across both curve
-    //    families so the returned token is guaranteed to unlock this wallet — an Ed25519-only
-    //    wallet must not fail an EVM-only probe.
+    //    verified passkey is the authorization gate). Probe both curve families so the returned
+    //    token is guaranteed to unlock this wallet — an Ed25519-only wallet must not fail an
+    //    EVM-only probe.
     let device_key = match load_device_key() {
         Ok(k) => k,
         Err(e) => return Ok(KeyAgentResponse::error(e)),
@@ -1181,22 +1553,17 @@ fn handle_unlock_vault(
     let probe = |t: &oc_core::UnlockToken| wallet_decrypts_with_token(&req.wallet_id, t);
     let token = match oc_core::UnlockToken::new(req.wallet_id.clone(), &device_key)
         .map_err(|e| coded(err_code::DECRYPT, format!("token generation: {e}")))
-        .and_then(|t| {
+    {
+        Ok(t) => {
             if probe(&t) {
-                Ok(t)
+                t
             } else {
-                Err(coded(
+                return Ok(KeyAgentResponse::error(coded(
                     err_code::DECRYPT,
-                    "v2 derivation does not unlock this wallet".to_string(),
-                ))
+                    "derivation does not unlock this wallet",
+                )));
             }
-        })
-        .or_else(|v2_err| {
-            oc_core::UnlockToken::new_legacy_sha256(req.wallet_id.clone(), &device_key)
-                .map_err(|e| coded(err_code::DECRYPT, format!("legacy token generation: {e}")))
-                .and_then(|t| if probe(&t) { Ok(t) } else { Err(v2_err) })
-        }) {
-        Ok(t) => t,
+        }
         Err(e) => return Ok(KeyAgentResponse::error(e)),
     };
 
@@ -1861,5 +2228,162 @@ mod tests {
             let resp = drain_via_dispatch(0);
             assert_eq!(resp.record_count, 1);
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // C5 — with_signing_key burn-after-use
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn with_signing_key_rejects_invalid_chain_without_calling_closure() {
+        let mut called = false;
+        let res = super::with_signing_key("any-wallet", "not-a-chain", |_| {
+            called = true;
+        });
+        assert!(res.is_err(), "invalid chain must fail");
+        assert!(!called, "closure must not run when key load fails");
+        let err = res.unwrap_err();
+        assert!(err.contains("E_PARAM"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn with_signing_key_at_missing_wallet_returns_decrypt_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut called = false;
+        let res =
+            super::with_signing_key_at(Some(dir.path()), "no-such-wallet", "eip155:1", |_| {
+                called = true;
+            });
+        assert!(res.is_err(), "missing wallet must fail");
+        assert!(!called, "closure must not run when wallet is missing");
+    }
+
+    #[test]
+    fn with_signing_key_returns_closure_value_and_burns_key() {
+        // Build a mnemonic wallet in a temp vault encrypted under the real
+        // device-key-derived passphrase, so the handler path can decrypt it.
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let wallet_id = "c5-test-wallet-id";
+        let device_key = super::load_device_key().expect("device key must load");
+        let token = oc_core::UnlockToken::new(wallet_id.to_string(), &device_key)
+            .expect("token derivation must succeed");
+        let pp = token.to_passphrase().expect("passphrase derivation must succeed");
+        // Known test mnemonic (12 words).
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let envelope = oc_vault::crypto::encrypt_with_passphrase(phrase.as_bytes(), pp.as_bytes())
+            .expect("envelope encrypt must succeed");
+        let wallet = oc_core::EncryptedWallet::new(
+            wallet_id.to_string(),
+            "c5-wallet".to_string(),
+            Vec::new(),
+            serde_json::to_value(&envelope).expect("envelope json must serialize"),
+            oc_core::KeyType::Mnemonic,
+        );
+        oc_vault::save_encrypted_wallet(&wallet, Some(vault)).expect("save must succeed");
+
+        // Closure return value propagates; key length matches secp256k1 (32).
+        let len = super::with_signing_key_at(Some(vault), wallet_id, "eip155:1", |key| key.len())
+            .expect("with_signing_key must succeed");
+        assert_eq!(len, 32, "secp256k1 signing key must be 32 bytes");
+
+        // Non-Copy return type also propagates.
+        let sig_hex = super::with_signing_key_at(Some(vault), wallet_id, "eip155:1", |key| {
+            hex::encode(&key[..4])
+        })
+        .expect("second borrow must succeed");
+        assert_eq!(sig_hex.len(), 8);
+    }
+
+    #[test]
+    fn with_signing_key_at_borrows_ed25519_key_for_solana() {
+        // Same vault/pattern as the secp256k1 test above, but through the
+        // ed25519 derivation path: the borrowed key must be a valid 32-byte
+        // ed25519 seed whose signatures verify under the derived pubkey.
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path();
+        let wallet_id = "c5-test-ed25519-wallet-id";
+        let device_key = super::load_device_key().expect("device key must load");
+        let token = oc_core::UnlockToken::new(wallet_id.to_string(), &device_key)
+            .expect("token derivation must succeed");
+        let pp = token.to_passphrase().expect("passphrase derivation must succeed");
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let envelope = oc_vault::crypto::encrypt_with_passphrase(phrase.as_bytes(), pp.as_bytes())
+            .expect("envelope encrypt must succeed");
+        let wallet = oc_core::EncryptedWallet::new(
+            wallet_id.to_string(),
+            "c5-ed25519-wallet".to_string(),
+            Vec::new(),
+            serde_json::to_value(&envelope).expect("envelope json must serialize"),
+            oc_core::KeyType::Mnemonic,
+        );
+        oc_vault::save_encrypted_wallet(&wallet, Some(vault)).expect("save must succeed");
+
+        let chain_id = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+        let (sig, pubkey) = super::with_signing_key_at(Some(vault), wallet_id, chain_id, |key| {
+            use ed25519_dalek::Signer as _;
+            assert_eq!(key.len(), 32, "ed25519 signing key must be 32 bytes");
+            let bytes: [u8; 32] = key[..32].try_into().expect("32-byte ed25519 seed");
+            let sk = ed25519_dalek::SigningKey::from_bytes(&bytes);
+            let sig = sk.sign(b"keyagent ed25519 probe");
+            (sig.to_bytes(), sk.verifying_key().to_bytes())
+        })
+        .expect("with_signing_key must succeed for the Solana chain");
+        let signature = ed25519_dalek::Signature::from_bytes(&sig);
+        let verifying = ed25519_dalek::VerifyingKey::from_bytes(&pubkey).expect("valid pubkey");
+        use ed25519_dalek::Verifier as _;
+        assert!(
+            verifying.verify(b"keyagent ed25519 probe", &signature).is_ok(),
+            "closure-borrowed key must produce verifiable ed25519 signatures"
+        );
+    }
+
+    #[test]
+    fn sign_message_core_rejects_invalid_chain_without_touching_vault() {
+        // Chain parsing precedes any device-key or vault access, so an
+        // invalid chain fails coded without side effects.
+        let err = super::sign_message_core("any-wallet", "not-a-chain", b"hello")
+            .expect_err("invalid chain must fail");
+        assert!(err.contains("E_PARAM"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn record_audit_failure_never_blocks_callers() {
+        // Write-fail-open: a poisoned audit mutex must not panic or block;
+        // the event is dropped with a warning (fail-closed callers use
+        // `record_audit_strict` instead — see the next test).
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ctx.audit_log.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("intentional audit-mutex poison for fail-open test");
+        }));
+        super::record_audit(
+            &ctx,
+            EventType::HumanAlert,
+            None,
+            serde_json::json!({"probe": "fail-open"}),
+        );
+        // Returning normally is the assertion: no panic, no Result to handle.
+    }
+
+    #[test]
+    fn record_audit_strict_surfaces_failure_for_fail_closed() {
+        // The fail-closed counterpart: the same poisoned mutex must surface
+        // a coded audit error so signing can be denied rather than unlogged.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ctx.audit_log.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            panic!("intentional audit-mutex poison for fail-closed test");
+        }));
+        let err = super::record_audit_strict(
+            &ctx,
+            EventType::TransactionSigned,
+            None,
+            serde_json::json!({"probe": "fail-closed"}),
+        )
+        .expect_err("poisoned audit log must fail strict append");
+        assert!(err.contains("E_AUDIT"), "unexpected error: {err}");
     }
 }

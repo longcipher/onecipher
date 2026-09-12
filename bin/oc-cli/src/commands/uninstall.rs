@@ -4,7 +4,12 @@ use std::{
     process::Command,
 };
 
-pub(crate) fn run(purge: bool) -> Result<(), crate::CliError> {
+pub(crate) fn run(purge: bool, force: bool) -> Result<(), crate::CliError> {
+    // Agent JSON mode never prompts: --force is required there. Outside
+    // JSON mode --force simply skips the interactive confirmation.
+    if crate::output::is_json_mode() {
+        crate::output::require_force(force, "uninstall onecipher")?;
+    }
     let install_dir = install_dir();
     let binary = install_dir.join("onecipher");
     let vault_path = vault_path();
@@ -28,14 +33,16 @@ pub(crate) fn run(purge: bool) -> Result<(), crate::CliError> {
     println!("  - PATH entries from shell config files");
     println!();
 
-    // Confirm
-    print!("Continue? [y/N] ");
-    io::stdout().flush()?;
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    if !answer.trim().eq_ignore_ascii_case("y") {
-        println!("Aborted.");
-        return Ok(());
+    // Confirm (skipped with --force for non-interactive/agent use).
+    if !force {
+        print!("Continue? [y/N] ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        if !answer.trim().eq_ignore_ascii_case("y") {
+            println!("Aborted.");
+            return Ok(());
+        }
     }
 
     // Remove binary and install dir

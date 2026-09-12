@@ -1,3 +1,7 @@
+//! A13: `no_std`-compatible when the `std` feature is off (uses `alloc` only).
+#[cfg(not(feature = "std"))]
+use alloc::{format, string::String, vec::Vec};
+
 use oc_core::ChainType;
 
 use crate::curve::Curve;
@@ -72,7 +76,7 @@ pub trait ChainSigner: Send + Sync {
         signature: &SignOutput,
     ) -> Result<Vec<u8>, SignerError> {
         let _ = (tx_bytes, signature);
-        Err(SignerError::InvalidTransaction(format!(
+        Err(SignerError::Unsupported(format!(
             "encode_signed_transaction not implemented for {}",
             self.chain_type()
         )))
@@ -102,7 +106,7 @@ pub trait ChainSigner: Send + Sync {
         signature: &[u8],
     ) -> Result<bool, SignerError> {
         let _ = (address, message, signature);
-        Err(SignerError::InvalidMessage(format!(
+        Err(SignerError::Unsupported(format!(
             "verify_message not implemented for {}",
             self.chain_type()
         )))
@@ -117,28 +121,16 @@ pub trait ChainSigner: Send + Sync {
         signature: &[u8],
     ) -> Result<bool, SignerError> {
         let _ = (address, hash, signature);
-        Err(SignerError::InvalidMessage(format!(
+        Err(SignerError::Unsupported(format!(
             "verify_hash not implemented for {}",
             self.chain_type()
         )))
     }
 }
 
-/// Errors that can occur during signing operations.
-#[derive(Debug, thiserror::Error)]
-pub enum SignerError {
-    #[error("invalid private key: {0}")]
-    InvalidPrivateKey(String),
-
-    #[error("invalid message: {0}")]
-    InvalidMessage(String),
-
-    #[error("signing failed: {0}")]
-    SigningFailed(String),
-
-    #[error("address derivation failed: {0}")]
-    AddressDerivationFailed(String),
-
-    #[error("invalid transaction: {0}")]
-    InvalidTransaction(String),
-}
+/// Backward-compatible alias for [`DeriveError`].
+///
+/// The unified Phase1 error type lives in [`crate::error`]; this alias keeps
+/// existing `use crate::traits::SignerError` paths compiling. Match on the
+/// five [`DeriveError`] variants instead of the legacy per-chain names.
+pub use crate::error::DeriveError as SignerError;

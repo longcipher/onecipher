@@ -3,7 +3,7 @@
 //! Integration tests for `oc_keyagent::key_ops` + `oc_keyagent::global_key_cache`.
 //!
 //! These tests exercise the full R54 flow end-to-end:
-//! - `decrypt_mnemonic` round-trip via a real `oc_vault::Vault` + `oc_signer::encrypt`
+//! - `decrypt_mnemonic` round-trip via a real `oc_vault::Vault` + age envelope
 //! - `derive_chain_key` for EVM (BIP-44 / secp256k1) and Solana (SLIP-10 / ed25519) with known test
 //!   vectors
 //! - `KeyCache` TTL expiry, LRU eviction, and clear semantics
@@ -42,7 +42,9 @@ fn test_decrypt_mnemonic_returns_hardened() {
     // bytes inside a HardenedBytes (page-locked, zeroized on Drop).
     let passphrase = "correct horse battery staple";
 
-    let envelope = oc_signer::encrypt(ABANDON_PHRASE.as_bytes(), passphrase.as_bytes()).unwrap();
+    let envelope =
+        oc_vault::crypto::encrypt_with_passphrase(ABANDON_PHRASE.as_bytes(), passphrase.as_bytes())
+            .unwrap();
     let wallet = EncryptedWallet::new(
         "t13-decrypt-id".to_string(),
         "t13-decrypt".to_string(),
@@ -72,7 +74,8 @@ fn test_decrypt_mnemonic_wrong_passphrase_fails() {
     let dir = tempfile::tempdir().unwrap();
     let vault_dir = dir.path().to_path_buf();
 
-    let envelope = oc_signer::encrypt(ABANDON_PHRASE.as_bytes(), b"correct").unwrap();
+    let envelope =
+        oc_vault::crypto::encrypt_with_passphrase(ABANDON_PHRASE.as_bytes(), b"correct").unwrap();
     let wallet = EncryptedWallet::new(
         "t13-wp-id".to_string(),
         "t13-wp".to_string(),

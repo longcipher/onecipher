@@ -1,3 +1,18 @@
+//! Bitcoin chain signer (BIP-84 native segwit / P2WPKH-bech32).
+//!
+//! A10 supply-chain note: this module depends on the audited `bitcoin` 0.32
+//! crate for PSBT parsing (`Psbt`), P2WPKH sighash (`SighashCache`), and ECDSA
+//! (`secp256k1`, `ecdsa::Signature`). Re-implementing those consensus-critical
+//! paths on top of `k256` alone was evaluated and rejected as strictly
+//! riskier. The used feature subset is `["base64"]` only (see workspace
+//! `Cargo.toml`).
+//!
+//! Taproot / TapTweak (`BIP-340`/`BIP-341`) is DELIBERATELY unsupported: this
+//! signer derives P2WPKH addresses only and signs P2WPKH inputs only. Any
+//! P2TR / TapTweak path (tweaked keys, Schnorr signatures, `OP_1` witness
+//! programs) MUST fail closed — callers get `Transaction`, never a
+//! silently mis-signed input. The negative tests below lock that behavior.
+
 use std::str::FromStr;
 
 use bitcoin::{
@@ -10,11 +25,10 @@ use bitcoin::{
 };
 use k256::ecdsa::SigningKey;
 use oc_core::ChainType;
-use ripemd::Ripemd160;
-use sha2::{Digest, Sha256};
 
 use crate::{
     curve::Curve,
+    encoding::{double_sha256, hash160},
     traits::{ChainSigner, SignOutput, SignerError},
 };
 
@@ -41,21 +55,13 @@ impl BitcoinSigner {
     }
 
     fn signing_key(private_key: &[u8]) -> Result<SigningKey, SignerError> {
-        SigningKey::from_slice(private_key)
-            .map_err(|e| SignerError::InvalidPrivateKey(e.to_string()))
-    }
-
-    /// Hash160: SHA256 then RIPEMD160 of the compressed public key.
-    fn hash160(data: &[u8]) -> Vec<u8> {
-        let sha256 = Sha256::digest(data);
-        let ripemd = Ripemd160::digest(sha256);
-        ripemd.to_vec()
+        SigningKey::from_slice(private_key).map_err(|e| SignerError::Input(e.to_string()))
     }
 
     fn bitcoin_private_key(private_key: &[u8]) -> Result<PrivateKey, SignerError> {
         let signing_key = Self::signing_key(private_key)?;
         let secret_key = bitcoin::secp256k1::SecretKey::from_slice(&signing_key.to_bytes())
-            .map_err(|e| SignerError::InvalidPrivateKey(e.to_string()))?;
+            .map_err(|e| SignerError::Input(e.to_string()))?;
         Ok(PrivateKey::new(secret_key, Network::Bitcoin))
     }
 
@@ -68,15 +74,16 @@ impl BitcoinSigner {
 
     fn p2wpkh_script_pubkey(public_key: &PublicKey) -> Result<ScriptBuf, SignerError> {
         let wpkh = public_key.wpubkey_hash().map_err(|_| {
-            SignerError::AddressDerivationFailed("bitcoin public key must be compressed".into())
+            SignerError::AddressEncoding("bitcoin public key must be compressed".into())
         })?;
         Ok(ScriptBuf::new_p2wpkh(&wpkh))
     }
 
     fn previous_output(psbt: &Psbt, index: usize) -> Result<bitcoin::TxOut, SignerError> {
-        let input = psbt.inputs.get(index).ok_or_else(|| {
-            SignerError::InvalidTransaction(format!("missing PSBT input {index}"))
-        })?;
+        let input = psbt
+            .inputs
+            .get(index)
+            .ok_or_else(|| SignerError::Transaction(format!("missing PSBT input {index}")))?;
 
         if let Some(witness_utxo) = &input.witness_utxo {
             return Ok(witness_utxo.clone());
@@ -88,27 +95,25 @@ impl BitcoinSigner {
                 .input
                 .get(index)
                 .ok_or_else(|| {
-                    SignerError::InvalidTransaction(format!(
-                        "missing unsigned transaction input {index}"
-                    ))
+                    SignerError::Transaction(format!("missing unsigned transaction input {index}"))
                 })?
                 .previous_output;
 
             if non_witness_utxo.compute_txid() != prevout.txid {
-                return Err(SignerError::InvalidTransaction(format!(
+                return Err(SignerError::Transaction(format!(
                     "non_witness_utxo txid mismatch for input {index}"
                 )));
             }
 
             return non_witness_utxo.output.get(prevout.vout as usize).cloned().ok_or_else(|| {
-                SignerError::InvalidTransaction(format!(
+                SignerError::Transaction(format!(
                     "missing prevout {} for input {index}",
                     prevout.vout
                 ))
             });
         }
 
-        Err(SignerError::InvalidTransaction(format!(
+        Err(SignerError::Transaction(format!(
             "PSBT input {index} is missing witness_utxo/non_witness_utxo"
         )))
     }
@@ -118,7 +123,7 @@ impl BitcoinSigner {
     fn sign_psbt(private_key: &[u8], psbt_bytes: &[u8]) -> Result<Vec<u8>, SignerError> {
         let psbt_base64 = bitcoin::base64::engine::general_purpose::STANDARD.encode(psbt_bytes);
         let mut psbt = Psbt::from_str(&psbt_base64)
-            .map_err(|e| SignerError::InvalidTransaction(format!("invalid PSBT: {e}")))?;
+            .map_err(|e| SignerError::Transaction(format!("invalid PSBT: {e}")))?;
 
         let (priv_key, pub_key) = Self::public_keys(private_key)?;
         let expected_script = Self::p2wpkh_script_pubkey(&pub_key)?;
@@ -133,7 +138,7 @@ impl BitcoinSigner {
                 .sighash_type
                 .map(|ty| {
                     ty.ecdsa_hash_ty().map_err(|e| {
-                        SignerError::InvalidTransaction(format!(
+                        SignerError::Transaction(format!(
                             "unsupported sighash type for input {index}: {e}"
                         ))
                     })
@@ -144,9 +149,7 @@ impl BitcoinSigner {
             let sighash = SighashCache::new(&psbt.unsigned_tx)
                 .p2wpkh_signature_hash(index, &prevout.script_pubkey, prevout.value, sighash_type)
                 .map_err(|e| {
-                    SignerError::SigningFailed(format!(
-                        "failed to compute sighash for input {index}: {e}"
-                    ))
+                    SignerError::Crypto(format!("failed to compute sighash for input {index}: {e}"))
                 })?;
 
             let msg = bitcoin::secp256k1::Message::from(sighash);
@@ -200,22 +203,22 @@ impl ChainSigner for BitcoinSigner {
         let pubkey_compressed = verifying_key.to_sec1_point(true);
         let pubkey_bytes = pubkey_compressed.as_bytes();
 
-        // Hash160
-        let hash = Self::hash160(pubkey_bytes);
+        // Hash160 (shared `crate::encoding` primitive).
+        let hash = hash160(pubkey_bytes);
 
         // Bech32 segwit v0 encoding
         let hrp = bech32::Hrp::parse(&self.hrp)
-            .map_err(|e| SignerError::AddressDerivationFailed(e.to_string()))?;
+            .map_err(|e| SignerError::AddressEncoding(e.to_string()))?;
 
         let address = bech32::segwit::encode(hrp, bech32::segwit::VERSION_0, &hash)
-            .map_err(|e| SignerError::AddressDerivationFailed(e.to_string()))?;
+            .map_err(|e| SignerError::AddressEncoding(e.to_string()))?;
 
         Ok(address)
     }
 
     fn sign(&self, private_key: &[u8], message: &[u8]) -> Result<SignOutput, SignerError> {
         if message.len() != 32 {
-            return Err(SignerError::InvalidMessage(format!(
+            return Err(SignerError::Input(format!(
                 "expected 32-byte hash, got {} bytes",
                 message.len()
             )));
@@ -246,7 +249,7 @@ impl ChainSigner for BitcoinSigner {
         }
 
         // Standard Bitcoin transaction signing: double SHA256 of the sighash preimage
-        let hash = Sha256::digest(Sha256::digest(tx_bytes));
+        let hash = double_sha256(tx_bytes);
         self.sign(private_key, &hash)
     }
 
@@ -258,7 +261,7 @@ impl ChainSigner for BitcoinSigner {
         encode_compact_size(&mut data, message.len());
         data.extend_from_slice(message);
 
-        let hash = Sha256::digest(Sha256::digest(&data));
+        let hash = double_sha256(&data);
         self.sign(private_key, &hash)
     }
 
@@ -269,6 +272,8 @@ impl ChainSigner for BitcoinSigner {
 
 #[cfg(test)]
 mod tests {
+    use sha2::{Digest, Sha256};
+
     use super::*;
 
     #[test]
@@ -438,5 +443,51 @@ mod tests {
         verifying_key
             .verify_prehash(&expected_hash, &sig)
             .expect("signature should verify for short messages");
+    }
+
+    #[test]
+    fn test_taproot_not_supported_derive_is_p2wpkh_only() {
+        // A10 negative test: the signer derives P2WPKH (bc1q...) only.
+        // It MUST never emit a P2TR (bc1p...) address, which would imply a
+        // TapTweak path that does not exist here.
+        let mut privkey = vec![0u8; 31];
+        privkey.push(1u8);
+        let signer = BitcoinSigner::mainnet();
+        let address = signer.derive_address(&privkey).unwrap();
+        assert!(address.starts_with("bc1q"), "P2WPKH-only signer must emit bc1q, got: {address}");
+        assert!(
+            !address.starts_with("bc1p"),
+            "Taproot (bc1p) addresses are unsupported by design, got: {address}"
+        );
+    }
+
+    #[test]
+    fn test_taptweak_path_rejected_sign_requires_32_byte_hash() {
+        // A10 negative test: TapTweak/Schnorr paths operate on x-only keys and
+        // 32-byte tweaked digests via a different signature scheme. This ECDSA
+        // signer requires exactly 32 bytes of pre-hashed input and rejects
+        // anything else fail-closed instead of coercing it into a tweak.
+        let signer = BitcoinSigner::mainnet();
+        let mut privkey = vec![0u8; 31];
+        privkey.push(1u8);
+        // 33-byte x-only-plus-parity and 64-byte Schnorr payloads are rejected.
+        assert!(signer.sign(&privkey, &[0u8; 33]).is_err());
+        assert!(signer.sign(&privkey, &[0u8; 64]).is_err());
+        assert!(signer.sign(&privkey, b"short").is_err());
+    }
+
+    #[test]
+    fn test_psbt_without_owned_p2wpkh_inputs_signs_nothing_new() {
+        // A10 negative test: a PSBT whose inputs do not match our P2WPKH
+        // script is left untouched (no partial_sigs for foreign inputs).
+        // Here we assert the fail-closed parse path: garbage after the magic
+        // is a Transaction error, never a silent no-op signature.
+        let signer = BitcoinSigner::mainnet();
+        let mut privkey = vec![0u8; 31];
+        privkey.push(1u8);
+        let mut bad_psbt = PSBT_MAGIC.to_vec();
+        bad_psbt.extend_from_slice(b"\x00\x01\x02taproot-fake");
+        let err = signer.sign_transaction(&privkey, &bad_psbt).unwrap_err();
+        assert!(err.to_string().contains("invalid PSBT"), "got: {err}");
     }
 }

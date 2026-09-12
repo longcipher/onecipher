@@ -55,6 +55,11 @@ pub fn unique_tmp_path(path: &Path) -> PathBuf {
 
 /// Atomically write `contents` to `path` with mode `mode`.
 ///
+/// This is the shared atomic writer for the workspace (B7): `oc-secret`,
+/// `oc-vault` and `oc-wallet::policy_store` all route secret-bearing writes
+/// through [`write_atomic_private`]. Direct `fs::write` must NOT be used for
+/// secrets.
+///
 /// The naive `fs::write` + `set_permissions` sequence used across this
 /// workspace had two defects that this helper exists to eliminate:
 ///
@@ -64,6 +69,17 @@ pub fn unique_tmp_path(path: &Path) -> PathBuf {
 /// 2. **Torn writes.** `fs::write` truncates before writing, so a crash or full disk mid-write
 ///    leaves a truncated or empty file. For a key store that destroys the credential; for a policy
 ///    file it can silently drop restrictions.
+///
+/// Sequence (B7): parent dir `0700` (private mode only) -> unique
+/// `.{name}.{pid}.{nanos}.{seq}.tmp` in the same directory -> `O_EXCL`
+/// (`create_new`) + `0600` at creation -> `write_all` + `sync_all` ->
+/// `rename` into place -> `fsync` parent dir.
+///
+/// `O_EXCL` is the symlink-planting defense: if an attacker pre-creates a
+/// symlink at the temporary path, creation fails instead of following it.
+/// A symlink pre-planted at the *target* path is never followed either:
+/// `rename` atomically replaces the symlink itself, leaving the link target
+/// untouched.
 ///
 /// This writes to a temporary file in the *same directory* (so the final
 /// `rename` is a same-filesystem atomic operation), sets the mode **before**
@@ -88,6 +104,11 @@ pub fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<(), std::
         )
     })?;
     std::fs::create_dir_all(parent)?;
+    // B7: secret-bearing files live under a 0700 directory so a sibling
+    // symlink or world-readable parent cannot expose them.
+    if mode == MODE_PRIVATE_FILE {
+        ensure_dir_private(parent);
+    }
 
     // Same directory as the target so `rename` cannot cross a filesystem
     // boundary (which would make it non-atomic). Use a unique temp name to
@@ -136,12 +157,31 @@ pub fn write_atomic(path: &Path, contents: &[u8], mode: u32) -> Result<(), std::
 
 /// Atomically write a secret-bearing file with mode `0600`.
 ///
+/// The parent directory is created when missing and narrowed to `0700` on
+/// Unix. See [`write_atomic`] for the full durability and symlink-planting
+/// rationale (B7).
+///
 /// # Errors
 ///
 /// See [`write_atomic`].
 pub fn write_atomic_private(path: &Path, contents: &[u8]) -> Result<(), std::io::Error> {
     write_atomic(path, contents, MODE_PRIVATE_FILE)
 }
+
+/// Best-effort narrowing of a secret parent directory to `0700` (Unix only).
+///
+/// Creation via `create_dir_all` honors the umask, so a freshly created
+/// parent could otherwise be `0755`. Failures are ignored: callers already
+/// enforce directory modes on their vault roots, and a chmod failure must
+/// not turn an otherwise durable write into an error.
+#[cfg(unix)]
+fn ensure_dir_private(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn ensure_dir_private(_dir: &Path) {}
 
 // ── Validation helpers (unified, Rxx) ───────────────────────────────────────
 
@@ -181,8 +221,7 @@ pub fn validate_wallet_id(id: &str) -> Result<(), crate::error::OcError> {
     Ok(())
 }
 
-/// Validate a secret name (allows '/' for hierarchy, percent-encodes to %2F). Rejects '\', '\0',
-/// '.', '..', leading '.'.
+/// Validate a secret name (allows '/' for hierarchy, percent-encodes to %2F).
 ///
 /// Secret names are hierarchical (e.g. `github/personal`) and '/' is **allowed**
 /// — it is percent-encoded to `%2F` on disk via [`secret_name_to_filename`] so
@@ -190,25 +229,67 @@ pub fn validate_wallet_id(id: &str) -> Result<(), crate::error::OcError> {
 /// [`validate_wallet_id`], where '/' is forbidden because wallet IDs map
 /// directly to file names without encoding.
 ///
-/// Rejects: empty/blank, '\\', NUL, exact "."/"..", leading '.'.
-/// Allows '/' and '%' (encoded). For Windows compatibility, ':' '*' '?' '"' '<' '>' '|' could also
-/// be rejected, but are currently not enforced to avoid breaking existing names; they are
-/// documented here for future tightening.
+/// Strict rules (B9):
+/// - byte length 1..=1024.
+/// - no NUL, newline, carriage return, backslash.
+/// - no leading or trailing `/`; no `//` (empty segment).
+/// - no leading or trailing `.` for the whole name; no segment equal to `.` or `..`; no `/./` or
+///   `/../` substrings.
+/// - no segment starting or ending with `.` or space (Windows trailing-dot ambiguity).
+/// - Windows reserved device names are rejected per segment (case-insensitive): `CON`, `PRN`,
+///   `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, with or without an extension (`CON.txt` is also
+///   reserved on Windows).
+/// - shell-unsafe `:` `*` `?` `"` `<` `>` `|` are rejected to keep filenames portable.
 pub fn validate_secret_name(name: &str) -> Result<(), crate::error::OcError> {
+    let invalid = |reason: &str| crate::error::OcError::InvalidInput {
+        message: format!("invalid secret name '{name}': {reason}"),
+    };
     if name.trim().is_empty() {
-        return Err(crate::error::OcError::InvalidInput {
-            message: "name must not be empty".to_string(),
-        });
+        return Err(invalid("name must not be empty or blank"));
     }
-    if name.contains('\\') ||
-        name.contains('\0') ||
-        name == ".." ||
-        name == "." ||
-        name.starts_with('.')
-    {
-        return Err(crate::error::OcError::InvalidInput {
-            message: format!("name contains forbidden characters or sequences: '{name}'"),
-        });
+    if name.len() > 1024 {
+        return Err(invalid("name exceeds 1024 bytes"));
+    }
+    for ch in ['\0', '\n', '\r', '\\', ':', '*', '?', '"', '<', '>', '|'] {
+        if name.contains(ch) {
+            return Err(invalid("name contains a forbidden character"));
+        }
+    }
+    if name.starts_with('/') || name.ends_with('/') {
+        return Err(invalid("name must not start or end with '/'"));
+    }
+    if name.starts_with('.') || name.ends_with('.') {
+        return Err(invalid("name must not start or end with '.'"));
+    }
+    if name.contains("//") || name.contains("/./") || name.contains("/../") {
+        return Err(invalid("name must not contain '//', '/./' or '/../'"));
+    }
+    for segment in name.split('/') {
+        if segment.is_empty() {
+            return Err(invalid("name contains an empty path segment"));
+        }
+        if segment == "." || segment == ".." {
+            return Err(invalid("path segment must not be '.' or '..'"));
+        }
+        if segment.starts_with('.') || segment.ends_with('.') {
+            return Err(invalid("path segment must not start or end with '.'"));
+        }
+        if segment.ends_with(' ') {
+            return Err(invalid("path segment must not end with space"));
+        }
+        // Windows reserved device name, ignoring any extension.
+        let stem = segment.split('.').next().unwrap_or(segment).to_ascii_uppercase();
+        let reserved = stem == "CON" ||
+            stem == "PRN" ||
+            stem == "AUX" ||
+            stem == "NUL" ||
+            (stem.len() == 4 &&
+                (stem.starts_with("COM") || stem.starts_with("LPT")) &&
+                stem.as_bytes()[3].is_ascii_digit() &&
+                stem.as_bytes()[3] != b'0');
+        if reserved {
+            return Err(invalid("path segment is a Windows reserved device name"));
+        }
     }
     Ok(())
 }
@@ -426,5 +507,89 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("HOME", v) },
             None => unsafe { std::env::remove_var("HOME") },
         }
+    }
+
+    #[test]
+    fn test_validate_secret_name_accepts_hierarchical() {
+        assert!(validate_secret_name("github").is_ok());
+        assert!(validate_secret_name("github/personal").is_ok());
+        assert!(validate_secret_name("my-wallet_123").is_ok());
+        assert!(validate_secret_name("a/b/c").is_ok());
+    }
+
+    #[test]
+    fn test_validate_secret_name_rejects_traversal_and_shape() {
+        for bad in [
+            "",
+            "   ",
+            "/leading",
+            "trailing/",
+            ".leading",
+            "trailing.",
+            "a//b",
+            "a/./b",
+            "a/../b",
+            "..",
+            ".",
+            "a\\b",
+            "a:b",
+            "a*b",
+            "a|b",
+            ".hidden/ok",
+        ] {
+            assert!(validate_secret_name(bad).is_err(), "must reject: {bad:?}");
+        }
+        // Over-long names are rejected.
+        let long = "a".repeat(1025);
+        assert!(validate_secret_name(&long).is_err());
+        assert!(validate_secret_name(&"a".repeat(1024)).is_ok());
+        // Control characters are rejected.
+        assert!(validate_secret_name("a\nb").is_err());
+        assert!(validate_secret_name("a\0b").is_err());
+    }
+
+    #[test]
+    fn test_validate_secret_name_rejects_windows_reserved() {
+        for bad in ["CON", "con", "NUL", "nul.txt", "COM1", "com9", "LPT1", "lpt9.cfg", "a/CON/b"] {
+            assert!(validate_secret_name(bad).is_err(), "must reject reserved: {bad:?}");
+        }
+        // COM0/COM10/LPT0 are not reserved device names.
+        assert!(validate_secret_name("COM0").is_ok());
+        assert!(validate_secret_name("COM10").is_ok());
+        assert!(validate_secret_name("console").is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_atomic_private_narrows_parent_to_0700() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = sub.join("s.age");
+        write_atomic_private(&path, b"secret").unwrap();
+        let mode = std::fs::metadata(&sub).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "secret parent dir must be narrowed to 0700");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_write_atomic_does_not_follow_target_symlink() {
+        // Attacker plants a symlink at the target path pointing at a victim
+        // file. The atomic rename must replace the symlink itself, never
+        // follow it to overwrite the victim.
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim.txt");
+        std::fs::write(&victim, b"victim-original").unwrap();
+        let link = dir.path().join("link.age");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        write_atomic_private(&link, b"attacker-payload").unwrap();
+
+        // Victim is untouched; the link path is now a regular file.
+        assert_eq!(std::fs::read(&victim).unwrap(), b"victim-original");
+        assert!(!std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&link).unwrap(), b"attacker-payload");
     }
 }

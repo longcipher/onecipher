@@ -43,6 +43,7 @@ pub(crate) fn create(
     println!("API key created: {}", key_file.id);
     println!("Name:            {name}");
     println!("Wallets:         {}", wallet_ids.join(", "));
+    println!("Recipient:       {}", key_file.recipient);
     if !policy_ids.is_empty() {
         println!("Policies:        {}", policy_ids.join(", "));
     }

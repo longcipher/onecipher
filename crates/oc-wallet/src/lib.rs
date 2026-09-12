@@ -1,5 +1,6 @@
 // Test code may unwrap/expect/panic (workspace lint phase-1 carve-out).
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+pub mod bridge;
 #[cfg(feature = "rpc")]
 pub mod broadcast;
 pub mod error;

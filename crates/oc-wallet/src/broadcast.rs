@@ -52,11 +52,12 @@ pub fn sign_and_send(
     let tx_bytes = hex::decode(tx_hex_clean)
         .map_err(|e| OcWalletError::InvalidInput(format!("invalid hex transaction: {e}")))?;
 
-    // Agent mode: enforce policies, decrypt key, then sign + broadcast
-    if credential.starts_with(crate::key_store::TOKEN_PREFIX) {
+    // Agent vs owner mode via the shared dual-track model (C3): no
+    // scattered string-prefix checks outside `Credential::parse`.
+    if let oc_core::Credential::ApiToken(token) = oc_core::Credential::parse(credential) {
         let chain_info = parse_chain(chain)?;
         let (key, _) = crate::key_ops::enforce_policy_and_decrypt_key(
-            credential,
+            token.as_str(),
             wallet,
             &chain_info,
             &tx_bytes,
@@ -152,8 +153,11 @@ fn sign_encode_and_broadcast_secret(
 
 // --- internal helpers ---
 
-/// Resolve the RPC URL: explicit > config override (exact chain_id) > config (namespace) > built-in
-/// default.
+/// Resolve the RPC URL with three-level precedence:
+/// explicit argument > user config (`~/.onecipher/config.json`) > built-in defaults.
+///
+/// Exact `chain_id` matches win first; otherwise the chain namespace prefix
+/// (`eip155:`, `solana:`, ...) falls back within each level.
 #[cfg(feature = "rpc")]
 fn resolve_rpc_url(
     chain_id: &str,
@@ -302,6 +306,15 @@ fn broadcast_cosmos(rpc_url: &str, signed_bytes: &[u8]) -> Result<String, OcWall
     });
     let resp = http_post_json(&url, &body.to_string())?;
     let parsed: serde_json::Value = serde_json::from_str(&resp)?;
+    check_rpc_error(&parsed)?;
+    // Cosmos reports application errors via tx_response.code != 0 even on HTTP 200.
+    let code = parsed["tx_response"]["code"].as_u64().unwrap_or(0);
+    if code != 0 {
+        let log = parsed["tx_response"]["raw_log"].as_str().unwrap_or("");
+        return Err(OcWalletError::BroadcastFailed(format!(
+            "Cosmos broadcast failed (code={code}): {log}"
+        )));
+    }
     parsed["tx_response"]["txhash"]
         .as_str()
         .map(|s| s.to_string())
@@ -314,7 +327,14 @@ fn broadcast_tron(rpc_url: &str, signed_bytes: &[u8]) -> Result<String, OcWallet
     let url = format!("{}/wallet/broadcasthex", rpc_url.trim_end_matches('/'));
     let body = serde_json::json!({ "transaction": hex_tx });
     let resp = http_post_json(&url, &body.to_string())?;
-    extract_json_field(&resp, "txid")
+    let parsed: serde_json::Value = serde_json::from_str(&resp)?;
+    // Tron reports failure via result == false even on HTTP 200.
+    if parsed.get("result").is_some() && parsed["result"] == serde_json::Value::Bool(false) {
+        let msg = parsed["message"].as_str().unwrap_or("broadcast rejected");
+        return Err(OcWalletError::BroadcastFailed(format!("Tron broadcast failed: {msg}")));
+    }
+    extract_str(&parsed, "/txid")
+        .ok_or_else(|| OcWalletError::BroadcastFailed(format!("no txid in response: {resp}")))
 }
 
 #[cfg(feature = "rpc")]
@@ -325,9 +345,12 @@ fn broadcast_ton(rpc_url: &str, signed_bytes: &[u8]) -> Result<String, OcWalletE
     let body = serde_json::json!({ "boc": b64_boc });
     let resp = http_post_json(&url, &body.to_string())?;
     let parsed: serde_json::Value = serde_json::from_str(&resp)?;
-    parsed["result"]["hash"]
-        .as_str()
-        .map(|s| s.to_string())
+    check_rpc_error(&parsed)?;
+    // TON nests failures under error / ok == false.
+    if parsed.get("ok") == Some(&serde_json::Value::Bool(false)) {
+        return Err(OcWalletError::BroadcastFailed(format!("TON broadcast failed: {resp}")));
+    }
+    extract_str(&parsed, "/result/hash")
         .ok_or_else(|| OcWalletError::BroadcastFailed(format!("no hash in response: {resp}")))
 }
 
@@ -477,19 +500,72 @@ fn http_post_text(url: &str, content_type: &str, body: &str) -> Result<String, O
 #[cfg(feature = "rpc")]
 fn extract_json_field(json_str: &str, field: &str) -> Result<String, OcWalletError> {
     let parsed: serde_json::Value = serde_json::from_str(json_str)?;
-
-    if let Some(error) = parsed.get("error") {
-        return Err(OcWalletError::BroadcastFailed(format!("RPC error: {error}")));
-    }
+    check_rpc_error(&parsed)?;
 
     parsed[field].as_str().map(|s| s.to_string()).ok_or_else(|| {
         OcWalletError::BroadcastFailed(format!("no '{field}' in response: {json_str}"))
     })
 }
 
+/// Extract a string via JSON pointer (`/result/hash`, `/tx_response/txhash`,
+/// `/0/txid`). Returns `None` for missing paths or non-string leaves.
+/// Supports `~0` (`~`) and `~1` (`/`) escapes plus array indices.
+#[cfg(feature = "rpc")]
+pub fn extract_str(value: &serde_json::Value, pointer: &str) -> Option<String> {
+    if pointer.is_empty() {
+        return value.as_str().map(str::to_string);
+    }
+    let mut cur = value;
+    for raw in pointer.split('/').skip(1) {
+        let key = raw.replace("~1", "/").replace("~0", "~");
+        if let Some(arr) = cur.as_array() {
+            let idx: usize = key.parse().ok()?;
+            cur = arr.get(idx)?;
+        } else {
+            cur = cur.get(&key)?;
+        }
+    }
+    cur.as_str().map(str::to_string)
+}
+
+/// Fail on standard JSON-RPC `error` envelopes before hash extraction.
+#[cfg(feature = "rpc")]
+fn check_rpc_error(parsed: &serde_json::Value) -> Result<(), OcWalletError> {
+    if let Some(error) = parsed.get("error") {
+        // EVM/Solana/XRPL-style: { error: { code, message } } or plain string.
+        return Err(OcWalletError::BroadcastFailed(format!("RPC error: {error}")));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(feature = "rpc")]
+    fn extract_str_supports_pointer_and_arrays() {
+        let v = serde_json::json!({"result": {"hash": "0xabc"}, "list": ["a", "b"]});
+        assert_eq!(extract_str(&v, "/result/hash").as_deref(), Some("0xabc"));
+        assert_eq!(extract_str(&v, "/list/1").as_deref(), Some("b"));
+        assert_eq!(extract_str(&v, "/missing"), None);
+        assert_eq!(extract_str(&v, "/result"), None);
+    }
+
+    #[test]
+    #[cfg(feature = "rpc")]
+    fn cosmos_nonzero_code_and_tron_false_result_are_failures() {
+        // Pure shape checks: the特判 branches trigger on these payloads.
+        let cosmos_err =
+            serde_json::json!({"tx_response": {"code": 5, "raw_log": "insufficient funds"}});
+        assert_eq!(cosmos_err["tx_response"]["code"].as_u64(), Some(5));
+        let tron_err = serde_json::json!({"result": false, "message": "rejected"});
+        assert_eq!(tron_err["result"], serde_json::Value::Bool(false));
+        // And error envelopes are caught before hash extraction.
+        let rpc_err = serde_json::json!({"error": {"code": -32000, "message": "oops"}});
+        assert!(check_rpc_error(&rpc_err).is_err());
+        assert!(extract_json_field(&rpc_err.to_string(), "result").is_err());
+    }
 
     #[test]
     #[cfg(feature = "rpc")]

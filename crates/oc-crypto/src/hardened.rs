@@ -357,6 +357,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::redundant_clone)]
     fn clone_odd_lengths_no_panic() {
         for &len in &[1usize, 3, 2049] {
             let original = HardenedBytes::from_slice(&vec![0xC3u8; len]).unwrap();

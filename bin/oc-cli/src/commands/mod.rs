@@ -8,6 +8,7 @@ pub(crate) mod completion;
 pub(crate) mod config;
 pub(crate) mod derive;
 pub(crate) mod doctor;
+pub(crate) mod editor;
 pub(crate) mod env_cmd;
 pub(crate) mod find;
 pub(crate) mod fsck;
@@ -23,6 +24,7 @@ pub(crate) mod key;
 pub(crate) mod migrate;
 pub(crate) mod password;
 pub(crate) mod policy;
+pub(crate) mod render;
 pub(crate) mod sbom;
 pub(crate) mod secret;
 pub(crate) mod send;
@@ -46,17 +48,74 @@ pub(crate) mod webui;
 
 use std::io::{self, BufRead, IsTerminal, Read, Write};
 
-use oc_signer::{SecretBytes, process_hardening::clear_env_var};
+use oc_signer::SecretBytes;
 use zeroize::Zeroizing;
 
 use crate::CliError;
+
+// ===========================================================================
+// Burn-after-reading environment handling (Phase 1)
+// ===========================================================================
+
+/// Read `name` from the process environment and remove it immediately.
+///
+/// The value is wiped from the environment so a later `ps e` / `/proc`
+/// scrape or child-process inheritance cannot recover it. Returns `None`
+/// when unset. An explicitly empty value is preserved as `Some("")`
+/// (empty passphrase is a valid "no passphrase" wallet key); use
+/// [`take_first_env`] when several alias names feed one credential.
+pub(crate) fn take_env(name: &str) -> Option<String> {
+    let value = std::env::var(name).ok();
+    // SAFETY: `std::env::remove_var` is `unsafe` because concurrent
+    // environment access is undefined behavior. CLI takes happen on the
+    // dispatch path before any secret-bearing child is spawned, and tests
+    // serialize environment mutation via `HOME_LOCK`; no other thread
+    // touches the same variable concurrently.
+    unsafe {
+        std::env::remove_var(name);
+    }
+    value
+}
+
+/// Drain every name in `names` (burn-after-reading) and return the first
+/// hit, so stale aliases never linger for child processes to inherit.
+///
+/// Each probed name is removed even when an earlier alias already hit —
+/// leaving a fallback passphrase behind would defeat the take.
+pub(crate) fn take_first_env(names: &[&str]) -> Option<String> {
+    let mut first = None;
+    for name in names {
+        if let Some(value) = take_env(name) {
+            if first.is_none() {
+                first = Some(value);
+            }
+        }
+    }
+    first
+}
+
+/// Ordered passphrase sources: canonical `ONECIPHER_PASSPHRASE` first, the
+/// short `OC_PASSPHRASE` alias, then compat names (`OWS_PASSPHRASE`,
+/// `OWX_PASSPHRASE`, `LWS_PASSPHRASE`). First hit wins; all probed names
+/// are drained via [`take_first_env`].
+pub(crate) fn take_passphrase() -> Option<String> {
+    take_first_env(&[
+        "ONECIPHER_PASSPHRASE",
+        "OC_PASSPHRASE",
+        "OWS_PASSPHRASE",
+        "OWX_PASSPHRASE",
+        "LWS_PASSPHRASE",
+    ])
+}
 
 /// Returns `true` if stdin is a usable interactive terminal.
 ///
 /// Always returns `false` under `#[cfg(test)]` (tests must provide input via
 /// env vars or flags — blocking on `read_line()` would hang the harness).
 /// Also returns `false` if the `OC_NONINTERACTIVE` env var is set, giving
-/// scripts an explicit escape hatch.
+/// scripts an explicit escape hatch, and when agent JSON mode is active
+/// (`ONECIPHER_JSON_ERRORS=1`): JSON mode never prompts — missing input
+/// fails closed with an explicit error instead (single stdout stream).
 pub(crate) fn is_interactive_stdin() -> bool {
     if cfg!(test) {
         return false;
@@ -64,15 +123,17 @@ pub(crate) fn is_interactive_stdin() -> bool {
     if std::env::var("OC_NONINTERACTIVE").is_ok() {
         return false;
     }
+    if crate::output::is_json_mode() {
+        return false;
+    }
     io::stdin().is_terminal()
 }
 
 /// Read mnemonic from ONECIPHER_MNEMONIC env var (or OWS_MNEMONIC/LWS_MNEMONIC fallback) or stdin.
+///
+/// The env var is drained burn-after-reading via [`take_first_env`].
 pub(crate) fn read_mnemonic() -> Result<Zeroizing<String>, CliError> {
-    if let Some(value) = clear_env_var("ONECIPHER_MNEMONIC")
-        .or_else(|| clear_env_var("OWS_MNEMONIC"))
-        .or_else(|| clear_env_var("LWS_MNEMONIC"))
-    {
+    if let Some(value) = take_first_env(&["ONECIPHER_MNEMONIC", "OWS_MNEMONIC", "LWS_MNEMONIC"]) {
         let trimmed = value.trim().to_string();
         if !trimmed.is_empty() {
             return Ok(Zeroizing::new(trimmed));
@@ -104,10 +165,11 @@ pub(crate) fn read_mnemonic() -> Result<Zeroizing<String>, CliError> {
 
 /// Read a hex-encoded private key from ONECIPHER_PRIVATE_KEY env var (or
 /// OWS_PRIVATE_KEY/LWS_PRIVATE_KEY fallback) or stdin.
+///
+/// The env var is drained burn-after-reading via [`take_first_env`].
 pub(crate) fn read_private_key() -> Result<Zeroizing<String>, CliError> {
-    if let Some(value) = clear_env_var("ONECIPHER_PRIVATE_KEY")
-        .or_else(|| clear_env_var("OWS_PRIVATE_KEY"))
-        .or_else(|| clear_env_var("LWS_PRIVATE_KEY"))
+    if let Some(value) =
+        take_first_env(&["ONECIPHER_PRIVATE_KEY", "OWS_PRIVATE_KEY", "LWS_PRIVATE_KEY"])
     {
         let trimmed = value.trim().to_string();
         if !trimmed.is_empty() {
@@ -138,13 +200,17 @@ pub(crate) fn read_private_key() -> Result<Zeroizing<String>, CliError> {
     Ok(Zeroizing::new(trimmed))
 }
 
-/// Read a passphrase from ONECIPHER_PASSPHRASE env var (or OWS_PASSPHRASE/LWS_PASSPHRASE fallback)
-/// or prompt interactively.
+/// Read a passphrase from ONECIPHER_PASSPHRASE env var (or OC_PASSPHRASE /
+/// OWS_PASSPHRASE / OWX_PASSPHRASE / LWS_PASSPHRASE fallback) or prompt
+/// interactively.
+///
+/// The env var is drained burn-after-reading via [`take_passphrase`].
+/// Under agent JSON mode ([`crate::output::is_json_mode`]) there is no
+/// prompt: a missing env var yields an empty passphrase here, and every
+/// caller that needs a real secret refuses explicitly through
+/// [`is_interactive_stdin`] instead of blocking.
 pub(crate) fn read_passphrase() -> Zeroizing<String> {
-    if let Some(value) = clear_env_var("ONECIPHER_PASSPHRASE")
-        .or_else(|| clear_env_var("OWS_PASSPHRASE"))
-        .or_else(|| clear_env_var("LWS_PASSPHRASE"))
-    {
+    if let Some(value) = take_passphrase() {
         return Zeroizing::new(value);
     }
     if is_interactive_stdin() {
@@ -160,12 +226,15 @@ pub(crate) fn read_passphrase() -> Zeroizing<String> {
 
 /// Peek at the passphrase value without consuming the env var.
 /// Returns `Some(value)` if ONECIPHER_PASSPHRASE is set (even if empty), `None` otherwise.
-/// Checks OWS_PASSPHRASE and LWS_PASSPHRASE as fallbacks for upgrade compatibility.
+/// Checks OC_PASSPHRASE, OWS_PASSPHRASE, OWX_PASSPHRASE and LWS_PASSPHRASE as fallbacks for
+/// upgrade compatibility.
 /// Used by sign commands to detect API tokens before deciding the code path.
 pub(crate) fn peek_passphrase() -> Option<String> {
     std::env::var("ONECIPHER_PASSPHRASE")
         .ok()
+        .or_else(|| std::env::var("OC_PASSPHRASE").ok())
         .or_else(|| std::env::var("OWS_PASSPHRASE").ok())
+        .or_else(|| std::env::var("OWX_PASSPHRASE").ok())
         .or_else(|| std::env::var("LWS_PASSPHRASE").ok())
 }
 
@@ -291,22 +360,24 @@ pub(crate) fn load_recipients() -> Result<Vec<String>, CliError> {
 
 /// Validate an API token and return the associated [`ApiKeyFile`].
 ///
-/// 1. Checks the `oc_key_` prefix.
-/// 2. Hashes the token (SHA-256).
-/// 3. Looks up the key file by token hash.
-/// 4. Checks expiry.
+/// Classification rides the shared dual-track model
+/// ([`oc_core::Credential::parse`]): non-token credentials are rejected
+/// before any hashing or lookup. Then:
+/// 1. Hashes the token (SHA-256).
+/// 2. Looks up the key file by token hash (constant-time compare).
+/// 3. Checks expiry.
 ///
 /// Returns the `ApiKeyFile` on success so callers can inspect
 /// `secret_permissions` and `wallet_ids` for fine-grained authorization.
 pub(crate) fn validate_api_token(token: &str) -> Result<oc_core::ApiKeyFile, CliError> {
-    if !token.starts_with(oc_wallet::key_store::TOKEN_PREFIX) {
+    let oc_core::Credential::ApiToken(raw) = oc_core::Credential::parse(token) else {
         return Err(CliError::InvalidArgs(format!(
             "invalid API token — expected '{}' prefix",
-            oc_wallet::key_store::TOKEN_PREFIX
+            oc_core::TOKEN_PREFIX
         )));
-    }
+    };
 
-    let token_hash = oc_wallet::key_store::hash_token(token);
+    let token_hash = oc_wallet::key_store::hash_token(raw.as_str());
     let key_file = oc_wallet::key_store::load_api_key_by_token_hash(&token_hash, None)?;
 
     // Check expiry.
@@ -355,10 +426,12 @@ pub(crate) fn read_secret_payload_from_stdin() -> Result<SecretPayload, CliError
 
 /// Read a secret value from `ONECIPHER_SECRET` env var or an interactive prompt.
 ///
-/// The env var is cleared immediately after reading (via `clear_env_var`).
+/// The env var is drained burn-after-reading via [`take_env`].
 /// When stdin is a terminal, a prompt is printed to stderr before reading.
+/// Under agent JSON mode there is no prompt: a missing env var fails
+/// closed with an explicit error (single stdout stream downstream).
 pub(crate) fn read_secret_from_env_or_prompt() -> Result<String, CliError> {
-    if let Some(value) = clear_env_var("ONECIPHER_SECRET") {
+    if let Some(value) = take_env("ONECIPHER_SECRET") {
         let trimmed = value.trim().to_string();
         if !trimmed.is_empty() {
             return Ok(trimmed);
@@ -439,7 +512,103 @@ pub(crate) fn parse_metadata(meta: &[String]) -> Result<SecretMetadata, CliError
     Ok(metadata)
 }
 
-/// Print data as a QR code in the terminal.
+/// Print data as a QR code in the terminal (D11).
+///
+/// Rendering uses half-block characters (`▀`/`▄`/`█` + space) via `qr2term`,
+/// which packs two QR rows per terminal row. This is an OPTIONAL display
+/// feature behind the `qr` cargo feature (on by default).
+///
+/// Fail-safety: QR generation can fail (payload exceeds the QR capacity,
+/// terminal too narrow, non-UTF8). A QR failure MUST NEVER fail the command —
+/// the secret was already retrieved successfully. On any error (or when built
+/// with `--no-default-features` without `qr`) we warn to stderr and fall back
+/// to printing the plaintext payload, then return `Ok`.
 pub(crate) fn print_qr(data: &str) -> Result<(), CliError> {
-    qr2term::print_qr(data).map_err(|e| CliError::InvalidArgs(format!("QR generation failed: {e}")))
+    #[cfg(feature = "qr")]
+    {
+        if let Err(e) = qr2term::print_qr(data) {
+            eprintln!("warn: QR rendering failed ({e}); falling back to plaintext");
+            println!("{data}");
+        }
+        return Ok(());
+    }
+    #[cfg(not(feature = "qr"))]
+    {
+        eprintln!("warn: QR support not compiled in; printing plaintext instead");
+        println!("{data}");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod qr_tests {
+    use super::print_qr;
+
+    #[test]
+    fn print_qr_never_fails_on_oversize_payload() {
+        // D11: silent-fail, never explode — even a payload far beyond QR
+        // capacity must return Ok (plaintext fallback).
+        let huge = "X".repeat(10_000);
+        assert!(print_qr(&huge).is_ok());
+        assert!(print_qr("").is_ok());
+        assert!(print_qr("hello-qr").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod take_env_tests {
+    use super::{take_env, take_first_env, take_passphrase};
+    use crate::test_util::{HOME_LOCK, remove_env, set_env};
+
+    #[test]
+    fn take_env_reads_then_removes() {
+        let _lock = HOME_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_env("OC_TAKE_ENV_PROBE", "s3cr3t");
+        assert_eq!(take_env("OC_TAKE_ENV_PROBE").as_deref(), Some("s3cr3t"));
+        // Second take sees nothing: burn-after-reading.
+        assert_eq!(take_env("OC_TAKE_ENV_PROBE"), None);
+        assert!(std::env::var("OC_TAKE_ENV_PROBE").is_err());
+    }
+
+    #[test]
+    fn take_env_missing_is_none() {
+        let _lock = HOME_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        remove_env("OC_TAKE_ENV_ABSENT");
+        assert_eq!(take_env("OC_TAKE_ENV_ABSENT"), None);
+    }
+
+    #[test]
+    fn take_first_env_prefers_first_and_drains_all() {
+        let _lock = HOME_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        set_env("OC_TAKE_FIRST_A", "first");
+        set_env("OC_TAKE_FIRST_B", "second");
+        assert_eq!(
+            take_first_env(&["OC_TAKE_FIRST_A", "OC_TAKE_FIRST_B"]).as_deref(),
+            Some("first")
+        );
+        // Both aliases are drained, not just the winner.
+        assert!(std::env::var("OC_TAKE_FIRST_A").is_err());
+        assert!(std::env::var("OC_TAKE_FIRST_B").is_err());
+    }
+
+    #[test]
+    fn take_passphrase_supports_short_aliases() {
+        let _lock = HOME_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        for name in [
+            "ONECIPHER_PASSPHRASE",
+            "OC_PASSPHRASE",
+            "OWS_PASSPHRASE",
+            "OWX_PASSPHRASE",
+            "LWS_PASSPHRASE",
+        ] {
+            remove_env(name);
+        }
+        set_env("OWX_PASSPHRASE", "alias-pass");
+        assert_eq!(take_passphrase().as_deref(), Some("alias-pass"));
+        assert!(std::env::var("OWX_PASSPHRASE").is_err());
+        set_env("OC_PASSPHRASE", "short-pass");
+        assert_eq!(take_passphrase().as_deref(), Some("short-pass"));
+        assert!(std::env::var("OC_PASSPHRASE").is_err());
+        assert_eq!(take_passphrase(), None);
+    }
 }

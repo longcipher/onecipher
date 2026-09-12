@@ -1,0 +1,79 @@
+# cargo-deny configuration (supply-chain gate).
+#
+# Every `skip` / `ignore` below carries a dated rationale + owner + expiry.
+# A bare skip without a comment is a CI failure by policy (reviewers: check
+# `cargo deny check` output cites the line below). Revisit expiries weekly via
+# the `security.yml` scheduled run.
+
+[graph]
+targets = [
+  # Host CI + release builds. The `thumbv7m-none-eabi` pilot (A13) is NOT in
+  # the deny graph yet: `oc-signer --no-default-features` is host-checked only
+  # until each dependency's `std` gate is audited.
+  "x86_64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+]
+
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/RustSec/advisory-db"]
+yanked = "warn"
+# NOTE: no `ignore` entries today. Template for the next one:
+# [[advisories.ignore]]
+# crate = "<name>"
+# version = "<req>"
+# reason = "<dated rationale + owner + expiry, e.g. 2026-09 A10: ...; expires 2026-12>"
+# advisory = "RUSTSEC-...."
+
+[licenses]
+version = 2
+allow = [
+  # Workspace standard: Apache-2.0 only (see root Cargo.toml `license`).
+  "Apache-2.0",
+  # Unavoidable transitive OSI licenses below — each with a dated rationale.
+  # Ring/rustls stack (MIT/ISC/BSD family) is pulled by `hpx` + `rustls`:
+  "MIT",
+  "ISC",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  # Unicode tables (`unicode-ident`) are Unicode-3.0 licensed:
+  "Unicode-3.0",
+  # `bip39` wordlists + `ed25519` refs carry CC0-1.0 / public-domain dedications:
+  "CC0-1.0",
+  "Unlicense",
+]
+confidence-threshold = 0.8
+# NOTE: no per-crate `exceptions` today. Template:
+# [[licenses.exceptions]]
+# allow = ["MIT"]
+# crate = "<name>"
+# version = "<req>"
+# reason = "<dated rationale + owner + expiry>"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# A10 (2026-09): `bitcoin` 0.32 is the SOLE Bitcoin consensus crate. A second
+# secp256k1/PSBT implementation (e.g. via `secp256k1` standalone or a second
+# `bitcoin` major) would double the signing attack surface — keep denied.
+deny = [
+  # Placeholder for a future duplicate-crypto ban once `cargo-deny` supports
+  # semantic duplicate detection; today `scripts/check-duplicate-deps.sh` owns it.
+]
+# NOTE: no `skip` entries today (no yanked/duplicates waived). Template:
+# [[bans.skip]]
+# crate = "<name>"
+# version = "<req>"
+# reason = "<dated rationale + owner + expiry>"
+# advisory = "RUSTSEC-...."  # only for advisory-driven skips
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# NOTE: no `allow-git` / `allow-registry` entries — all deps come from
+# crates.io. Template for a future pinned git dep:
+# allow-git = ["https://github.com/<org>/<repo>"]  # reason: <dated rationale + expiry>
+
+[features]
+# Intentionally empty: feature unification is enforced by `cargo shear` +
+# `scripts/check-duplicate-deps.sh`, not by cargo-deny.

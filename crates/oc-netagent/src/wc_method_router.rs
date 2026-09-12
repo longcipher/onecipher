@@ -5,9 +5,10 @@
 //! variant, forwarded to the Key-Agent via UDS, and the response is translated
 //! back to a JSON value (or a JSON-RPC error code).
 //!
-//! Note: Intent Layer (`oc_netagent::intent`) is CLI-only and NOT on the WC hot path.
-//! This router forwards signing requests directly to the Key-Agent via UDS frames.
-//! See `docs/design.md` §6.1 Honest status (C2).
+//! Intent hot path: `onecipher_intentSimulate` / `onecipher_intentExecute`
+//! route through `oc_netagent::intent::hot_path` (C13 trait boundary — the
+//! router never sees `HardenedBytes`). The same methods are reachable over the
+//! loopback HTTP-RPC, which shares this router. See `docs/design.md` §6.1.
 
 use std::{
     sync::{
@@ -406,6 +407,35 @@ impl WcMethodRouter {
             .to_string();
         let session_key_id = params.get("session_key_id").and_then(Value::as_str).map(String::from);
         Ok(CommonParams { wallet_id, chain_id, session_key_id })
+    }
+
+    /// Parse hot-path intent params (`onecipher_intentSimulate/Execute`).
+    ///
+    /// Expects `{ chain_id, session_key_id, kind: IntentKind-JSON, rpc_url? }`.
+    /// `wallet_id` (execute only) is validated separately via
+    /// `extract_common_params` so the wallet/checkout binding stays explicit.
+    fn parse_intent_params(
+        params: &Value,
+    ) -> Result<(crate::intent::Intent, crate::intent::HotPathConfig), (JsonRpcErrorCode, String)>
+    {
+        let chain_id = params
+            .get("chain_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into()))?
+            .to_string();
+        let session_key_id = params
+            .get("session_key_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| (JsonRpcErrorCode::UnsupportedMethod, "missing session_key_id".into()))?
+            .to_string();
+        let kind_value = params.get("kind").ok_or_else(|| {
+            (JsonRpcErrorCode::UnsupportedMethod, "missing kind (IntentKind JSON)".into())
+        })?;
+        let kind: crate::intent::IntentKind = serde_json::from_value(kind_value.clone())
+            .map_err(|e| (JsonRpcErrorCode::UnsupportedMethod, format!("invalid kind: {e}")))?;
+        let intent = crate::intent::Intent::new(kind, chain_id, session_key_id);
+        let rpc_url = params.get("rpc_url").and_then(Value::as_str).map(String::from);
+        Ok((intent, crate::intent::HotPathConfig::new(rpc_url)))
     }
 
     /// Pre-signing policy evaluation (W2.1).
@@ -1063,6 +1093,125 @@ impl WalletMethodHandler for WcMethodRouter {
                          HTTP-RPC or CLI surface"
                             .into(),
                     ))
+                }
+
+                // Intent hot path (Stage3): `simulate`/`execute_intent` via the
+                // C13 trait boundary. Signing goes through the Key-Agent over
+                // UDS — this router never sees `HardenedBytes`. The same
+                // methods are reachable over the loopback HTTP-RPC (`POST
+                // /rpc`), which shares this router. `CrossChainTransfer`
+                // stays fail-closed (`Unsupported`, no bridge yet).
+                "onecipher_intentSimulate" => {
+                    let (intent, cfg) = Self::parse_intent_params(&params)?;
+                    let rpc = crate::intent::hot_path::select_rpc_client(&intent.chain_id, &cfg)
+                        .map_err(|e| {
+                            (JsonRpcErrorCode::Internal, format!("intent RPC unavailable: {e}"))
+                        })?;
+                    let summary = crate::intent::hot_path::simulate_for_hot_path(&intent, &*rpc)
+                        .await
+                        .map_err(|e| {
+                            (JsonRpcErrorCode::Internal, format!("intent simulate: {e}"))
+                        })?;
+                    Ok(serde_json::to_value(&summary).map_err(|e| {
+                        (JsonRpcErrorCode::Internal, format!("summary encode: {e}"))
+                    })?)
+                }
+
+                "onecipher_intentExecute" => {
+                    // Auth-class: Passkey proof required (same gate as other
+                    // signing RPCs).
+                    let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
+                        (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
+                    })?;
+                    let (intent, cfg) = Self::parse_intent_params(&params)?;
+                    let common = Self::extract_common_params(&params)?;
+                    let from_address = params
+                        .get("from_address")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing from_address".into())
+                        })?
+                        .to_string();
+                    // Pre-signing policy evaluation (same W2.1 gate as raw signing).
+                    let (risk, risk_reasons) =
+                        self.policy_evaluate_signing(&method, &params, &common.chain_id)?;
+                    self.maybe_gate_approval(
+                        &method,
+                        &params,
+                        dapp_name,
+                        dapp_origin,
+                        &common.chain_id,
+                        risk,
+                        risk_reasons,
+                        None,
+                    )
+                    .await?;
+                    let rpc = crate::intent::hot_path::select_rpc_client(&intent.chain_id, &cfg)
+                        .map_err(|e| {
+                            (JsonRpcErrorCode::Internal, format!("intent RPC unavailable: {e}"))
+                        })?;
+                    // C13 signer: forward the unsigned bytes to the Key-Agent
+                    // `SignTransaction` path over UDS. `block_in_place` bridges
+                    // the sync `execute_intent` signer closure onto this async
+                    // worker (daemon uses a multi-thread runtime).
+                    let key_agent = self.key_agent.clone();
+                    let wallet_id = common.wallet_id.clone();
+                    let chain_id = common.chain_id.clone();
+                    let session_key_id = common.session_key_id.unwrap_or_default();
+                    let result = crate::intent::hot_path::execute_for_hot_path(
+                        &intent,
+                        &*rpc,
+                        &from_address,
+                        &|key_ref: &crate::intent::SigningKeyRef, unsigned_tx: &[u8]| {
+                            let _ = key_ref;
+                            let req = SignTransactionRequest {
+                                session_key_id: session_key_id.clone(),
+                                wallet_id: wallet_id.clone(),
+                                chain_id: chain_id.clone(),
+                                raw_tx_hex: format!("0x{}", hex::encode(unsigned_tx)),
+                                auth: Some(auth.clone()),
+                            };
+                            let kind = KeyAgentRequestKind::SignTransaction(req);
+                            let resp: KeyAgentResponse = tokio::task::block_in_place(|| {
+                                tokio::runtime::Handle::current()
+                                    .block_on(key_agent.send(&KeyAgentRequest { kind: Some(kind) }))
+                            })
+                            .map_err(|e| {
+                                crate::intent::IntentError::Execution(format!(
+                                    "key-agent sign: {e}"
+                                ))
+                            })?;
+                            match resp.kind {
+                                Some(KeyAgentResponseKind::Ok(b)) => {
+                                    let decoded: oc_keyagent::proto::SignTransactionResponse =
+                                        Message::decode(b.as_slice()).map_err(|e| {
+                                            crate::intent::IntentError::Execution(format!(
+                                                "sign decode: {e}"
+                                            ))
+                                        })?;
+                                    hex::decode(decoded.signed_tx_hex.trim_start_matches("0x"))
+                                        .map_err(|e| {
+                                            crate::intent::IntentError::Execution(format!(
+                                                "signed hex: {e}"
+                                            ))
+                                        })
+                                }
+                                Some(KeyAgentResponseKind::Deny(_)) => Err(
+                                    crate::intent::IntentError::Execution("policy denied".into()),
+                                ),
+                                Some(KeyAgentResponseKind::Error(msg)) => Err(
+                                    crate::intent::IntentError::Execution(format!("signer: {msg}")),
+                                ),
+                                None => Err(crate::intent::IntentError::Execution(
+                                    "empty key-agent response".into(),
+                                )),
+                            }
+                        },
+                    )
+                    .await
+                    .map_err(|e| (JsonRpcErrorCode::Internal, format!("intent execute: {e}")))?;
+                    Ok(serde_json::to_value(&result)
+                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("result encode: {e}")))?)
                 }
 
                 _ => {

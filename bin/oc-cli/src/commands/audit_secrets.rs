@@ -68,8 +68,8 @@ pub(crate) fn run(format: &str, max_age: u64, skip_hibp: bool) -> Result<(), Cli
         };
         let password = &payload.secret;
 
-        // Strength check.
-        if let Some(reason) = check_strength(password) {
+        // Strength check (shared library policy — never re-implemented here).
+        if let Some(reason) = oc_secret::password_strength(password) {
             weak.push(WeakFinding { name: idx_entry.name.clone(), reason });
         }
 
@@ -95,41 +95,9 @@ pub(crate) fn run(format: &str, max_age: u64, skip_hibp: bool) -> Result<(), Cli
     }
 }
 
-// ── Strength check ────────────────────────────────────────────────────────
-
 struct WeakFinding {
     name: String,
     reason: String,
-}
-
-/// Returns `Some(reason)` if the password is weak, `None` if it passes.
-fn check_strength(password: &str) -> Option<String> {
-    let len = password.chars().count();
-    let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
-    let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
-    let has_digit = password.chars().any(|c| c.is_ascii_digit());
-    let has_special = password.chars().any(|c| !c.is_ascii_alphanumeric());
-
-    if len < 12 {
-        return Some(format!("too short ({len} chars, minimum 12)"));
-    }
-    let mut missing = Vec::new();
-    if !has_upper {
-        missing.push("uppercase");
-    }
-    if !has_lower {
-        missing.push("lowercase");
-    }
-    if !has_digit {
-        missing.push("digit");
-    }
-    if !has_special {
-        missing.push("special char");
-    }
-    if !missing.is_empty() {
-        return Some(format!("missing: {}", missing.join(", ")));
-    }
-    None
 }
 
 // ── Duplicate detection ───────────────────────────────────────────────────

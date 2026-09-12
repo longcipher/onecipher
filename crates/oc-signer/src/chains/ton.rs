@@ -20,15 +20,52 @@ const WALLET_V5R1_CODE_HASH: [u8; 32] = [
 /// Wallet v5r1 code cell depth.
 const WALLET_V5R1_CODE_DEPTH: u16 = 6;
 
+/// TON display configuration: pure address formatting, never the key.
+///
+/// `--testnet` selects the testnet `walletId` (hence a different state hash
+/// for the same ed25519 key, but the private key itself is unchanged);
+/// `--bounceable` flips only the tag byte (`0x11` vs `0x51`);
+/// `--workchain` sets only the workchain byte in the user-friendly encoding.
+/// Bounceable/workchain leave the state hash byte-identical; testnet changes
+/// the state hash via `walletId` but never the seed. All three are display
+/// concerns layered on top of one key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TonDisplayConfig {
+    /// Use testnet `walletId` (`-3`) instead of mainnet (`-239`).
+    pub testnet: bool,
+    /// Bounceable tag (`0x11`) vs non-bounceable (`0x51`).
+    pub bounceable: bool,
+    /// Workchain byte in the user-friendly encoding (usually `0`).
+    pub workchain: i8,
+}
+
+impl Default for TonDisplayConfig {
+    /// Mainnet, non-bounceable, workchain 0 (matches `derive_address`).
+    fn default() -> Self {
+        Self { testnet: false, bounceable: false, workchain: 0 }
+    }
+}
+
+impl TonDisplayConfig {
+    /// Mainnet default (same as `derive_address`).
+    #[must_use]
+    pub const fn mainnet() -> Self {
+        Self { testnet: false, bounceable: false, workchain: 0 }
+    }
+}
+
 /// Default walletId for mainnet workchain 0.
 /// Computed as: networkGlobalId(-239) XOR context(0x80000000)
 /// context = 1(1b) + workchain(0, 8b) + version(0, 8b) + subwalletNumber(0, 15b)
 const DEFAULT_WALLET_ID: i32 = 0x7FFFFF11u32 as i32;
 
+/// Testnet `walletId`: networkGlobalId(`-3`) XOR context(`0x80000000`).
+const TESTNET_WALLET_ID: i32 = 0x7FFFFFFDu32 as i32;
+
 impl TonSigner {
     fn signing_key(private_key: &[u8]) -> Result<SigningKey, SignerError> {
         let key_bytes: [u8; 32] = private_key.try_into().map_err(|_| {
-            SignerError::InvalidPrivateKey(format!("expected 32 bytes, got {}", private_key.len()))
+            SignerError::Input(format!("expected 32 bytes, got {}", private_key.len()))
         })?;
         Ok(SigningKey::from_bytes(&key_bytes))
     }
@@ -137,19 +174,97 @@ impl TonSigner {
 
     /// Encode a TON user-friendly address (base64url with CRC16).
     fn encode_address(workchain: i8, hash: &[u8; 32], bounceable: bool) -> String {
-        use base64::Engine;
-        let tag: u8 = if bounceable { 0x11 } else { 0x51 };
+        Self::format_address(hash, TonDisplayConfig { testnet: false, bounceable, workchain })
+    }
 
+    /// Key part: state-init hash for a public key under a `walletId`.
+    ///
+    /// Pure key derivation (no display flags). `testnet` selects
+    /// [`TESTNET_WALLET_ID`] vs [`DEFAULT_WALLET_ID`]; the ed25519 key is
+    /// unchanged either way.
+    #[must_use]
+    pub fn state_hash_for_pubkey(public_key: &[u8; 32], testnet: bool) -> [u8; 32] {
+        let wallet_id = if testnet { TESTNET_WALLET_ID } else { DEFAULT_WALLET_ID };
+        let data_hash = Self::data_cell_hash_with_wallet_id(public_key, wallet_id);
+        Self::state_init_hash(&WALLET_V5R1_CODE_HASH, WALLET_V5R1_CODE_DEPTH, &data_hash)
+    }
+
+    /// Key part for the default (mainnet) `walletId`.
+    #[must_use]
+    pub fn state_hash_for_pubkey_mainnet(public_key: &[u8; 32]) -> [u8; 32] {
+        Self::state_hash_for_pubkey(public_key, false)
+    }
+
+    /// Data cell hash parameterized by `wallet_id` (testnet/mainnet split).
+    fn data_cell_hash_with_wallet_id(public_key: &[u8; 32], wallet_id: i32) -> [u8; 32] {
+        let wallet_id_bytes = wallet_id.to_be_bytes();
+        // Bit layout identical to `data_cell_hash`, with `wallet_id` swapped.
+        let mut bits = Vec::with_capacity(328);
+        bits.push(1u8);
+        bits.extend(std::iter::repeat_n(0u8, 32));
+        for &b in &wallet_id_bytes {
+            for shift in (0..8).rev() {
+                bits.push((b >> shift) & 1);
+            }
+        }
+        for &b in public_key {
+            for shift in (0..8).rev() {
+                bits.push((b >> shift) & 1);
+            }
+        }
+        bits.push(0);
+        bits.push(1);
+        while bits.len() % 8 != 0 {
+            bits.push(0);
+        }
+        let mut data_bytes = Vec::with_capacity(bits.len() / 8);
+        for chunk in bits.chunks(8) {
+            let mut byte = 0u8;
+            for (i, &bit) in chunk.iter().enumerate() {
+                byte |= bit << (7 - i);
+            }
+            data_bytes.push(byte);
+        }
+        let mut repr = Vec::with_capacity(2 + data_bytes.len());
+        repr.push(0u8);
+        repr.push(81u8);
+        repr.extend_from_slice(&data_bytes);
+        Sha256::digest(&repr).into()
+    }
+
+    /// Display part: format a state hash under `config` (pure formatting).
+    ///
+    /// Bounceable/workchain affect only the tag/workchain bytes + CRC; the
+    /// state hash (key part) is passed through unchanged. `testnet` is
+    /// accepted for API symmetry but does NOT alter encoding (it already
+    /// selected the `walletId` in [`Self::state_hash_for_pubkey`]).
+    #[must_use]
+    pub fn format_address(state_hash: &[u8; 32], config: TonDisplayConfig) -> String {
+        use base64::Engine;
+        let tag: u8 = if config.bounceable { 0x11 } else { 0x51 };
         let mut addr = Vec::with_capacity(36);
         addr.push(tag);
-        addr.push(workchain as u8);
-        addr.extend_from_slice(hash);
-
+        addr.push(config.workchain as u8);
+        addr.extend_from_slice(state_hash);
         let crc = crc16_ccitt(&addr);
         addr.push((crc >> 8) as u8);
         addr.push(crc as u8);
-
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&addr)
+    }
+
+    /// Full pipeline with explicit display config (key + display).
+    ///
+    /// # Errors
+    ///
+    /// Forwards [`SignerError`] for bad private keys.
+    pub fn derive_address_with_config(
+        private_key: &[u8],
+        config: TonDisplayConfig,
+    ) -> Result<String, SignerError> {
+        let signing_key = Self::signing_key(private_key)?;
+        let verifying_key: VerifyingKey = signing_key.verifying_key();
+        let state_hash = Self::state_hash_for_pubkey(verifying_key.as_bytes(), config.testnet);
+        Ok(Self::format_address(&state_hash, config))
     }
 }
 
@@ -343,5 +458,70 @@ mod tests {
     fn test_crc16() {
         let data = b"123456789";
         assert_eq!(crc16_ccitt(data), 0x31C3);
+    }
+
+    #[test]
+    fn test_display_flags_do_not_change_key() {
+        // Same seed, different display configs: the ed25519 key (hence the
+        // public key) is identical; only the encoding differs. Decode each
+        // address and compare the embedded state hash (bytes 2..34).
+        use base64::Engine;
+        let key = test_privkey();
+        let seed: [u8; 32] = key.try_into().unwrap();
+        let pubkey = *SigningKey::from_bytes(&seed).verifying_key().as_bytes();
+
+        let main =
+            TonSigner::derive_address_with_config(&seed, TonDisplayConfig::mainnet()).unwrap();
+        let bounceable = TonSigner::derive_address_with_config(
+            &seed,
+            TonDisplayConfig { testnet: false, bounceable: true, workchain: 0 },
+        )
+        .unwrap();
+        let workchain1 = TonSigner::derive_address_with_config(
+            &seed,
+            TonDisplayConfig { testnet: false, bounceable: false, workchain: 1 },
+        )
+        .unwrap();
+
+        assert_ne!(main, bounceable);
+        assert_ne!(main, workchain1);
+
+        let dec_main = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&main).unwrap();
+        let dec_bounce =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&bounceable).unwrap();
+        let dec_wc1 = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(&workchain1).unwrap();
+
+        // Same state hash (key part) across bounceable/workchain variants.
+        assert_eq!(&dec_main[2..34], &dec_bounce[2..34]);
+        assert_eq!(&dec_main[2..34], &dec_wc1[2..34]);
+        // Display bytes differ as configured.
+        assert_eq!(dec_main[0], 0x51);
+        assert_eq!(dec_bounce[0], 0x11);
+        assert_eq!(dec_main[1], 0x00);
+        assert_eq!(dec_wc1[1], 0x01);
+        // The state hash matches the key-part helper (public key unchanged).
+        assert_eq!(&dec_main[2..34], &TonSigner::state_hash_for_pubkey(&pubkey, false));
+    }
+
+    #[test]
+    fn test_testnet_changes_wallet_id_not_key() {
+        // Testnet selects a different `walletId`, hence a different state
+        // hash, but the ed25519 public key is unchanged.
+        let key = test_privkey();
+        let seed: [u8; 32] = key.try_into().unwrap();
+        let pubkey = *SigningKey::from_bytes(&seed).verifying_key().as_bytes();
+
+        let main_hash = TonSigner::state_hash_for_pubkey(&pubkey, false);
+        let test_hash = TonSigner::state_hash_for_pubkey(&pubkey, true);
+        assert_ne!(main_hash, test_hash);
+
+        let main =
+            TonSigner::derive_address_with_config(&seed, TonDisplayConfig::mainnet()).unwrap();
+        let test = TonSigner::derive_address_with_config(
+            &seed,
+            TonDisplayConfig { testnet: true, bounceable: false, workchain: 0 },
+        )
+        .unwrap();
+        assert_ne!(main, test);
     }
 }

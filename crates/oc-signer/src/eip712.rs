@@ -29,46 +29,42 @@ pub struct Field {
 
 /// Parse JSON string into TypedData.
 pub fn parse_typed_data(json: &str) -> Result<TypedData, SignerError> {
-    let v: Value =
-        serde_json::from_str(json).map_err(|e| SignerError::InvalidMessage(e.to_string()))?;
+    let v: Value = serde_json::from_str(json).map_err(|e| SignerError::Input(e.to_string()))?;
 
-    let types_val = v
-        .get("types")
-        .ok_or_else(|| SignerError::InvalidMessage("missing 'types' field".into()))?;
+    let types_val =
+        v.get("types").ok_or_else(|| SignerError::Input("missing 'types' field".into()))?;
     let primary_type = v
         .get("primaryType")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| SignerError::InvalidMessage("missing 'primaryType' field".into()))?
+        .ok_or_else(|| SignerError::Input("missing 'primaryType' field".into()))?
         .to_string();
-    let domain = v
-        .get("domain")
-        .ok_or_else(|| SignerError::InvalidMessage("missing 'domain' field".into()))?
-        .clone();
+    let domain =
+        v.get("domain").ok_or_else(|| SignerError::Input("missing 'domain' field".into()))?.clone();
     let message = v
         .get("message")
-        .ok_or_else(|| SignerError::InvalidMessage("missing 'message' field".into()))?
+        .ok_or_else(|| SignerError::Input("missing 'message' field".into()))?
         .clone();
 
     let types_obj = types_val
         .as_object()
-        .ok_or_else(|| SignerError::InvalidMessage("'types' must be an object".into()))?;
+        .ok_or_else(|| SignerError::Input("'types' must be an object".into()))?;
 
     let mut types = HashMap::new();
     for (type_name, fields_val) in types_obj {
-        let fields_arr = fields_val.as_array().ok_or_else(|| {
-            SignerError::InvalidMessage(format!("type '{type_name}' must be an array"))
-        })?;
+        let fields_arr = fields_val
+            .as_array()
+            .ok_or_else(|| SignerError::Input(format!("type '{type_name}' must be an array")))?;
         let mut fields = Vec::new();
         for f in fields_arr {
             let name = f
                 .get("name")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| SignerError::InvalidMessage("field missing 'name'".into()))?
+                .ok_or_else(|| SignerError::Input("field missing 'name'".into()))?
                 .to_string();
             let tn = f
                 .get("type")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| SignerError::InvalidMessage("field missing 'type'".into()))?
+                .ok_or_else(|| SignerError::Input("field missing 'type'".into()))?
                 .to_string();
             fields.push(Field { name, type_name: tn });
         }
@@ -125,7 +121,7 @@ fn encode_type(
 ) -> Result<String, SignerError> {
     let fields = types
         .get(type_name)
-        .ok_or_else(|| SignerError::InvalidMessage(format!("unknown type: {type_name}")))?;
+        .ok_or_else(|| SignerError::Input(format!("unknown type: {type_name}")))?;
 
     // Collect all referenced struct types (transitive)
     let mut referenced = BTreeSet::new();
@@ -173,11 +169,11 @@ fn encode_data(
 ) -> Result<Vec<u8>, SignerError> {
     let fields = types
         .get(type_name)
-        .ok_or_else(|| SignerError::InvalidMessage(format!("unknown type: {type_name}")))?;
+        .ok_or_else(|| SignerError::Input(format!("unknown type: {type_name}")))?;
 
     let obj = data
         .as_object()
-        .ok_or_else(|| SignerError::InvalidMessage(format!("expected object for {type_name}")))?;
+        .ok_or_else(|| SignerError::Input(format!("expected object for {type_name}")))?;
 
     let mut encoded = Vec::new();
 
@@ -199,9 +195,9 @@ fn encode_value(
     // Array types
     if type_name.ends_with(']') {
         let base = base_type(type_name);
-        let arr = value.as_array().ok_or_else(|| {
-            SignerError::InvalidMessage(format!("expected array for {type_name}"))
-        })?;
+        let arr = value
+            .as_array()
+            .ok_or_else(|| SignerError::Input(format!("expected array for {type_name}")))?;
         let mut inner = Vec::new();
         for item in arr {
             let word = encode_value(base, item, types)?;
@@ -228,12 +224,12 @@ fn encode_atomic(type_name: &str, value: &Value) -> Result<[u8; 32], SignerError
         "address" => {
             let s = value
                 .as_str()
-                .ok_or_else(|| SignerError::InvalidMessage("address must be a string".into()))?;
+                .ok_or_else(|| SignerError::Input("address must be a string".into()))?;
             let s = s.strip_prefix("0x").unwrap_or(s);
-            let bytes = hex::decode(s)
-                .map_err(|e| SignerError::InvalidMessage(format!("bad address hex: {e}")))?;
+            let bytes =
+                hex::decode(s).map_err(|e| SignerError::Input(format!("bad address hex: {e}")))?;
             if bytes.len() != 20 {
-                return Err(SignerError::InvalidMessage(format!(
+                return Err(SignerError::Input(format!(
                     "address must be 20 bytes, got {}",
                     bytes.len()
                 )));
@@ -243,9 +239,9 @@ fn encode_atomic(type_name: &str, value: &Value) -> Result<[u8; 32], SignerError
         }
 
         "bool" => {
-            let b = value.as_bool().ok_or_else(|| {
-                SignerError::InvalidMessage("bool field must be a boolean".into())
-            })?;
+            let b = value
+                .as_bool()
+                .ok_or_else(|| SignerError::Input("bool field must be a boolean".into()))?;
             if b {
                 word[31] = 1;
             }
@@ -255,38 +251,35 @@ fn encode_atomic(type_name: &str, value: &Value) -> Result<[u8; 32], SignerError
         "string" => {
             let s = value
                 .as_str()
-                .ok_or_else(|| SignerError::InvalidMessage("string must be a string".into()))?;
+                .ok_or_else(|| SignerError::Input("string must be a string".into()))?;
             Ok(Keccak256::digest(s.as_bytes()).into())
         }
 
         "bytes" => {
             let s = value
                 .as_str()
-                .ok_or_else(|| SignerError::InvalidMessage("bytes must be a hex string".into()))?;
+                .ok_or_else(|| SignerError::Input("bytes must be a hex string".into()))?;
             let s = s.strip_prefix("0x").unwrap_or(s);
-            let bytes = hex::decode(s)
-                .map_err(|e| SignerError::InvalidMessage(format!("bad bytes hex: {e}")))?;
+            let bytes =
+                hex::decode(s).map_err(|e| SignerError::Input(format!("bad bytes hex: {e}")))?;
             Ok(Keccak256::digest(&bytes).into())
         }
 
         t if t.starts_with("bytes") => {
             // bytesN (1..=32)
-            let n: usize = t[5..]
-                .parse()
-                .map_err(|_| SignerError::InvalidMessage(format!("invalid type: {t}")))?;
+            let n: usize =
+                t[5..].parse().map_err(|_| SignerError::Input(format!("invalid type: {t}")))?;
             if !(1..=32).contains(&n) {
-                return Err(SignerError::InvalidMessage(format!(
-                    "bytesN: N must be 1..32, got {n}"
-                )));
+                return Err(SignerError::Input(format!("bytesN: N must be 1..32, got {n}")));
             }
             let s = value
                 .as_str()
-                .ok_or_else(|| SignerError::InvalidMessage(format!("{t} must be a hex string")))?;
+                .ok_or_else(|| SignerError::Input(format!("{t} must be a hex string")))?;
             let s = s.strip_prefix("0x").unwrap_or(s);
-            let bytes = hex::decode(s)
-                .map_err(|e| SignerError::InvalidMessage(format!("bad {t} hex: {e}")))?;
+            let bytes =
+                hex::decode(s).map_err(|e| SignerError::Input(format!("bad {t} hex: {e}")))?;
             if bytes.len() != n {
-                return Err(SignerError::InvalidMessage(format!(
+                return Err(SignerError::Input(format!(
                     "{t} must be {n} bytes, got {}",
                     bytes.len()
                 )));
@@ -297,11 +290,10 @@ fn encode_atomic(type_name: &str, value: &Value) -> Result<[u8; 32], SignerError
         }
 
         t if t.starts_with("uint") => {
-            let bits: usize = t[4..]
-                .parse()
-                .map_err(|_| SignerError::InvalidMessage(format!("invalid type: {t}")))?;
+            let bits: usize =
+                t[4..].parse().map_err(|_| SignerError::Input(format!("invalid type: {t}")))?;
             if bits == 0 || bits > 256 || !bits.is_multiple_of(8) {
-                return Err(SignerError::InvalidMessage(format!("invalid uint width: {bits}")));
+                return Err(SignerError::Input(format!("invalid uint width: {bits}")));
             }
             let bytes = parse_uint_value(value)?;
             let len = bytes.len().min(32);
@@ -310,11 +302,10 @@ fn encode_atomic(type_name: &str, value: &Value) -> Result<[u8; 32], SignerError
         }
 
         t if t.starts_with("int") => {
-            let bits: usize = t[3..]
-                .parse()
-                .map_err(|_| SignerError::InvalidMessage(format!("invalid type: {t}")))?;
+            let bits: usize =
+                t[3..].parse().map_err(|_| SignerError::Input(format!("invalid type: {t}")))?;
             if bits == 0 || bits > 256 || !bits.is_multiple_of(8) {
-                return Err(SignerError::InvalidMessage(format!("invalid int width: {bits}")));
+                return Err(SignerError::Input(format!("invalid int width: {bits}")));
             }
             // For signed ints, we parse the same way but interpret as two's complement.
             // JSON typically provides them as decimal strings.
@@ -323,7 +314,7 @@ fn encode_atomic(type_name: &str, value: &Value) -> Result<[u8; 32], SignerError
             Ok(word)
         }
 
-        _ => Err(SignerError::InvalidMessage(format!("unsupported EIP-712 type: {type_name}"))),
+        _ => Err(SignerError::Input(format!("unsupported EIP-712 type: {type_name}"))),
     }
 }
 
@@ -335,18 +326,18 @@ fn parse_uint_value(value: &Value) -> Result<Vec<u8>, SignerError> {
     if let Some(s) = value.as_str() {
         if let Some(hex_str) = s.strip_prefix("0x") {
             let bytes = hex::decode(hex_str)
-                .map_err(|e| SignerError::InvalidMessage(format!("bad uint hex: {e}")))?;
+                .map_err(|e| SignerError::Input(format!("bad uint hex: {e}")))?;
             return Ok(bytes);
         }
         // Decimal string — u128 covers up to ~3.4e38; for larger uint256 values use hex
         let n: u128 = s.parse().map_err(|_| {
-            SignerError::InvalidMessage(format!(
+            SignerError::Input(format!(
                 "uint decimal value '{s}' exceeds u128 range; use hex encoding (0x...) for values > 2^128"
             ))
         })?;
         return Ok(n.to_be_bytes().to_vec());
     }
-    Err(SignerError::InvalidMessage("uint value must be a number or string".into()))
+    Err(SignerError::Input("uint value must be a number or string".into()))
 }
 
 /// Parse a signed integer value. Negative values are stored as two's complement in 32 bytes.
@@ -362,16 +353,15 @@ fn parse_int_value(value: &Value, _bits: usize) -> Result<[u8; 32], SignerError>
     if let Some(s) = value.as_str() {
         if let Some(hex_str) = s.strip_prefix("0x") {
             let bytes = hex::decode(hex_str)
-                .map_err(|e| SignerError::InvalidMessage(format!("bad int hex: {e}")))?;
+                .map_err(|e| SignerError::Input(format!("bad int hex: {e}")))?;
             let start = 32 - bytes.len();
             word[start..].copy_from_slice(&bytes);
             return Ok(word);
         }
         // Decimal string
         if let Some(neg) = s.strip_prefix('-') {
-            let n: u128 = neg
-                .parse()
-                .map_err(|e| SignerError::InvalidMessage(format!("bad int decimal: {e}")))?;
+            let n: u128 =
+                neg.parse().map_err(|e| SignerError::Input(format!("bad int decimal: {e}")))?;
             // Two's complement: negate
             let pos_be = n.to_be_bytes();
             // Put positive value in low 16 bytes, then negate entire 32-byte word
@@ -379,13 +369,12 @@ fn parse_int_value(value: &Value, _bits: usize) -> Result<[u8; 32], SignerError>
             negate_twos_complement(&mut word);
             return Ok(word);
         }
-        let n: u128 =
-            s.parse().map_err(|e| SignerError::InvalidMessage(format!("bad int decimal: {e}")))?;
+        let n: u128 = s.parse().map_err(|e| SignerError::Input(format!("bad int decimal: {e}")))?;
         let be = n.to_be_bytes();
         word[16..].copy_from_slice(&be);
         return Ok(word);
     }
-    Err(SignerError::InvalidMessage("int value must be a number or string".into()))
+    Err(SignerError::Input("int value must be a number or string".into()))
 }
 
 /// Negate a 32-byte big-endian integer in-place (two's complement).

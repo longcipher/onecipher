@@ -189,7 +189,7 @@ const STATE_BLOCK_PREAMBLE: [u8; 32] = {
 ///   + balance (16, big-endian u128) + link (32)
 pub fn hash_state_block(tx_bytes: &[u8]) -> Result<[u8; 32], SignerError> {
     if tx_bytes.len() != 176 {
-        return Err(SignerError::InvalidTransaction(format!(
+        return Err(SignerError::Transaction(format!(
             "state block must be 176 bytes, got {}",
             tx_bytes.len()
         )));
@@ -197,7 +197,7 @@ pub fn hash_state_block(tx_bytes: &[u8]) -> Result<[u8; 32], SignerError> {
 
     // Verify preamble
     if tx_bytes[..32] != STATE_BLOCK_PREAMBLE {
-        return Err(SignerError::InvalidTransaction(
+        return Err(SignerError::Transaction(
             "invalid state block preamble (first 32 bytes must be 0x00...06)".into(),
         ));
     }
@@ -241,7 +241,7 @@ impl NanoSigner {
     /// Standard Ed25519 uses SHA-512 here; Nano uses blake2b-512.
     fn expand_secret_key(private_key: &[u8]) -> Result<ExpandedSecretKey, SignerError> {
         let key_bytes: [u8; 32] = private_key.try_into().map_err(|_| {
-            SignerError::InvalidPrivateKey(format!("expected 32 bytes, got {}", private_key.len()))
+            SignerError::Input(format!("expected 32 bytes, got {}", private_key.len()))
         })?;
 
         let mut hasher = Blake2b512::new();
@@ -255,6 +255,14 @@ impl NanoSigner {
     fn verifying_key(private_key: &[u8]) -> Result<VerifyingKey, SignerError> {
         let esk = Self::expand_secret_key(private_key)?;
         Ok(VerifyingKey::from(&esk))
+    }
+
+    /// Public-key bytes for the `Account` newtype layer (A9).
+    ///
+    /// Same as [`Self::verifying_key`] but returns the raw 32 bytes so
+    /// `account.rs` need not depend on ed25519-dalek types.
+    pub(crate) fn verifying_key_for_account(private_key: &[u8]) -> Result<[u8; 32], SignerError> {
+        Ok(*Self::verifying_key(private_key)?.as_bytes())
     }
 }
 
@@ -304,7 +312,7 @@ impl ChainSigner for NanoSigner {
         _private_key: &[u8],
         _message: &[u8],
     ) -> Result<SignOutput, SignerError> {
-        Err(SignerError::SigningFailed(
+        Err(SignerError::Crypto(
             "Nano off-chain message signing is not supported: no canonical standard exists. \
              Define an ecosystem convention before enabling this."
                 .into(),
@@ -319,12 +327,10 @@ impl ChainSigner for NanoSigner {
         // Nano wire format: 176-byte state block + 64-byte signature = 240 bytes.
         // Work bytes (8 bytes) are added separately by the RPC/broadcast layer.
         if signature.signature.len() != 64 {
-            return Err(SignerError::InvalidTransaction(
-                "expected 64-byte Ed25519 signature".into(),
-            ));
+            return Err(SignerError::Transaction("expected 64-byte Ed25519 signature".into()));
         }
         if tx_bytes.len() != 176 {
-            return Err(SignerError::InvalidTransaction(format!(
+            return Err(SignerError::Transaction(format!(
                 "expected 176-byte state block, got {}",
                 tx_bytes.len()
             )));

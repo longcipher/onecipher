@@ -105,15 +105,16 @@ onecipher wallet export --wallet "my-wallet" --public-key --chain ethereum
 ### `onecipher wallet list` / `wallet info`
 
 ```bash
-onecipher wallet list     # all wallets in the vault
-onecipher wallet info     # vault path and supported chains
+onecipher wallet list            # all wallets in the vault
+onecipher wallet list --json     # machine-readable array
+onecipher wallet info            # vault path and supported chains
 ```
 
 ### `onecipher wallet rename` / `wallet delete`
 
 ```bash
 onecipher wallet rename --wallet old-name --new-name new-name
-onecipher wallet delete --wallet old-name --confirm   # --confirm required
+onecipher wallet delete --wallet old-name --confirm   # --confirm required (--force accepted as alias)
 ```
 
 ### `onecipher wallet change-password`
@@ -337,7 +338,7 @@ Policies can also specify an `executable` field for custom validation — receiv
 ```bash
 onecipher policy list
 onecipher policy show --id base-only
-onecipher policy delete --id base-only --confirm   # --confirm required
+onecipher policy delete --id base-only --confirm   # --confirm required (--force accepted as alias)
 ```
 
 ## Key Commands (API Keys)
@@ -367,7 +368,7 @@ Output includes the raw token (`ows_key_...`) — shown once. The agent uses thi
 
 ```bash
 onecipher key list                                  # tokens are never shown
-onecipher key revoke --id <key-id> --confirm        # --confirm required
+onecipher key revoke --id <key-id> --confirm        # --confirm required (--force accepted as alias)
 ```
 
 ## Session Key Commands
@@ -415,9 +416,9 @@ onecipher audit secrets --skip-hibp      # skip HaveIBeenPwned k-anonymity check
 ```bash
 onecipher vault unlock          # prompts for passphrase
 
-# .ocbk encrypted backup container (XChaCha20-Poly1305)
-onecipher backup export --out backup.ocbk
-onecipher backup import --in backup.ocbk
+# .ocbk age-encrypted backup bundle (multi-X25519-recipient)
+onecipher backup export --out backup.ocbk --recipient <age1...> [--recipient ...]
+onecipher backup import --in backup.ocbk --identity <AGE-SECRET-KEY-1...>
 ```
 
 ## SBOM Commands
@@ -482,8 +483,24 @@ onecipher service status
 ## Secret Vault Commands (Phase 4)
 
 OneCipher doubles as a unified sensitive-data vault: private keys, passwords,
-TOTP seeds, and encrypted notes share one age-encrypted store, one policy
-engine, and one audit log.
+TOTP seeds, and encrypted notes share one age-encrypted store, one handling
+plane (one `SecretKind`, one CRUD, one `--json` envelope, one audit
+taxonomy), one policy engine, and one audit log. Storage stays split
+(`oc-vault` = key bytes, `oc-wallet::ops` = wallet operations, `oc-secret` =
+user secrets) — only the handling plane is unified.
+
+### Unified handling plane
+
+| Concern | Contract |
+|---|---|
+| Kind | `SecretKind`: `wallet_key` / `password` / `totp_seed` / `note` (on-disk `--type` names stay `mnemonic`, `private_key`, `password`, `totp`, `note`, `file`) |
+| Read envelope | `{"name","id","kind","item_type","metadata","generation","payload?"}` from `secret get --json`, `password get --json`, `totp uris --json` |
+| Code emitters | `totp generate` / `totp hotp` / `password generate` print the bare code/password (scriptable `$(...)`); `--json` wraps as `{"name","kind","code"}` |
+| Render | Listings hide secrets by default; `get` / `generate` are the explicit reveal |
+| Destructive gate | `secret` family: `--force`; `wallet` / `policy` / `key`: `--confirm` (`--force` accepted as an alias) |
+| Audit ops | Dotted names (`secret.create`, `password.generate`, `totp.generate`, `wallet.create`, `wallet.sign`, …); signing rides `audit-strong.jsonl`, the rest `audit.jsonl` |
+| OTP | All TOTP/HOTP math lives in `oc_secret::totp` (short 80/96-bit seeds accepted, bare base32 = SHA-1/6-digit/30s); the CLI passes arguments through |
+| Passwords | Generation (`cryptic`/`memorable`/`xkcd`) and strength policy live in `oc_secret::password`; plain `String` exists only at the `--json` serialization boundary (zeroized on drop) |
 
 ### Generic secrets
 
@@ -498,7 +515,7 @@ onecipher secret update notes/recovery --stdin
 onecipher secret rename notes/recovery notes/recovery-v2
 onecipher secret copy notes/recovery-v2 notes/backup [--force]
 onecipher secret move notes/backup notes/archive [--force]
-onecipher secret delete notes/recovery-v2
+onecipher secret delete notes/recovery-v2 --force
 onecipher secret edit notes/recovery [--editor vim]   # edit in $EDITOR
 ```
 
@@ -510,7 +527,7 @@ Supported secret types: `password`, `note`, `totp`, `mnemonic`, `private-key`.
 onecipher password add github/personal --url https://github.com --username alice
 onecipher password add aws/prod --url https://aws.amazon.com --username admin \
   --generate --length 32 --symbols
-onecipher password get github/personal [--copy] [--timeout 45]
+onecipher password get github/personal [--copy] [--timeout 45] [--json]
 
 # Standalone generator: cryptic (default), memorable, or xkcd word phrases
 onecipher password generate --length 24 --symbols
@@ -523,9 +540,9 @@ onecipher password generate --qr
 ```bash
 onecipher totp add discord --otpauth "otpauth://totp/Discord:alice?secret=AAAAAAAAAAAAAAAA&issuer=Discord"
 onecipher totp add github-2fa --secret AAAAAAAAAAAAAAAA --issuer GitHub --account alice
-onecipher totp generate discord [--qr]
-onecipher totp uris discord                 # otpauth URI for backup
-onecipher totp hotp legacy-account --counter 42 --increment
+onecipher totp generate discord [--qr] [--json]
+onecipher totp uris discord [--json]    # otpauth URI for backup
+onecipher totp hotp legacy-account --counter 42 --increment [--json]
 ```
 
 ### age encryption management
@@ -644,7 +661,7 @@ onecipher uninstall --purge   # also remove ~/.onecipher
 ```
 ~/.onecipher/
   wallets/
-    <uuid>.json             # Encrypted wallet (AES-256-GCM-SIV + Argon2id)
+    <uuid>.json             # Encrypted wallet (age scrypt passphrase)
   secrets/
     <tree>/<name>.age       # age-encrypted unified vault entries
   age-identity.txt          # age master identity (created by `age init`)

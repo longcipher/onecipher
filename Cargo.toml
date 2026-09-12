@@ -27,15 +27,27 @@ publish = false
 [workspace.dependencies]
 
 # external crates
-aes-gcm-siv = "0.12.1"
 age = "0.12.1"
 alloy-dyn-abi = "1.7.2"
 arboard = "3.6.1"
-argon2 = "0.6.0"
 axum = "0.8.9"
 backon = "1.6.0"
 base64 = "0.23.1"
 bech32 = "0.12.0"
+# A10 assessment (2026-09): `bitcoin` 0.32 is KEPT, not reduced.
+# Used subset: `Psbt` + `SighashCache::p2wpkh_signature_hash` + `ecdsa::Signature`
+# + `PrivateKey`/`PublicKey` + `ScriptBuf::new_p2wpkh` + bundled `secp256k1`
+# (`SecretKey`, `Message`, `Secp256k1::sign_ecdsa`) + `base64` engine.
+# Reduction was evaluated and rejected: dropping the crate would require
+# re-implementing BIP-174 PSBT parsing, BIP-143 P2WPKH sighash, and ECDSA
+# signing — all consensus-critical code where a hand-rolled copy is strictly
+# riskier than the audited `rust-bitcoin` crate. `k256` already covers raw
+# secp256k1 but NOT PSBT/sighash, so no dedup is available.
+# Taproot/TapTweak is DELIBERATELY unused: the signer is P2WPKH-only (BIP-84);
+# P2TR inputs fail closed (see `crates/oc-signer/src/chains/bitcoin.rs`).
+# Do NOT enable `bitcoin` extra features (e.g. `serde`, `rand-std`) without a
+# security review — the current `["base64"]` subset is minimal on purpose.
+# deny.toml documents the matching allowlist rationale per advisory.
 bitcoin = "0.32.11"
 # NOTE: 0.11.0-rc.6 is a release candidate, but it CANNOT be downgraded to the
 # stable 0.10.6. `oc-signer` feeds `Blake2b512` into `ed25519_dalek::hazmat::
@@ -83,6 +95,7 @@ oc-keyagent = { path = "crates/oc-keyagent" }
 oc-netagent = { path = "crates/oc-netagent" }
 oc-policy = { path = "crates/oc-policy" }
 oc-secret = { path = "crates/oc-secret" }
+oc-session-key = { path = "crates/oc-session-key" }
 oc-signer = { path = "crates/oc-signer" }
 oc-vault = { path = "crates/oc-vault" }
 oc-wallet = { path = "crates/oc-wallet", default-features = false }

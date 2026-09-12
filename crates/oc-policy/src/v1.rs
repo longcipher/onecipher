@@ -51,6 +51,53 @@ pub fn evaluate_rule(rule: &PolicyRule, policy_id: &str, ctx: &PolicyContext) ->
         PolicyRule::AllowedTypedDataContracts { contracts } => {
             eval_allowed_typed_data_contracts(policy_id, contracts, ctx)
         }
+        PolicyRule::MaxAmount { max_value } => {
+            if oc_core::policy::amount_exceeds(ctx.transaction.value.as_deref(), max_value) {
+                PolicyResult::denied(policy_id, format!("value exceeds max {max_value}"))
+            } else {
+                PolicyResult::allowed()
+            }
+        }
+        PolicyRule::AllowedAddresses { addresses } => match ctx.transaction.to.as_deref() {
+            None => PolicyResult::allowed(),
+            Some(to) if addresses.iter().any(|a| oc_core::policy::address_eq(a, to)) => {
+                PolicyResult::allowed()
+            }
+            Some(to) => PolicyResult::denied(policy_id, format!("address {to} not in allowlist")),
+        },
+        PolicyRule::AllowedAssets { assets } => {
+            // The v1 context carries no asset field; absence allows.
+            let _ = assets;
+            PolicyResult::allowed()
+        }
+        PolicyRule::Executable { path } => {
+            if let Err(reason) = crate::executable::validate_executable_path(path) {
+                return PolicyResult::denied(policy_id, reason);
+            }
+            let payload = match serde_json::to_vec(ctx) {
+                Ok(b) => b,
+                Err(e) => {
+                    return PolicyResult::denied(
+                        policy_id,
+                        format!("failed to serialize context: {e}"),
+                    );
+                }
+            };
+            match crate::executable::run_executable(path, &payload) {
+                Ok(out) => match serde_json::from_slice::<PolicyResult>(&out) {
+                    Ok(r) if r.allow => PolicyResult::allowed(),
+                    Ok(r) => PolicyResult::denied(
+                        policy_id,
+                        r.reason.unwrap_or_else(|| "denied by executable".into()),
+                    ),
+                    Err(e) => PolicyResult::denied(
+                        policy_id,
+                        format!("invalid JSON from executable: {e}"),
+                    ),
+                },
+                Err(reason) => PolicyResult::denied(policy_id, reason),
+            }
+        }
     }
 }
 
@@ -732,5 +779,82 @@ mod tests {
         let now = parse_rfc3339_to_unix(&ctx.timestamp).unwrap();
         let real_feb_28 = parse_rfc3339_to_unix("2026-02-28T00:00:00Z").unwrap();
         assert!(real_feb_28 < now, "the intended expiry is in the past");
+    }
+
+    // --- C8 executable rule variants ---
+
+    #[test]
+    fn max_amount_rule_denies_over_cap() {
+        let ctx = base_context(); // value = 100000000000000000
+        let over = policy_with_rules("cap", vec![PolicyRule::MaxAmount { max_value: "99".into() }]);
+        assert!(!evaluate_policies(&[over], &ctx).allow);
+        let under = policy_with_rules(
+            "cap",
+            vec![PolicyRule::MaxAmount { max_value: "100000000000000000".into() }],
+        );
+        assert!(evaluate_policies(&[under], &ctx).allow);
+    }
+
+    #[test]
+    fn allowed_addresses_rule_is_case_insensitive() {
+        let mut ctx = base_context();
+        ctx.transaction.to = Some("0xabcdef".into());
+        let policy = policy_with_rules(
+            "addr",
+            vec![PolicyRule::AllowedAddresses { addresses: vec!["0xABCDEF".into()] }],
+        );
+        assert!(evaluate_policies(&[policy], &ctx).allow);
+
+        ctx.transaction.to = Some("0x000000".into());
+        let policy = policy_with_rules(
+            "addr",
+            vec![PolicyRule::AllowedAddresses { addresses: vec!["0xABCDEF".into()] }],
+        );
+        assert!(!evaluate_policies(&[policy], &ctx).allow);
+    }
+
+    #[test]
+    fn allowed_assets_rule_defaults_open() {
+        let ctx = base_context();
+        // v1 context carries no asset: absence allows.
+        let policy = policy_with_rules(
+            "asset",
+            vec![PolicyRule::AllowedAssets { assets: vec!["ETH".into()] }],
+        );
+        assert!(evaluate_policies(&[policy], &ctx).allow);
+    }
+
+    #[test]
+    fn executable_rule_rejects_relative_and_missing_paths() {
+        let ctx = base_context();
+        let rel =
+            policy_with_rules("exe", vec![PolicyRule::Executable { path: "bin/policy".into() }]);
+        let denied = evaluate_policies(&[rel], &ctx);
+        assert!(!denied.allow);
+        assert!(denied.reason.unwrap().contains("absolute"));
+
+        let missing = policy_with_rules(
+            "exe",
+            vec![PolicyRule::Executable { path: "/nonexistent/onecipher-policy".into() }],
+        );
+        assert!(!evaluate_policies(&[missing], &ctx).allow);
+    }
+
+    #[test]
+    fn executable_rule_allows_on_permit_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("permit.sh");
+        std::fs::write(&script, "#!/bin/sh\ncat > /dev/null\necho '{\"allow\": true}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let ctx = base_context();
+        let policy = policy_with_rules(
+            "exe",
+            vec![PolicyRule::Executable { path: script.to_str().unwrap().into() }],
+        );
+        assert!(evaluate_policies(&[policy], &ctx).allow);
     }
 }

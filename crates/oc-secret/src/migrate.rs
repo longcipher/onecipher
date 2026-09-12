@@ -175,9 +175,12 @@ fn migrate_one(
         ..Default::default()
     };
 
-    // Create the encrypted entry. In dry-run mode the entry is still built
-    // (validating decryption + re-encryption) but not persisted.
-    let entry = SecretEntry::new(&entry_name, item_type, &payload, metadata, recipients)?;
+    // Create the encrypted entry bound to the allocated next generation.
+    // In dry-run mode the entry is still built (validating decryption +
+    // re-encryption) but not persisted.
+    let generation = store.next_generation(&entry_name).map_err(MigrationError::Store)?;
+    let entry =
+        SecretEntry::new(&entry_name, item_type, &payload, metadata, recipients, generation)?;
     if !dry_run {
         store.put(&entry)?;
     }
@@ -215,7 +218,8 @@ mod tests {
         plaintext: &[u8],
         passphrase: &str,
     ) -> oc_core::EncryptedWallet {
-        let envelope = oc_signer::encrypt(plaintext, passphrase.as_bytes()).unwrap();
+        let envelope =
+            oc_vault::crypto::encrypt_with_passphrase(plaintext, passphrase.as_bytes()).unwrap();
         oc_core::EncryptedWallet::new(
             uuid::Uuid::new_v4().to_string(),
             name.to_string(),

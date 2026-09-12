@@ -5,16 +5,52 @@
 //! shared helpers in [`super`], which read from stdin or env vars and never
 //! echo secrets to stderr.
 
-use oc_core::{ItemType, SecretPayload};
-use oc_secret::SecretStoreError;
+use oc_core::{AuditOp, ItemType, SecretKind, SecretPayload};
+use oc_secret::{SecretEnvelope, SecretStoreError};
 
-use crate::CliError;
+use crate::{CliError, audit};
+
+/// Print one unified `--json` envelope (shared by `secret` / `password` /
+/// `totp` disclosure reads so agents parse a single schema).
+pub(crate) fn print_envelope_json(envelope: &SecretEnvelope) -> Result<(), CliError> {
+    let json_str = serde_json::to_string_pretty(envelope)?;
+    println!("{json_str}");
+    Ok(())
+}
+
+/// Render the shared labeled disclosure view (explicit reveal).
+///
+/// Listings and reports default to hiding secrets (`reveal.then(false)`);
+/// this view is only built after an explicit `get`-style disclosure, so the
+/// material renders in the clear under one shape for all four
+/// [`SecretKind`] states.
+pub(crate) fn render_disclosure(
+    name: &str,
+    item_type: ItemType,
+    payload: &SecretPayload,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("Name:      {name}\n"));
+    out.push_str(&format!("Type:      {item_type}\n"));
+    out.push_str(&format!("Kind:      {}\n", SecretKind::from_item_type(item_type)));
+    out.push_str(&format!("Secret:    {}\n", payload.reveal_for_json()));
+    if let Some(notes) = &payload.notes {
+        out.push_str(&format!("Notes:     {notes}\n"));
+    }
+    if let Some(extra) = &payload.extra {
+        if let Ok(extra_str) = serde_json::to_string_pretty(extra) {
+            out.push_str(&format!("Extra:     {extra_str}\n"));
+        }
+    }
+    out
+}
 
 /// Entry point for `onecipher secret list [--type <ItemType>] [--json]`.
 ///
 /// Lists all entries in the secret store. When `--type` is provided, only
 /// entries of that type are shown. When `--json` is set, a JSON array of
-/// `SecretIndexEntry` objects is printed to stdout (no extra text).
+/// unified [`SecretEnvelope`] objects (no secret material) is printed to
+/// stdout (no extra text).
 #[allow(dead_code)]
 pub(crate) fn list(item_type: Option<ItemType>, json: bool) -> Result<(), CliError> {
     let store = super::open_secret_store()?;
@@ -25,7 +61,9 @@ pub(crate) fn list(item_type: Option<ItemType>, json: bool) -> Result<(), CliErr
     }
 
     if json {
-        let json_str = serde_json::to_string_pretty(&entries)?;
+        let envelopes: Vec<SecretEnvelope> =
+            entries.iter().map(SecretEnvelope::without_payload).collect();
+        let json_str = serde_json::to_string_pretty(&envelopes)?;
         println!("{json_str}");
         return Ok(());
     }
@@ -120,20 +158,14 @@ pub(crate) fn get(
     }
 
     if json {
-        let json_obj = serde_json::json!({
-            "name": entry.name,
-            "id": entry.id,
-            "item_type": entry.item_type,
-            "metadata": entry.metadata,
-            "payload": payload,
-        });
-        let json_str = serde_json::to_string_pretty(&json_obj)?;
-        println!("{json_str}");
+        let envelope = oc_secret::disclose_envelope(&entry, payload);
+        print_envelope_json(&envelope)?;
+        audit::log_secret_event(AuditOp::SecretRead, name, None);
         return Ok(());
     }
 
     match field {
-        Some("secret") => println!("{}", payload.secret),
+        Some("secret") => println!("{}", payload.reveal_for_json()),
         Some("notes") => match &payload.notes {
             Some(n) => println!("{n}"),
             None => println!(),
@@ -148,27 +180,43 @@ pub(crate) fn get(
             )));
         }
         None => {
-            println!("Name:      {}", entry.name);
-            println!("Type:      {}", entry.item_type);
-            println!("Secret:    {}", payload.secret);
-            if let Some(notes) = &payload.notes {
-                println!("Notes:     {notes}");
-            }
-            if let Some(extra) = &payload.extra {
-                let extra_str = serde_json::to_string_pretty(extra)?;
-                println!("Extra:     {extra_str}");
-            }
+            print!("{}", render_disclosure(&entry.name, entry.item_type, &payload));
         }
     }
 
+    audit::log_secret_event(AuditOp::SecretRead, name, None);
     Ok(())
+}
+
+/// Load recipients, failing closed when `age init` never ran.
+///
+/// Shared by every creation/update path in the secret handling plane.
+fn require_recipients() -> Result<Vec<String>, CliError> {
+    let recipients = super::load_recipients()?;
+    if recipients.is_empty() {
+        return Err(CliError::InvalidArgs(
+            "no recipients found — run `onecipher age init` first".into(),
+        ));
+    }
+    Ok(recipients)
+}
+
+/// Wrap a plaintext secret into page-locked memory immediately after intake.
+///
+/// The CLI edge (env var / prompt / stdin) necessarily yields a `String`
+/// first; this is the single funnel into [`oc_secret::crud`], which performs
+/// the only `String` conversion at the serde boundary.
+fn harden_secret(secret: &str) -> Result<oc_signer::SecretBytes, CliError> {
+    oc_signer::SecretBytes::from_slice(secret.as_bytes())
+        .map_err(|e| CliError::InvalidArgs(format!("memory hardening failed: {e}")))
 }
 
 /// Entry point for `onecipher secret add <name> --type <ItemType> [--meta key=val...] [--stdin]`.
 ///
-/// Creates a new secret entry. When `--stdin` is set, the full
-/// `SecretPayload` JSON is read from stdin. Otherwise, the secret value is
-/// read from `ONECIPHER_SECRET` env var or an interactive prompt.
+/// Creates a new secret entry via the unified [`oc_secret::crud`] plane.
+/// When `--stdin` is set, the full `SecretPayload` JSON is read from stdin.
+/// Otherwise, the secret value is read from `ONECIPHER_SECRET` env var or an
+/// interactive prompt.
 #[allow(dead_code)]
 pub(crate) fn add(
     name: &str,
@@ -179,24 +227,32 @@ pub(crate) fn add(
     let store = super::open_secret_store()?;
     let metadata = super::parse_metadata(meta)?;
 
-    let payload = if stdin {
-        super::read_secret_payload_from_stdin()?
+    let (secret_hb, notes, extra) = if stdin {
+        let mut payload = super::read_secret_payload_from_stdin()?;
+        // `SecretPayload` zeroizes on drop: borrow the secret for hardening,
+        // then `take()` the optional fields (moving out of a `Drop` type is
+        // forbidden, `Option::take` is not).
+        let hardened = harden_secret(&payload.secret)?;
+        (hardened, payload.notes.take(), payload.extra.take())
     } else {
         let secret = super::read_secret_from_env_or_prompt()?;
-        SecretPayload { secret, notes: None, extra: None }
+        (harden_secret(&secret)?, None, None)
     };
 
-    let recipients = super::load_recipients()?;
-    if recipients.is_empty() {
-        return Err(CliError::InvalidArgs(
-            "no recipients found — run `onecipher age init` first".into(),
-        ));
-    }
-
-    let entry = oc_secret::SecretEntry::new(name, item_type, &payload, metadata, &recipients)
-        .map_err(|e| CliError::InvalidArgs(format!("failed to create entry: {e}")))?;
-
-    store.put(&entry).map_err(map_store_error)?;
+    let recipients = require_recipients()?;
+    let kind = SecretKind::from_item_type(item_type);
+    oc_secret::create_entry_full(
+        &store,
+        kind,
+        name,
+        &secret_hb,
+        notes,
+        extra,
+        metadata,
+        &recipients,
+    )
+    .map_err(map_store_error)?;
+    audit::log_secret_event(AuditOp::SecretCreate, name, None);
     println!("Secret added: {name}");
     Ok(())
 }
@@ -224,6 +280,8 @@ pub(crate) fn update(name: &str, field: Option<&str>, stdin: bool) -> Result<(),
         match field {
             Some("secret") | None => {
                 let secret = super::read_secret_from_env_or_prompt()?;
+                // Single String-boundary copy; the old secret zeroizes with
+                // the overwritten payload's drop.
                 payload.secret = secret;
             }
             Some("notes") => {
@@ -242,30 +300,30 @@ pub(crate) fn update(name: &str, field: Option<&str>, stdin: bool) -> Result<(),
         }
     }
 
-    let recipients = super::load_recipients()?;
-    if recipients.is_empty() {
-        return Err(CliError::InvalidArgs(
-            "no recipients found — run `onecipher age init` first".into(),
-        ));
-    }
+    let recipients = require_recipients()?;
 
-    // Re-encrypt the updated payload.
-    let json = serde_json::to_vec(&payload)?;
-    let ciphertext = oc_secret::encrypt_payload(&json, &recipients)
+    // Re-encrypt the updated payload bound to the next generation (B1/B4).
+    let next_gen = store.next_generation(name).map_err(map_store_error)?;
+    entry
+        .set_payload(&payload, &recipients, next_gen)
         .map_err(|e| CliError::InvalidArgs(format!("encryption failed: {e}")))?;
-    entry.ciphertext = ciphertext;
-    entry.updated_at = jiff::Timestamp::now().to_string();
 
     store.put(&entry).map_err(map_store_error)?;
+    audit::log_secret_event(AuditOp::SecretUpdate, name, None);
     println!("Secret updated: {name}");
     Ok(())
 }
 
-/// Entry point for `onecipher secret delete <name>`.
+/// Entry point for `onecipher secret delete <name> --force`.
+///
+/// Deletion is irreversible, so an explicit `--force` flag is required;
+/// without it the command fails with a usage error instead of deleting.
 #[allow(dead_code)]
-pub(crate) fn delete(name: &str) -> Result<(), CliError> {
+pub(crate) fn delete(name: &str, force: bool) -> Result<(), CliError> {
+    crate::output::require_force(force, &format!("delete secret '{name}'"))?;
     let store = super::open_secret_store()?;
-    store.delete(name).map_err(map_store_error)?;
+    oc_secret::delete_entry(&store, name).map_err(map_store_error)?;
+    audit::log_secret_event(AuditOp::SecretDelete, name, None);
     println!("Secret deleted: {name}");
     Ok(())
 }
@@ -274,7 +332,10 @@ pub(crate) fn delete(name: &str) -> Result<(), CliError> {
 #[allow(dead_code)]
 pub(crate) fn rename(old: &str, new: &str) -> Result<(), CliError> {
     let store = super::open_secret_store()?;
-    store.rename(old, new).map_err(map_store_error)?;
+    let identity = super::load_age_identity()?;
+    let recipients = require_recipients()?;
+    oc_secret::rename_entry(&store, old, new, &identity, &recipients).map_err(map_store_error)?;
+    audit::log_secret_event(AuditOp::SecretRename, new, Some(format!("from={old}")));
     println!("Secret renamed: '{old}' -> '{new}'");
     Ok(())
 }
@@ -354,20 +415,15 @@ pub(crate) fn edit(name: &str, editor: Option<&str>) -> Result<(), CliError> {
     let new_payload = parse_edited_payload(&edited)?;
 
     // Re-encrypt and save.
-    let recipients = super::load_recipients()?;
-    if recipients.is_empty() {
-        return Err(CliError::InvalidArgs(
-            "no recipients found — run `onecipher age init` first".into(),
-        ));
-    }
+    let recipients = require_recipients()?;
 
-    let json = serde_json::to_vec(&new_payload)?;
-    let ciphertext = oc_secret::encrypt_payload(&json, &recipients)
+    let next_gen = store.next_generation(name).map_err(map_store_error)?;
+    entry
+        .set_payload(&new_payload, &recipients, next_gen)
         .map_err(|e| CliError::InvalidArgs(format!("encryption failed: {e}")))?;
-    entry.ciphertext = ciphertext;
-    entry.updated_at = jiff::Timestamp::now().to_string();
 
     store.put(&entry).map_err(map_store_error)?;
+    audit::log_secret_event(AuditOp::SecretUpdate, name, None);
     println!("Secret updated: {name}");
     Ok(())
 }
@@ -380,40 +436,14 @@ pub(crate) fn edit(name: &str, editor: Option<&str>) -> Result<(), CliError> {
 #[allow(dead_code)]
 pub(crate) fn copy(src: &str, dst: &str, force: bool) -> Result<(), CliError> {
     let store = super::open_secret_store()?;
-
-    // Guard: destination already exists (unless --force).
-    if !force && store.get(dst).is_ok() {
-        return Err(CliError::InvalidArgs(format!(
-            "secret '{dst}' already exists — use --force to overwrite"
-        )));
-    }
-
-    // Decrypt the source entry.
-    let src_entry = store.get(src).map_err(map_store_error)?;
     let identity = super::load_age_identity()?;
-    let payload = src_entry
-        .decrypt(&identity)
-        .map_err(|e| CliError::InvalidArgs(format!("decryption failed: {e}")))?;
+    let recipients = require_recipients()?;
 
-    // Load recipients for re-encryption.
-    let recipients = super::load_recipients()?;
-    if recipients.is_empty() {
-        return Err(CliError::InvalidArgs(
-            "no recipients found — run `onecipher age init` first".into(),
-        ));
-    }
-
-    // Create a new entry under the destination name.
-    let new_entry = oc_secret::SecretEntry::new(
-        dst,
-        src_entry.item_type,
-        &payload,
-        src_entry.metadata,
-        &recipients,
-    )
-    .map_err(|e| CliError::InvalidArgs(format!("failed to create entry: {e}")))?;
-
-    store.put(&new_entry).map_err(map_store_error)?;
+    // Unified copy plane: destination guard (--force), decrypt, re-encrypt at
+    // the destination's next generation.
+    oc_secret::copy_entry(&store, &identity, src, dst, force, &recipients)
+        .map_err(map_store_error)?;
+    audit::log_secret_event(AuditOp::SecretCopy, dst, Some(format!("from={src}")));
     println!("Secret copied: '{src}' -> '{dst}'");
     Ok(())
 }
@@ -426,9 +456,14 @@ pub(crate) fn copy(src: &str, dst: &str, force: bool) -> Result<(), CliError> {
 #[allow(dead_code)]
 pub(crate) fn mv(src: &str, dst: &str, force: bool) -> Result<(), CliError> {
     if !force {
-        // Fast path: atomic rename via the store.
+        // Rename rebinds the envelope to the new path, so it needs the
+        // identity + recipients for re-encryption (B1).
         let store = super::open_secret_store()?;
-        store.rename(src, dst).map_err(map_store_error)?;
+        let identity = super::load_age_identity()?;
+        let recipients = require_recipients()?;
+        oc_secret::rename_entry(&store, src, dst, &identity, &recipients)
+            .map_err(map_store_error)?;
+        audit::log_secret_event(AuditOp::SecretRename, dst, Some(format!("from={src}")));
         println!("Secret moved: '{src}' -> '{dst}'");
         return Ok(());
     }
@@ -436,7 +471,8 @@ pub(crate) fn mv(src: &str, dst: &str, force: bool) -> Result<(), CliError> {
     // --force: copy over existing destination, then delete source.
     copy(src, dst, true)?;
     let store = super::open_secret_store()?;
-    store.delete(src).map_err(map_store_error)?;
+    oc_secret::delete_entry(&store, src).map_err(map_store_error)?;
+    audit::log_secret_event(AuditOp::SecretRename, dst, Some(format!("from={src} (force)")));
     println!("Secret moved: '{src}' -> '{dst}'");
     Ok(())
 }
@@ -500,6 +536,12 @@ pub(super) fn map_store_error(e: SecretStoreError) -> CliError {
             CliError::InvalidArgs(format!("secret already exists: '{name}'"))
         }
         SecretStoreError::InvalidName(msg) => CliError::InvalidArgs(msg),
+        SecretStoreError::GenerationMismatch { name, expected, got } => CliError::InvalidArgs(
+            format!("generation mismatch for '{name}': expected {expected}, got {got}"),
+        ),
+        SecretStoreError::Tampered { path, reason } => {
+            CliError::InvalidArgs(format!("tampered secret '{path}': {reason}"))
+        }
         SecretStoreError::Io(e) => CliError::Io(e),
         SecretStoreError::Serde(e) => CliError::Json(e),
         SecretStoreError::Entry(e) => CliError::InvalidArgs(e.to_string()),

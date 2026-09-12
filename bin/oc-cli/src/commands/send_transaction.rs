@@ -10,7 +10,7 @@ pub(crate) fn run(
 ) -> Result<(), CliError> {
     // Check for API token — route through library for policy enforcement
     let passphrase = super::peek_passphrase();
-    if passphrase.as_deref().is_some_and(|p| p.starts_with(oc_wallet::key_store::TOKEN_PREFIX)) {
+    if passphrase.as_deref().is_some_and(|p| oc_core::Credential::parse(p).is_token()) {
         let result = oc_wallet::sign_and_send(
             wallet_name,
             chain_str,

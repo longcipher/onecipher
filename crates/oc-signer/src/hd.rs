@@ -22,6 +22,24 @@ pub enum HdError {
 
     #[error("invalid seed length: expected 16-64 bytes, got {0}")]
     InvalidSeedLength(usize),
+
+    /// Batch derivation overflowed `u32` (`start + count` exceeds `u32::MAX`).
+    #[error("index overflow: start {start} + count {count} exceeds u32 range")]
+    IndexOverflow {
+        /// Batch start index.
+        start: u32,
+        /// Requested element count.
+        count: u32,
+    },
+
+    /// Batch range is empty or inverted (`start >= end`).
+    #[error("invalid range: start {start} >= end {end}")]
+    InvalidRange {
+        /// Range start (inclusive).
+        start: u32,
+        /// Range end (exclusive).
+        end: u32,
+    },
 }
 
 impl From<oc_crypto::MemGuardError> for HdError {
@@ -39,11 +57,35 @@ impl From<MnemonicError> for HdError {
 /// HD key deriver supporting BIP-32 (secp256k1) and SLIP-10 (ed25519).
 pub struct HdDeriver;
 
+/// SLIP-10 hardened offset (`2^31`).
+const HARDENED_OFFSET: u32 = 0x8000_0000;
+
 impl HdDeriver {
-    /// Derive a child private key from a seed and derivation path.
+    /// Derive a child private key from a raw seed and derivation path.
+    ///
+    /// Raw-seed escape hatch: compiled only with `--features raw-seed`
+    /// (see crate docs for the sealing policy). Production code must use
+    /// [`HdDeriver::derive_from_mnemonic`] so the 64-byte seed never leaves
+    /// `oc-signer`. External KAT vectors and migration tooling enable the
+    /// feature explicitly.
     ///
     /// Seed must be 16-64 bytes (BIP-32 §2).
+    #[cfg(feature = "raw-seed")]
     pub fn derive(seed: &[u8], path: &str, curve: Curve) -> Result<SecretBytes, HdError> {
+        Self::derive_inner(seed, path, curve)
+    }
+
+    /// Sealed derivation kernel: mnemonic → seed → child key without
+    /// exposing the seed to the caller.
+    ///
+    /// Always compiled; backs [`HdDeriver::derive_from_mnemonic`] and the
+    /// in-crate spec-vector tests. External crates reach raw seeds only
+    /// through the `raw-seed`-gated [`HdDeriver::derive`].
+    pub(crate) fn derive_inner(
+        seed: &[u8],
+        path: &str,
+        curve: Curve,
+    ) -> Result<SecretBytes, HdError> {
         if seed.len() < 16 || seed.len() > 64 {
             return Err(HdError::InvalidSeedLength(seed.len()));
         }
@@ -56,14 +98,79 @@ impl HdDeriver {
     }
 
     /// Convenience: derive from a mnemonic + passphrase + path + curve.
+    ///
+    /// Sealed path — the BIP-39 seed is derived and consumed inside
+    /// `oc-signer`; callers only ever handle the derived 32-byte key.
     pub fn derive_from_mnemonic(
         mnemonic: &Mnemonic,
         passphrase: &str,
         path: &str,
         curve: Curve,
     ) -> Result<SecretBytes, HdError> {
-        let seed = mnemonic.to_seed(passphrase)?;
-        Self::derive(seed.expose(), path, curve)
+        let seed = mnemonic.to_seed_sealed(passphrase)?;
+        Self::derive_inner(seed.expose(), path, curve)
+    }
+
+    /// Derive a batch of consecutive child keys.
+    ///
+    /// `make_path` maps each account index to its full derivation path
+    /// (e.g. `|i| format!("m/44'/60'/0'/0/{i}")`). Indices are advanced
+    /// with [`u32::checked_add`] so a batch crossing `u32::MAX` fails with
+    /// [`HdError::IndexOverflow`] instead of wrapping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HdError::IndexOverflow`] when `start + count` exceeds the
+    /// `u32` range, or forwards the first per-index [`HdError`].
+    pub fn derive_many(
+        mnemonic: &Mnemonic,
+        passphrase: &str,
+        curve: Curve,
+        make_path: impl Fn(u32) -> String,
+        start: u32,
+        count: u32,
+    ) -> Result<Vec<SecretBytes>, HdError> {
+        let mut out = Vec::new();
+        if count > 0 {
+            out.reserve(count.min(1024) as usize);
+        }
+        let mut index = start;
+        for n in 0..count {
+            let path = make_path(index);
+            out.push(Self::derive_from_mnemonic(mnemonic, passphrase, &path, curve)?);
+            // Advance only when another iteration follows, so a batch ending
+            // exactly at `u32::MAX` still succeeds.
+            if n + 1 < count {
+                index = index.checked_add(1).ok_or(HdError::IndexOverflow { start, count })?;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Derive keys for `start..end_exclusive` via `make_path`.
+    ///
+    /// Range form of [`HdDeriver::derive_many`] with the same
+    /// `checked_add` overflow discipline.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HdError::InvalidRange`] when `start >= end_exclusive`, or
+    /// forwards per-index errors.
+    pub fn derive_range(
+        mnemonic: &Mnemonic,
+        passphrase: &str,
+        curve: Curve,
+        make_path: impl Fn(u32) -> String,
+        start: u32,
+        end_exclusive: u32,
+    ) -> Result<Vec<SecretBytes>, HdError> {
+        if start >= end_exclusive {
+            return Err(HdError::InvalidRange { start, end: end_exclusive });
+        }
+        let count = end_exclusive
+            .checked_sub(start)
+            .ok_or(HdError::InvalidRange { start, end: end_exclusive })?;
+        Self::derive_many(mnemonic, passphrase, curve, make_path, start, count)
     }
 
     /// Like `derive_from_mnemonic`, but checks the global key cache first.
@@ -102,6 +209,12 @@ impl HdDeriver {
     }
 
     /// Validate a derivation path. Must start with "m/" and contain valid indices.
+    ///
+    /// Accepts both hardened suffixes (`'` and `h`/`H`, e.g. `44'` ≡ `44h`)
+    /// so BIP-32 style paths validate regardless of notation. Whether a
+    /// non-hardened component is *allowed* is curve-specific and enforced at
+    /// derivation time ([`HdDeriver::derive_inner`] → SLIP-10 strict check
+    /// for ed25519).
     pub fn validate_path(path: &str) -> Result<(), HdError> {
         if !path.starts_with("m/") && path != "m" {
             return Err(HdError::InvalidPath(format!("path must start with 'm/', got '{}'", path)));
@@ -111,7 +224,11 @@ impl HdDeriver {
         }
         let components = path[2..].split('/');
         for component in components {
-            let index_str = component.trim_end_matches('\'');
+            let index_str = component
+                .strip_suffix('\'')
+                .or_else(|| component.strip_suffix('h'))
+                .or_else(|| component.strip_suffix('H'))
+                .unwrap_or(component);
             if index_str.is_empty() {
                 return Err(HdError::InvalidPath(format!("empty component in path '{}'", path)));
             }
@@ -120,6 +237,41 @@ impl HdDeriver {
             })?;
         }
         Ok(())
+    }
+
+    /// Strict SLIP-10 hardened index parser for ed25519 paths.
+    ///
+    /// Accepts `'` and `h`/`H` suffixes (`0'` ≡ `0h`); both denote the same
+    /// hardened child. Rejects bare indices and values `>= 2^31` with an
+    /// error that tells the caller how to fix the path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HdError::InvalidPath`] with a fix-up hint when the
+    /// component is bare, malformed, or out of range.
+    pub fn parse_slip10_index(component: &str, full_path: &str) -> Result<u32, HdError> {
+        let hardened =
+            component.ends_with('\'') || component.ends_with('h') || component.ends_with('H');
+        if !hardened {
+            return Err(HdError::InvalidPath(format!(
+                "non-hardened index '{component}' in ed25519 path '{full_path}': \
+                 ed25519 requires hardened derivation; add \"'\" suffix, e.g. \"{component}'\""
+            )));
+        }
+        let index_str = &component[..component.len() - 1];
+        if index_str.is_empty() {
+            return Err(HdError::InvalidPath(format!("empty index in ed25519 path '{full_path}'")));
+        }
+        let index: u32 = index_str.parse().map_err(|_| {
+            HdError::InvalidPath(format!("invalid index '{component}' in path '{full_path}'"))
+        })?;
+        if index >= HARDENED_OFFSET {
+            return Err(HdError::InvalidPath(format!(
+                "hardened index '{component}' in path '{full_path}' must be < 2^31; \
+                 add \"'\" to an index below 2147483648 instead"
+            )));
+        }
+        Ok(index)
     }
 
     /// Initialize an HMAC-SHA512 instance for SLIP-10 derivation.
@@ -161,22 +313,14 @@ impl HdDeriver {
     fn derive_ed25519(seed: &[u8], path: &str) -> Result<SecretBytes, HdError> {
         use zeroize::Zeroize;
 
-        // Parse path components
+        // Parse path components with the strict SLIP-10 hardened check
+        // (`'` and `h`/`H` accepted, bare indices rejected with a fix-up hint).
         let components = if path == "m" {
             vec![]
         } else {
             path[2..]
                 .split('/')
-                .map(|c| {
-                    if !c.ends_with('\'') {
-                        return Err(HdError::Ed25519NonHardened);
-                    }
-                    let index_str = c.trim_end_matches('\'');
-                    let index: u32 = index_str
-                        .parse()
-                        .map_err(|_| HdError::InvalidPath(format!("invalid index: {}", c)))?;
-                    Ok(index)
-                })
+                .map(|c| Self::parse_slip10_index(c, path))
                 .collect::<Result<Vec<_>, _>>()?
         };
 
@@ -189,14 +333,16 @@ impl HdDeriver {
         let mut chain_code = result[32..].to_vec();
         result.zeroize();
 
-        // Derive each component (hardened only)
+        // Derive each component (hardened only). `index` is validated
+        // `< 2^31` by `parse_slip10_index`, so OR-ing the hardened bit
+        // cannot overflow (checked_add equivalent without a failure arm).
         let mut data = Vec::new();
         for index in components {
             data.zeroize();
             data.clear();
             data.push(0u8); // 0x00 prefix for private key derivation
             data.extend_from_slice(&key);
-            data.extend_from_slice(&(index + 0x80000000u32).to_be_bytes());
+            data.extend_from_slice(&(index | HARDENED_OFFSET).to_be_bytes());
 
             let mut mac = Self::hmac_sha512(&chain_code)?;
             mac.update(&data);
@@ -223,50 +369,56 @@ mod tests {
 
     fn test_seed() -> SecretBytes {
         let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
-        mnemonic.to_seed("").unwrap()
+        mnemonic.to_seed_sealed("").unwrap()
     }
 
     #[test]
     fn test_derive_evm_account_0() {
         let seed = test_seed();
-        let key = HdDeriver::derive(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
+        let key =
+            HdDeriver::derive_inner(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
         assert_eq!(key.len(), 32);
     }
 
     #[test]
     fn test_derive_solana_account_0() {
         let seed = test_seed();
-        let key = HdDeriver::derive(seed.expose(), "m/44'/501'/0'/0'", Curve::Ed25519).unwrap();
+        let key =
+            HdDeriver::derive_inner(seed.expose(), "m/44'/501'/0'/0'", Curve::Ed25519).unwrap();
         assert_eq!(key.len(), 32);
     }
 
     #[test]
     fn test_derive_bitcoin_account_0() {
         let seed = test_seed();
-        let key = HdDeriver::derive(seed.expose(), "m/84'/0'/0'/0/0", Curve::Secp256k1).unwrap();
+        let key =
+            HdDeriver::derive_inner(seed.expose(), "m/84'/0'/0'/0/0", Curve::Secp256k1).unwrap();
         assert_eq!(key.len(), 32);
     }
 
     #[test]
     fn test_derive_cosmos_account_0() {
         let seed = test_seed();
-        let key = HdDeriver::derive(seed.expose(), "m/44'/118'/0'/0/0", Curve::Secp256k1).unwrap();
+        let key =
+            HdDeriver::derive_inner(seed.expose(), "m/44'/118'/0'/0/0", Curve::Secp256k1).unwrap();
         assert_eq!(key.len(), 32);
     }
 
     #[test]
     fn test_derive_tron_account_0() {
         let seed = test_seed();
-        let key = HdDeriver::derive(seed.expose(), "m/44'/195'/0'/0/0", Curve::Secp256k1).unwrap();
+        let key =
+            HdDeriver::derive_inner(seed.expose(), "m/44'/195'/0'/0/0", Curve::Secp256k1).unwrap();
         assert_eq!(key.len(), 32);
     }
 
     #[test]
     fn test_convenience_matches_two_step() {
         let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
-        let seed = mnemonic.to_seed("").unwrap();
+        let seed = mnemonic.to_seed_sealed("").unwrap();
 
-        let key1 = HdDeriver::derive(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
+        let key1 =
+            HdDeriver::derive_inner(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
         let key2 =
             HdDeriver::derive_from_mnemonic(&mnemonic, "", "m/44'/60'/0'/0/0", Curve::Secp256k1)
                 .unwrap();
@@ -291,12 +443,133 @@ mod tests {
     #[test]
     fn test_slip10_rejects_non_hardened_ed25519() {
         let seed = test_seed();
-        let result = HdDeriver::derive(seed.expose(), "m/44'/501'/0'/0", Curve::Ed25519);
+        let result = HdDeriver::derive_inner(seed.expose(), "m/44'/501'/0'/0", Curve::Ed25519);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            HdError::Ed25519NonHardened => {}
-            other => panic!("expected Ed25519NonHardened, got {:?}", other),
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("add \"'\""), "error must teach the user to add \"'\", got: {err}");
+    }
+
+    #[test]
+    fn test_slip10_accepts_h_suffix() {
+        // `h` is the long-standing BIP-32 hardened alias for `'`.
+        let seed = test_seed();
+        let via_tick =
+            HdDeriver::derive_inner(seed.expose(), "m/44'/501'/0'/0'", Curve::Ed25519).unwrap();
+        let via_h =
+            HdDeriver::derive_inner(seed.expose(), "m/44h/501h/0h/0h", Curve::Ed25519).unwrap();
+        assert_eq!(via_tick.expose(), via_h.expose());
+    }
+
+    #[test]
+    fn test_slip10_rejects_index_above_2pow31() {
+        let seed = test_seed();
+        let result = HdDeriver::derive_inner(seed.expose(), "m/2147483648'", Curve::Ed25519);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("2^31"), "expected range hint, got: {err}");
+    }
+
+    #[test]
+    fn test_slip10_bare_index_hint_names_component() {
+        let err =
+            HdDeriver::parse_slip10_index("0", "m/44'/501'/0'/0").expect_err("bare must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("'0'") || msg.contains("\"'\""), "got: {msg}");
+    }
+
+    #[test]
+    fn test_derive_many_matches_sequential() {
+        let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
+        let make_path = |i: u32| format!("m/44'/60'/0'/0/{i}");
+        let batch =
+            HdDeriver::derive_many(&mnemonic, "", Curve::Secp256k1, make_path, 0, 3).unwrap();
+        assert_eq!(batch.len(), 3);
+        for (i, key) in batch.iter().enumerate() {
+            let single = HdDeriver::derive_from_mnemonic(
+                &mnemonic,
+                "",
+                &format!("m/44'/60'/0'/0/{i}"),
+                Curve::Secp256k1,
+            )
+            .unwrap();
+            assert_eq!(key.expose(), single.expose());
         }
+    }
+
+    #[test]
+    fn test_derive_many_overflow_fails_closed() {
+        let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
+        // Constant path: every index derives successfully, isolating the
+        // `checked_add` overflow discipline from per-index path validity
+        // (BIP-32 non-hardened indices are `< 2^31`, so a real path template
+        // would fail derivation before the counter overflows).
+        let result = HdDeriver::derive_many(
+            &mnemonic,
+            "",
+            Curve::Secp256k1,
+            |_| "m/44'/60'/0'/0/0".to_string(),
+            u32::MAX,
+            2,
+        );
+        assert!(matches!(result, Err(HdError::IndexOverflow { .. })));
+    }
+
+    #[test]
+    fn test_derive_many_ending_at_max_succeeds() {
+        // A batch ending exactly at `u32::MAX` must succeed: the counter is
+        // only advanced when another iteration follows.
+        let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
+        let batch = HdDeriver::derive_many(
+            &mnemonic,
+            "",
+            Curve::Secp256k1,
+            |_| "m/44'/60'/0'/0/0".to_string(),
+            u32::MAX,
+            1,
+        )
+        .unwrap();
+        assert_eq!(batch.len(), 1);
+    }
+
+    #[test]
+    fn test_derive_range_matches_many() {
+        let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
+        let ranged = HdDeriver::derive_range(
+            &mnemonic,
+            "",
+            Curve::Secp256k1,
+            |i| format!("m/44'/60'/0'/0/{i}"),
+            1,
+            4,
+        )
+        .unwrap();
+        assert_eq!(ranged.len(), 3);
+        let many = HdDeriver::derive_many(
+            &mnemonic,
+            "",
+            Curve::Secp256k1,
+            |i| format!("m/44'/60'/0'/0/{i}"),
+            1,
+            3,
+        )
+        .unwrap();
+        for (a, b) in ranged.iter().zip(many.iter()) {
+            assert_eq!(a.expose(), b.expose());
+        }
+    }
+
+    #[test]
+    fn test_derive_range_rejects_inverted() {
+        let mnemonic = Mnemonic::from_phrase(ABANDON_PHRASE).unwrap();
+        let result = HdDeriver::derive_range(
+            &mnemonic,
+            "",
+            Curve::Secp256k1,
+            |i| format!("m/44'/60'/0'/0/{i}"),
+            5,
+            5,
+        );
+        assert!(matches!(result, Err(HdError::InvalidRange { .. })));
     }
 
     // === BIP-32 spec test vectors (secp256k1) ===
@@ -318,7 +591,7 @@ mod tests {
         ];
 
         for (path, expected_hex) in cases {
-            let key = HdDeriver::derive(&seed, path, Curve::Secp256k1)
+            let key = HdDeriver::derive_inner(&seed, path, Curve::Secp256k1)
                 .unwrap_or_else(|e| panic!("failed to derive {}: {}", path, e));
             assert_eq!(
                 hex::encode(key.expose()),
@@ -355,7 +628,7 @@ mod tests {
         ];
 
         for (path, expected_hex) in cases {
-            let key = HdDeriver::derive(&seed, path, Curve::Secp256k1)
+            let key = HdDeriver::derive_inner(&seed, path, Curve::Secp256k1)
                 .unwrap_or_else(|e| panic!("failed to derive {}: {}", path, e));
             assert_eq!(
                 hex::encode(key.expose()),
@@ -385,7 +658,7 @@ mod tests {
         ];
 
         for (path, expected_hex) in cases {
-            let key = HdDeriver::derive(&seed, path, Curve::Ed25519)
+            let key = HdDeriver::derive_inner(&seed, path, Curve::Ed25519)
                 .unwrap_or_else(|e| panic!("failed to derive {}: {}", path, e));
             assert_eq!(
                 hex::encode(key.expose()),
@@ -425,7 +698,7 @@ mod tests {
         ];
 
         for (path, expected_hex) in cases {
-            let key = HdDeriver::derive(&seed, path, Curve::Ed25519)
+            let key = HdDeriver::derive_inner(&seed, path, Curve::Ed25519)
                 .unwrap_or_else(|e| panic!("failed to derive {}: {}", path, e));
             assert_eq!(
                 hex::encode(key.expose()),
@@ -441,27 +714,27 @@ mod tests {
     #[test]
     fn test_seed_length_too_short() {
         let seed = [0u8; 15];
-        let result = HdDeriver::derive(&seed, "m/0'", Curve::Secp256k1);
+        let result = HdDeriver::derive_inner(&seed, "m/0'", Curve::Secp256k1);
         assert!(matches!(result, Err(HdError::InvalidSeedLength(15))));
     }
 
     #[test]
     fn test_seed_length_too_long() {
         let seed = [0u8; 65];
-        let result = HdDeriver::derive(&seed, "m/0'", Curve::Secp256k1);
+        let result = HdDeriver::derive_inner(&seed, "m/0'", Curve::Secp256k1);
         assert!(matches!(result, Err(HdError::InvalidSeedLength(65))));
     }
 
     #[test]
     fn test_seed_length_minimum_accepted() {
         let seed = [0u8; 16];
-        assert!(HdDeriver::derive(&seed, "m/0'", Curve::Secp256k1).is_ok());
+        assert!(HdDeriver::derive_inner(&seed, "m/0'", Curve::Secp256k1).is_ok());
     }
 
     #[test]
     fn test_seed_length_maximum_accepted() {
         let seed = [0u8; 64];
-        assert!(HdDeriver::derive(&seed, "m/0'", Curve::Secp256k1).is_ok());
+        assert!(HdDeriver::derive_inner(&seed, "m/0'", Curve::Secp256k1).is_ok());
     }
 
     // === Characterization tests: lock down current behavior before refactoring ===
@@ -561,16 +834,20 @@ mod tests {
     #[test]
     fn test_deterministic() {
         let seed = test_seed();
-        let key1 = HdDeriver::derive(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
-        let key2 = HdDeriver::derive(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
+        let key1 =
+            HdDeriver::derive_inner(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
+        let key2 =
+            HdDeriver::derive_inner(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
         assert_eq!(key1.expose(), key2.expose());
     }
 
     #[test]
     fn test_different_indices_different_keys() {
         let seed = test_seed();
-        let key0 = HdDeriver::derive(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
-        let key1 = HdDeriver::derive(seed.expose(), "m/44'/60'/0'/0/1", Curve::Secp256k1).unwrap();
+        let key0 =
+            HdDeriver::derive_inner(seed.expose(), "m/44'/60'/0'/0/0", Curve::Secp256k1).unwrap();
+        let key1 =
+            HdDeriver::derive_inner(seed.expose(), "m/44'/60'/0'/0/1", Curve::Secp256k1).unwrap();
         assert_ne!(key0.expose(), key1.expose());
     }
 }

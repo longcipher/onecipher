@@ -33,18 +33,21 @@ special-casing transport locality.
 
 ### Token-as-capability
 
-When the owner creates an API key, OneCipher decrypts the wallet secret using the owner's passphrase and **re-encrypts it under a key derived from the API token**. The encrypted copy is stored in the API key file. The agent presents the token with each signing request; the token serves as both authentication and decryption capability.
+When the owner creates an API key, OneCipher decrypts the wallet secret using the owner's passphrase and **re-encrypts it to the token's age recipient**. The encrypted copy is stored in the API key file. The agent presents the token with each signing request; the token serves as both authentication and decryption capability.
 
-### Key derivation (HKDF-SHA256)
+### Key model (age X25519 recipient)
 
-API tokens are 256-bit random values (`ows_key_<64 hex chars>`). HKDF-SHA256 derives the encryption key:
+API tokens are 256-bit random values (`oc_key_<64 hex chars>`). The token
+bytes ARE the age X25519 static secret:
 
 ```
-token = ows_key_<random 256 bits, hex-encoded>
-salt  = random 32 bytes (stored in CryptoEnvelope)
-prk   = HKDF-Extract(salt, token)
-key   = HKDF-Expand(prk, "ows-api-key-v1", 32)  →  AES-256-GCM key
+token     = oc_key_<random 256 bits, hex-encoded>
+recipient = age1... (bech32 of the X25519 public key, stored in the key file)
+copy      = age-encrypt(wallet secret → recipient)
 ```
+
+No salt, no KDF stanza, no symmetric intermediate: the age binary carries a
+single X25519 recipient stanza decryptable only by the token holder.
 
 ### Key creation flow
 
@@ -53,21 +56,20 @@ onecipher key create --name "claude-agent" --wallet agent-treasury --policy spen
 ```
 
 1. Owner enters wallet passphrase
-2. OneCipher decrypts the wallet secret using argon2id(passphrase)
-3. Generates random token: `T = "ows_key_" + hex(random 256 bits)`
-4. Generates random salt S
-5. Derives key: `K = HKDF-SHA256(S, T, "ows-api-key-v1", 32)`
-6. Encrypts the wallet secret with K via AES-256-GCM
-7. Stores key file with `token_hash: SHA256(T)`, policy IDs, and encrypted secret copy
-8. Displays T once — owner provisions it to the agent
-9. Zeroizes the decrypted secret from memory
+2. OneCipher decrypts the wallet secret using age scrypt(passphrase)
+3. Generates random token: `T = "oc_key_" + hex(random 256 bits)`
+4. Derives the age recipient `R` from `T` (stored in the key file)
+5. Encrypts the wallet secret to `R` via age X25519
+6. Stores key file with `token_hash: SHA256(T)`, `recipient: R`, policy IDs, and encrypted secret copy
+7. Displays T once — owner provisions it to the agent
+8. Zeroizes the decrypted secret from memory
 
 ### Agent signing flow
 
 ```
-Agent calls: sign_transaction(wallet, chain, tx, "ows_key_a1b2c3...")
+Agent calls: sign_transaction(wallet, chain, tx, "oc_key_a1b2c3...")
 
-1. Detect ows_key_ prefix → agent mode
+1. Detect oc_key_ prefix → agent mode
 2. SHA256(token) → look up API key file
 3. Check expires_at (if set)
 4. Verify wallet is in key's wallet_ids scope
@@ -75,11 +77,12 @@ Agent calls: sign_transaction(wallet, chain, tx, "ows_key_a1b2c3...")
 6. Build PolicyContext (chain ID, wallet ID, API key ID, transaction context, spending context, timestamp)
 7. Evaluate all policies (AND semantics, short-circuit on first deny)
 8. If denied → return POLICY_DENIED error (key material never touched)
-9. HKDF-SHA256(salt, token) → AES key → decrypt secret from key.wallet_secrets
-10. Resolve the chain-specific signing key from that secret
-11. Sign transaction
-12. Zeroize decrypted secret and derived key
-13. Return signature
+9. Re-derive the recipient from the token and constant-time compare with the stored `recipient`; mismatch fails closed
+10. age-decrypt the secret from key.wallet_secrets with the token identity
+11. Resolve the chain-specific signing key from that secret
+12. Sign transaction
+13. Zeroize decrypted secret and derived key
+14. Return signature
 ```
 
 ### Revocation
@@ -324,7 +327,7 @@ onecipher policy create --file base-agent-limits.json
 
 # Create an API key with wallet scope and policy attachment
 onecipher key create --name "claude-agent" --wallet agent-treasury --policy base-agent-limits
-# => ows_key_a1b2c3d4e5f6...  (shown once, store securely)
+# => oc_key_a1b2c3d4e5f6...  (shown once, store securely)
 ```
 
 An API key can have multiple policies attached. All attached policies are evaluated — every policy must allow the transaction for it to proceed (AND semantics). Evaluation short-circuits on the first denial.

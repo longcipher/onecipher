@@ -102,7 +102,12 @@ pub(crate) fn run(fix: bool, decrypt: bool) -> Result<(), CliError> {
     }
 
     // ── (d) Orphan detection: .age files not in index ───────────────────
-    let index_names: HashSet<String> = index_entries.iter().map(|e| e.name.clone()).collect();
+    // Tombstones are floor markers (B4): a tombstone without a file is
+    // expected, while a file under a tombstoned name is a resurrected replay.
+    let live_names: HashSet<String> =
+        index_entries.iter().filter(|e| !e.tombstone).map(|e| e.name.clone()).collect();
+    let tombstone_names: HashSet<String> =
+        index_entries.iter().filter(|e| e.tombstone).map(|e| e.name.clone()).collect();
     let mut orphans: Vec<PathBuf> = Vec::new();
     for path in &age_files {
         let filename = match path.file_stem().and_then(|s| s.to_str()) {
@@ -110,7 +115,13 @@ pub(crate) fn run(fix: bool, decrypt: bool) -> Result<(), CliError> {
             None => continue,
         };
         let name = filename_to_name(filename);
-        if !index_names.contains(&name) {
+        if tombstone_names.contains(&name) {
+            report(
+                Status::Fail,
+                &format!("resurrected file under tombstoned name: '{name}'"),
+                &mut errors,
+            );
+        } else if !live_names.contains(&name) {
             orphans.push(path.clone());
             report(
                 Status::Warn,
@@ -120,13 +131,16 @@ pub(crate) fn run(fix: bool, decrypt: bool) -> Result<(), CliError> {
         }
     }
 
-    // ── (e) Phantom detection: index entries without .age file ──────────
+    // ── (e) Phantom detection: live index entries without .age file ────
     let age_file_names: HashSet<String> = age_files
         .iter()
         .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(filename_to_name))
         .collect();
     let mut phantoms: Vec<&SecretIndexEntry> = Vec::new();
     for entry in &index_entries {
+        if entry.tombstone {
+            continue;
+        }
         if !age_file_names.contains(&entry.name) {
             phantoms.push(entry);
             report(
@@ -440,21 +454,11 @@ fn check_file_permissions(
 }
 
 /// Collect all `.age` files in the secrets directory.
+///
+/// Skips symlinks and hidden entries (B9) via the shared helper so a planted
+/// link can never shadow a real secret in the check.
 fn collect_age_files(secrets_dir: &Path) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if !secrets_dir.exists() {
-        return files;
-    }
-    if let Ok(entries) = std::fs::read_dir(secrets_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "age") {
-                files.push(path);
-            }
-        }
-    }
-    files.sort();
-    files
+    oc_secret::collect_entry_files(secrets_dir)
 }
 
 /// Parse the index.jsonl file into a list of `SecretIndexEntry` values,
@@ -485,7 +489,7 @@ fn filename_to_name(stem: &str) -> String {
     stem.replace("%2F", "/").replace("%25", "%")
 }
 
-/// Write the index entries back to index.jsonl.
+/// Write the index entries back to index.jsonl (atomic, B7).
 fn write_index(index_path: &Path, entries: &[&SecretIndexEntry]) -> Result<(), std::io::Error> {
     let mut content = String::new();
     for e in entries {
@@ -494,6 +498,5 @@ fn write_index(index_path: &Path, entries: &[&SecretIndexEntry]) -> Result<(), s
         content.push_str(&line);
         content.push('\n');
     }
-    std::fs::write(index_path, content)?;
-    Ok(())
+    oc_core::paths::write_atomic_private(index_path, content.as_bytes())
 }

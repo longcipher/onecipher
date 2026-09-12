@@ -1,10 +1,4 @@
-//! Filesystem vault for encrypted wallet files (Keystore v3 derivatives).
-//!
-//! Fully designed and implemented in accordance with the Open Wallet Standard with the following
-//! renames:
-//! - `ows_core` → `oc_core`
-//! - `OwsLibError` → `OcVaultError`
-//! - `ows_version` → `oc_version` (handled in `oc-core::wallet_file`)
+//! Filesystem vault for encrypted wallet files.
 //!
 //! Behavioral contract (R42):
 //! - Vault file mode is 0600, parent dir 0700, owner = daemon user (Unix only).
@@ -12,7 +6,8 @@
 //! - `wallets_dir` creates `<vault>/wallets/` with 0700 perms.
 //!
 //! Additionally exposes a [`Vault`] wrapper that loads a single wallet file
-//! and decrypts its `crypto` envelope via `oc_signer::decrypt`.
+//! and decrypts its `crypto` envelope via [`crate::crypto::decrypt_with_passphrase`]
+//! (age scrypt passphrase).
 
 use std::{
     fs,
@@ -21,10 +16,9 @@ use std::{
 
 use oc_core::{Config, EncryptedWallet};
 use oc_crypto::HardenedBytes;
-use oc_signer::{CryptoEnvelope, decrypt};
 use tracing::warn;
 
-use crate::error::OcVaultError;
+use crate::{crypto::AgeEnvelope, error::OcVaultError};
 
 /// Set directory permissions to 0o700 (owner-only).
 #[cfg(unix)]
@@ -97,10 +91,9 @@ pub fn save_encrypted_wallet(
     let dir = wallets_dir(vault_path)?;
     let path = dir.join(format!("{}.json", wallet.id));
     let json = serde_json::to_string_pretty(wallet)?;
-    // Consolidate the previously hand-rolled write-tmp-rename into the shared
-    // atomic helper, which additionally fsyncs the directory so the rename is
-    // durable. The old pattern wrote tmp then narrowed perms — same race.
-    oc_core::paths::write_atomic_private(&path, json.as_bytes()).map_err(OcVaultError::Io)?;
+    // Shared B7 atomic helper (parent 0700, O_EXCL tmp + 0600, sync, rename,
+    // fsync dir). Direct `fs::write` for wallet files is forbidden.
+    crate::atomic::write_atomic_secret(&path, json.as_bytes()).map_err(OcVaultError::Io)?;
     Ok(())
 }
 
@@ -196,9 +189,9 @@ pub fn wallet_name_exists(name: &str, vault_path: Option<&Path>) -> Result<bool,
 ///
 /// This is the `Vault` wrapper required by the T6 spec:
 /// `Vault::load(path)` reads + parses the JSON; `Vault::decrypt(key)`
-/// interprets the `HardenedBytes` as a UTF-8 passphrase and runs the
-/// standard `oc_signer::decrypt` (argon2id + AES-256-GCM-SIV by default,
-/// or HKDF if the envelope says so).
+/// decrypts the age envelope with the raw passphrase bytes in `key`
+/// (arbitrary bytes — owner UTF-8 passphrases and device-derived 32-byte
+/// secrets alike).
 pub struct Vault {
     wallet: EncryptedWallet,
 }
@@ -211,19 +204,16 @@ impl Vault {
         Ok(Self { wallet })
     }
 
-    /// Decrypt the wallet's `crypto` envelope using `key` as the passphrase.
+    /// Decrypt the wallet's `crypto` envelope using the raw passphrase bytes
+    /// in `key`.
     ///
-    /// `key` must contain valid UTF-8 (it is fed to `oc_signer::decrypt`
-    /// which takes `&str`). Non-UTF-8 bytes are rejected with
-    /// [`OcVaultError::InvalidInput`].
+    /// Any byte string is accepted (no UTF-8 requirement): owner passphrases
+    /// and device-derived secrets flow through the same age scrypt mapping.
     pub fn decrypt(&self, key: &HardenedBytes) -> Result<HardenedBytes, OcVaultError> {
-        let envelope: CryptoEnvelope = serde_json::from_value(self.wallet.crypto.clone())
+        let envelope: AgeEnvelope = serde_json::from_value(self.wallet.crypto.clone())
             .map_err(|e| OcVaultError::InvalidFormat(e.to_string()))?;
-        let passphrase = std::str::from_utf8(key.expose())
-            .map_err(|_| OcVaultError::InvalidInput("key is not valid UTF-8".into()))?;
-        let plaintext = decrypt(&envelope, passphrase.as_bytes())
-            .map_err(|e| OcVaultError::Crypto(e.to_string()))?;
-        Ok(plaintext)
+        crate::crypto::decrypt_with_passphrase(&envelope, key.expose())
+            .map_err(|e| OcVaultError::Crypto(e.to_string()))
     }
 
     /// Borrow the underlying wallet record.
@@ -621,11 +611,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault_dir = dir.path().to_path_buf();
 
-        // Use oc_signer::encrypt to build a real crypto envelope
+        // Build a real age envelope via the unified crypto module.
         let passphrase = "correct horse battery staple";
         let plaintext = b"super secret key material";
 
-        let envelope = oc_signer::encrypt(plaintext, passphrase.as_bytes()).unwrap();
+        let envelope =
+            crate::crypto::encrypt_with_passphrase(plaintext, passphrase.as_bytes()).unwrap();
         let wallet = EncryptedWallet::new(
             "vault-rt-id".to_string(),
             "vault-rt".to_string(),
@@ -640,7 +631,7 @@ mod tests {
         let loaded = Vault::load(&wallet_path).unwrap();
         assert_eq!(loaded.wallet().id, "vault-rt-id");
 
-        // HardenedBytes holding the passphrase UTF-8 bytes.
+        // HardenedBytes holding the passphrase bytes.
         let key = HardenedBytes::from_slice(passphrase.as_bytes()).unwrap();
         let decrypted = loaded.decrypt(&key).unwrap();
         assert_eq!(decrypted.expose(), plaintext);
@@ -651,7 +642,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vault_dir = dir.path().to_path_buf();
 
-        let envelope = oc_signer::encrypt(b"secret", b"correct").unwrap();
+        let envelope = crate::crypto::encrypt_with_passphrase(b"secret", b"correct").unwrap();
         let wallet = EncryptedWallet::new(
             "wp-id".to_string(),
             "wp".to_string(),
@@ -670,11 +661,14 @@ mod tests {
     }
 
     #[test]
-    fn vault_decrypt_non_utf8_key_rejected() {
+    fn vault_decrypt_non_utf8_key_roundtrip() {
+        // Passphrase bytes need not be UTF-8: device-derived 32-byte secrets
+        // decrypt through the same age scrypt mapping.
         let dir = tempfile::tempdir().unwrap();
         let vault_dir = dir.path().to_path_buf();
 
-        let envelope = oc_signer::encrypt(b"x", b"pass").unwrap();
+        let passphrase = [0xFF, 0xFE, 0xFD, 0x00, 0x13];
+        let envelope = crate::crypto::encrypt_with_passphrase(b"x", &passphrase).unwrap();
         let wallet = EncryptedWallet::new(
             "nu-id".to_string(),
             "nu".to_string(),
@@ -687,10 +681,9 @@ mod tests {
         std::fs::write(&wallet_path, serde_json::to_string_pretty(&wallet).unwrap()).unwrap();
 
         let loaded = Vault::load(&wallet_path).unwrap();
-        // 0xFF is not valid UTF-8 in isolation
-        let bad_key = HardenedBytes::from_slice(&[0xFF, 0xFE, 0xFD]).unwrap();
-        let result = loaded.decrypt(&bad_key);
-        assert!(matches!(result, Err(OcVaultError::InvalidInput(_))));
+        let key = HardenedBytes::from_slice(&passphrase).unwrap();
+        let decrypted = loaded.decrypt(&key).unwrap();
+        assert_eq!(decrypted.expose(), b"x");
     }
 
     // === SecretVault path helper tests ===

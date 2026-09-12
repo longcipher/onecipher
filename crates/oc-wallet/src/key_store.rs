@@ -10,7 +10,9 @@ use sha2::{Digest, Sha256};
 use crate::error::OcWalletError;
 
 /// Token prefix that signals agent mode in the credential parameter.
-pub const TOKEN_PREFIX: &str = "oc_key_";
+/// Canonical value lives in `oc_core::credential`; re-exported here so
+/// existing `crate::key_store::TOKEN_PREFIX` paths keep working.
+pub const TOKEN_PREFIX: &str = oc_core::credential::TOKEN_PREFIX;
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -88,15 +90,21 @@ pub fn load_api_key(id: &str, vault_path: Option<&Path>) -> Result<ApiKeyFile, O
 }
 
 /// Look up an API key by the SHA-256 hash of the token.
-/// Scans all key files — O(n) in the number of keys.
+/// Scans all key files — O(n) in the number of keys. Hash comparison uses
+/// constant-time equality so scans do not leak prefix-match timing.
 pub fn load_api_key_by_token_hash(
     token_hash: &str,
     vault_path: Option<&Path>,
 ) -> Result<ApiKeyFile, OcWalletError> {
     let keys = list_api_keys(vault_path)?;
     keys.into_iter()
-        .find(|k| k.token_hash == token_hash)
+        .find(|k| oc_core::credential::ct_eq(&k.token_hash, token_hash))
         .ok_or(OcWalletError::Core(oc_core::OcError::ApiKeyNotFound))
+}
+
+/// Classify a raw credential string via the shared dual-track model.
+pub fn parse_credential(raw: &str) -> oc_core::Credential {
+    oc_core::Credential::parse(raw)
 }
 
 /// List all API keys, sorted by creation time (newest first).
@@ -151,6 +159,7 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             token_hash: hash_token(token),
+            recipient: "age1testrecipient000000000000000000000000000000000000".to_string(),
             created_at: "2026-03-22T10:30:00Z".to_string(),
             wallet_ids: vec!["wallet-1".to_string()],
             policy_ids: vec!["policy-1".to_string()],
@@ -353,5 +362,52 @@ mod tests {
             .filter(|n| n.ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "temp files left behind: {leftovers:?}");
+    }
+
+    /// The local prefix must stay identical to the canonical
+    /// `oc_core::credential::TOKEN_PREFIX`: token generation and credential
+    /// classification share one definition, never two string literals.
+    #[test]
+    fn token_prefix_matches_canonical_credential_prefix() {
+        assert_eq!(TOKEN_PREFIX, oc_core::credential::TOKEN_PREFIX);
+        assert_eq!(TOKEN_PREFIX, "oc_key_");
+    }
+
+    /// `parse_credential` delegates to the shared dual-track model: generated
+    /// tokens classify as agent credentials, anything else as owner
+    /// passphrases. No scattered `starts_with("oc_key_")` checks may remain.
+    #[test]
+    fn parse_credential_routes_through_shared_model() {
+        assert!(matches!(parse_credential(&generate_token()), oc_core::Credential::ApiToken(_)));
+        assert!(matches!(parse_credential("owner-passphrase"), oc_core::Credential::Passphrase(_)));
+        assert!(matches!(parse_credential(""), oc_core::Credential::Passphrase(_)));
+    }
+
+    /// Read-skip-bad-lines: a corrupt key file must not fail the listing;
+    /// it is skipped with a warning and the healthy entries are returned.
+    #[test]
+    fn list_skips_corrupt_key_files_without_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().to_path_buf();
+        save_api_key(&test_key("good", "good", "oc_key_good"), Some(&vault)).unwrap();
+        fs::write(vault.join("keys/bad.json"), b"{ not valid json").unwrap();
+
+        let keys = list_api_keys(Some(&vault)).unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].id, "good");
+    }
+
+    /// The constant-time hash scan must find a match regardless of position:
+    /// the target here is the second entry, proving the scan does not stop
+    /// at the first non-matching file.
+    #[test]
+    fn lookup_by_token_hash_scans_all_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault = dir.path().to_path_buf();
+        save_api_key(&test_key("first", "first", "oc_key_aaa"), Some(&vault)).unwrap();
+        save_api_key(&test_key("second", "second", "oc_key_bbb"), Some(&vault)).unwrap();
+
+        let found = load_api_key_by_token_hash(&hash_token("oc_key_bbb"), Some(&vault)).unwrap();
+        assert_eq!(found.id, "second");
     }
 }

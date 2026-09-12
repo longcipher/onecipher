@@ -11,6 +11,14 @@ description = "Network-Agent: WalletConnect v2 wallet-role server for OneCipher 
 name = "oc_netagent"
 path = "src/lib.rs"
 
+[features]
+# `real-rpc`: session-key real RPC bridge (`session_key_rpc` module).
+# Wires `oc-session-key` provider traits to live JSON-RPC endpoints.
+# `alloy` / `solana-client` typed SDKs (when adopted) land here in
+# `oc-netagent`, never in the R56 leaf. Off by default so the default build
+# stays mock-only.
+real-rpc = ["dep:oc-session-key", "dep:base64"]
+
 [dependencies]
 # `alloy-dyn-abi` backs the `sim` ABI decoder. It replaces a hand-rolled
 # fixed-slot decoder that could only read static types and rendered dynamic
@@ -19,11 +27,13 @@ path = "src/lib.rs"
 alloy-dyn-abi = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 backon = { workspace = true }
+base64 = { workspace = true, optional = true }
 hex = { workspace = true }
 hpx = { workspace = true, features = ["rustls-tls", "http1", "http2", "json"] }
 oc-core = { workspace = true }
 oc-keyagent = { workspace = true }
 oc-policy = { workspace = true }
+oc-session-key = { workspace = true, optional = true }
 oc-signer = { workspace = true }
 oc-walletconnect = { workspace = true }
 prost = { workspace = true }
