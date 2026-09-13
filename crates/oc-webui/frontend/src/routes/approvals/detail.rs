@@ -87,8 +87,9 @@ pub fn ApprovalDetail() -> impl IntoView {
                         // dumping the raw JSON.
                         let is_auth_method = matches!(
                             a.method.as_str(),
-                            "onecipher_signAuth" | "wc_authRequest"
+                            "onecipher_signAuth" | "wc_authRequest" | "solana_signIn"
                         );
+                        let siwx = a.siwx_summary.clone();
                         let auth_message = if is_auth_method {
                             a.params
                                 .as_deref()
@@ -123,7 +124,33 @@ pub fn ApprovalDetail() -> impl IntoView {
                                         {a.risk_level.clone()}
                                     </span>
                                 </div>
-                                {if let Some(msg) = auth_message {
+                                {if let Some(summary) = siwx {
+                                    // Structured CAIP-122 Sign-In summary:
+                                    // the phishing-critical domain is
+                                    // highlighted; the full text stays below.
+                                    view! {
+                                        <div style="margin-bottom:0.5rem;border:1px solid #374151;border-radius:4px;padding:0.75rem;background:#111827;">
+                                            <div style="margin-bottom:0.25rem;">
+                                                <strong>"Sign-In domain: "</strong>
+                                                <span style="color:#fbbf24;font-weight:700;">
+                                                    {summary.domain.clone()}
+                                                </span>
+                                            </div>
+                                            <div style="margin-bottom:0.25rem;font-size:0.8rem;overflow-wrap:anywhere;">
+                                                <strong>"Address: "</strong>
+                                                <span>{summary.address.clone()}</span>
+                                            </div>
+                                            <div style="margin-bottom:0.25rem;font-size:0.8rem;overflow-wrap:anywhere;">
+                                                <strong>"URI: "</strong>
+                                                <span>{summary.uri.clone()}</span>
+                                            </div>
+                                            <div style="font-size:0.8rem;">
+                                                <strong>"Nonce: "</strong>
+                                                <span>{summary.nonce.clone()}</span>
+                                            </div>
+                                        </div>
+                                    }.into_any()
+                                } else if let Some(msg) = auth_message {
                                     // Human-readable message for auth-class
                                     // methods (onecipher_signAuth / wc_authRequest).
                                     view! {

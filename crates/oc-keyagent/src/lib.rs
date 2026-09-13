@@ -18,6 +18,7 @@ pub mod frame;
 pub mod handler;
 pub mod hardening;
 pub mod key_ops;
+pub mod nonce_store;
 pub mod passkey;
 pub mod proto;
 pub mod request;
@@ -37,6 +38,7 @@ pub use hardening::{
     HardenStatus, apply_hardening, apply_hardening_strict, cached_status, strict_mode_enabled,
 };
 pub use key_ops::{decrypt_mnemonic, derive_chain_key};
+pub use nonce_store::{MAX_NONCE_ENTRIES, NonceStore, NonceStoreError};
 // Re-export key types for convenience (formerly in oc-signing-core).
 pub use oc_core::{Passphrase, UnlockToken, WalletId};
 pub use passkey::{PasskeyError, PasskeyPubkey, PasskeyVerifier};

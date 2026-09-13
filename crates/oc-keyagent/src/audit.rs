@@ -90,6 +90,9 @@ pub enum EventType {
     VaultUnlocked,
     TransactionSigned,
     AuthSigned,
+    /// A CAIP-122 Sign-In message was signed via `SignSiwx` (single-use
+    /// message hash consumed from the nonce store).
+    SiwxSigned,
     PasskeyRegistered,
     // Per-request enclave lifecycle: the parent appends `EnclavePending`
     // before spawning the child and `EnclaveResolved` after (success, child

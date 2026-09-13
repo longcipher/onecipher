@@ -119,10 +119,43 @@ pub struct PendingApproval {
     /// Optional simulation result (None if sim failed or non-EVM).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub simulation: Option<TxSimulation>,
+    /// Structured CAIP-122 Sign-In summary, when the request carries a
+    /// parseable Sign-In message. Lets approval UIs highlight the phishing-
+    /// relevant fields (domain, address, URI) instead of raw params.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub siwx_summary: Option<SiwxSummary>,
     /// Unix timestamp when this approval was created.
     pub created_at_unix: u64,
     /// Unix timestamp when this approval expires.
     pub expires_at_unix: u64,
+}
+
+/// Structured summary of a CAIP-122 Sign-In message for approval UIs.
+///
+/// Plain data (no `oc-siwx` dependency — `oc-core` stays the dependency-free
+/// base); populated by the Net-Agent when the request `message` param parses
+/// as CAIP-122.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiwxSummary {
+    /// Authority requesting the signing (phishing-critical — highlight it).
+    pub domain: String,
+    /// Blockchain address performing the signing.
+    pub address: String,
+    /// URI that is the subject of the signing.
+    pub uri: String,
+    /// Preamble chain label (`"Ethereum"`, `"Solana"`), if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_name: Option<String>,
+    /// Anti-replay nonce.
+    pub nonce: String,
+    /// Original lexical form of `issued-at`.
+    pub issued_at: String,
+    /// Original lexical form of `expiration-time`, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expiration_time: Option<String>,
+    /// Resource URIs referenced by the message.
+    #[serde(default)]
+    pub resources: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

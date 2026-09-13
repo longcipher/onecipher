@@ -26,6 +26,7 @@ pub mod rpc_client;
 #[cfg(feature = "real-rpc")]
 pub mod session_key_rpc;
 pub mod sim;
+pub mod siwx_verify;
 pub mod telemetry_drain;
 pub mod wc_method_router;
 pub mod wc_pairing;

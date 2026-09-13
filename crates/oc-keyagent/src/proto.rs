@@ -351,6 +351,55 @@ pub struct SignAuthRequest {
     pub agent_token: Vec<u8>,
 }
 
+/// `SignSiwx` request — CAIP-122 Sign-In with X message signing.
+///
+/// `message` must be the exact CAIP-122 signing string (the wallet signs the
+/// raw bytes; verifiers hash the original bytes, never a re-serialization).
+/// The Key-Agent parses the message fail-closed, enforces chain binding
+/// (`chain_id` reference + preamble label), and consumes the message hash
+/// single-use from the nonce store before signing (replay protection).
+///
+/// Authorization mirrors [`SignAuthRequest`]: exactly one of `auth`
+/// (explicit [`PasskeyAuthorization`]) or `agent_token` (daemon-internal
+/// capability for approval-gated WalletConnect paths) must be present.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct SignSiwxRequest {
+    /// Wallet ID to sign with.
+    #[prost(string, tag = "1")]
+    pub wallet_id: String,
+    /// CAIP-2 chain id (e.g. `eip155:1`, `solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp`).
+    #[prost(string, tag = "2")]
+    pub chain_id: String,
+    /// Exact CAIP-122 signing-string bytes.
+    #[prost(bytes, tag = "3")]
+    pub message: Vec<u8>,
+    /// Optional explicit Passkey proof for local callers.
+    #[prost(message, optional, tag = "4")]
+    pub auth: Option<PasskeyAuthorization>,
+    /// Optional daemon-internal capability token for WalletConnect-originated
+    /// requests that were already gated by origin allowlists and approval flow.
+    #[prost(bytes, tag = "5")]
+    pub agent_token: Vec<u8>,
+}
+
+/// `SignSiwx` response — signature plus the derived account identity.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct SignSiwxResponse {
+    /// Raw signature bytes (65-byte r‖s‖v for EVM, 64-byte ed25519 otherwise).
+    #[prost(bytes, tag = "1")]
+    pub signature: Vec<u8>,
+    /// Chain-standard account address (matches the message `address` field).
+    #[prost(string, tag = "2")]
+    pub address: String,
+    /// CAIP-2 chain id the signature is valid for.
+    #[prost(string, tag = "3")]
+    pub chain_id: String,
+    /// Public key bytes (33-byte compressed secp256k1 for EVM-family chains,
+    /// 32-byte raw ed25519 otherwise).
+    #[prost(bytes, tag = "4")]
+    pub public_key: Vec<u8>,
+}
+
 /// `SignAuth` response — signature plus the derived account identity.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct SignAuthResponse {

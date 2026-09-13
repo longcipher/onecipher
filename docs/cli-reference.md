@@ -240,6 +240,47 @@ onecipher verify --address 0xab16... --signature 0x... --typed-data '{
 | `--signature <HEX>` | Signature to verify (required) |
 | `--chain <CHAIN>` | Chain type (default: `evm`) |
 
+### `onecipher sign-in`
+
+CAIP-122 Sign-In with X: build, parse, and verify sign-in messages
+(LOCAL — no RPC, except `verify --rpc-url` for EIP-1271 / ERC-6492).
+
+```bash
+# Build the exact signing text (nonce generated when omitted)
+onecipher sign-in message --chain eip155:1 --domain example.com \
+  --address 0x2c75...c23 --uri https://example.com/login \
+  --statement "Sign in" --nonce testnonce12345678
+
+# Solana
+onecipher sign-in message --chain solana:mainnet --domain example.com \
+  --address GwAF...F1 --uri https://example.com/login
+
+# Inspect a message
+onecipher sign-in parse --message-file msg.txt [--json]
+
+# Verify (EOAs offline; contracts need --rpc-url). Exit 1 on failure.
+onecipher sign-in verify --message-file msg.txt --signature 0x... \
+  --domain example.com --nonce testnonce12345678
+onecipher sign-in verify --message-file sol.txt --signature <base58> \
+  --domain example.com --nonce testnonce12345678 --chain solana:mainnet
+onecipher sign-in verify --message-file msg.txt --signature 0x... \
+  --domain example.com --nonce testnonce12345678 \
+  --rpc-url https://mainnet.base.org   # EIP-1271 / ERC-6492
+
+# Mint a nonce
+onecipher sign-in nonce [-l 17]
+```
+
+| Subcommand | Key flags |
+|------------|-----------|
+| `message` | `--chain` (CAIP-2, required), `--domain` / `--address` / `--uri` (required), `--statement`, `--nonce`, `--issued-at` / `--expiration-time` / `--not-before` (RFC 3339), `--request-id`, `--resource` (repeatable), `--json` |
+| `verify` | `--message` / `--message-file`, `--signature` (hex, `0x` optional; Solana also base58), `--domain` / `--nonce` (required bindings), `--uri` / `--scheme` / `--chain-id` (optional bindings), `--chain` (verifier selector, default `eip155:1`), `--rpc-url`, `--json` |
+| `parse` | `--message` / `--message-file`, `--json` |
+| `nonce` | `-l` / `--len` (min 8, default 17) |
+
+`verify` binds `domain` + `nonce` always (replay/origin safety); failures
+exit non-zero with the typed error (never `valid:false` + exit 0).
+
 ### `onecipher send`
 
 Build, sign, and broadcast an ERC-20 token transfer (cast-style).

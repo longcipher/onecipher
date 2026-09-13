@@ -63,6 +63,7 @@ mod tests {
             created_at_unix: None,
             expires_at_unix: None,
             simulation: None,
+            siwx_summary: None,
         }
     }
 

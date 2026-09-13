@@ -18,6 +18,9 @@ path = "../crates/oc-core"
 [dependencies.oc-keyagent]
 path = "../crates/oc-keyagent"
 
+[dependencies.oc-siwx]
+path = "../crates/oc-siwx"
+
 [dependencies.prost]
 version = "0.14"
 
@@ -38,6 +41,13 @@ bench = false
 [[bin]]
 name = "prost_decode"
 path = "fuzz_targets/prost_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "siwx_parse"
+path = "fuzz_targets/siwx_parse.rs"
 test = false
 doc = false
 bench = false

@@ -23,6 +23,7 @@ k256 = { workspace = true }
 oc-core = { workspace = true, features = ["hardened"] }
 oc-crypto = { workspace = true }
 oc-signer = { workspace = true }
+oc-siwx = { workspace = true }
 oc-vault = { workspace = true }
 oc-wallet = { workspace = true, default-features = false }
 p256 = { workspace = true, features = ["ecdsa"] }

@@ -32,6 +32,7 @@ pub(crate) mod send_transaction;
 pub(crate) mod service;
 pub(crate) mod session_key;
 pub(crate) mod sign_auth;
+pub(crate) mod sign_in;
 pub(crate) mod sign_message;
 pub(crate) mod sign_transaction;
 pub(crate) mod status;

@@ -3604,6 +3604,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a756c3fac73139e83f14c2d742155dd2b78d3ee56597b419a0579b7bdd6dd78"
 
 [[package]]
+name = "iri-string"
+version = "0.7.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1663ee7d8cf2900cc1414b1e1eec9f348d6eaa3bcab07579f4726a4b8499f447"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4242,6 +4252,7 @@ dependencies = [
  "arboard",
  "axum",
  "base64 0.23.1",
+ "bs58",
  "clap",
  "clap_complete",
  "crossterm 0.29.0",
@@ -4259,6 +4270,7 @@ dependencies = [
  "oc-policy",
  "oc-secret",
  "oc-signer",
+ "oc-siwx",
  "oc-vault",
  "oc-wallet",
  "oc-walletconnect",
@@ -4331,6 +4343,7 @@ dependencies = [
  "oc-core",
  "oc-crypto",
  "oc-signer",
+ "oc-siwx",
  "oc-vault",
  "oc-wallet",
  "p256 0.14.0",
@@ -4362,6 +4375,7 @@ dependencies = [
  "oc-policy",
  "oc-session-key",
  "oc-signer",
+ "oc-siwx",
  "oc-walletconnect",
  "prost",
  "rand 0.10.2",
@@ -4447,10 +4461,12 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "hex",
  "hmac 0.13.0",
+ "jiff",
  "k256 0.14.0",
  "libc",
  "oc-core",
  "oc-crypto",
+ "oc-siwx",
  "rand 0.10.2",
  "ripemd 0.2.0",
  "serde",
@@ -4461,6 +4477,19 @@ dependencies = [
  "thiserror 2.0.20",
  "xrpl-rust",
  "zeroize",
+]
+
+[[package]]
+name = "oc-siwx"
+version = "0.1.0"
+dependencies = [
+ "iri-string",
+ "jiff",
+ "proptest",
+ "rand 0.10.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

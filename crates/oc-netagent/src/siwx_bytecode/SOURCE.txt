@@ -1,0 +1,18 @@
+wevm/ox universalSignatureValidatorBytecode (deployless constructor initcode)
+https://github.com/wevm/ox
+commit: ef203862dc792d2e460313e7af33b6a5016f3acb
+file: src/erc6492/SignatureErc6492.ts
+license: MIT (full permission notice in LICENSE)
+copyright: Copyright (c) 2024-present weth, LLC
+
+Deployless ERC-6492 simulation payload is
+`data = bytecode || abi.encode(signer, hash, signature)` with `to` omitted
+(eth_call-only simulation; nothing is ever deployed).
+
+This is a canonical public deployment artifact (like a well-known contract
+address), vendored as data so the ERC-6492 verifier needs no codegen
+dependency. The verification *logic* (magic dispatch, chain-id pre-check,
+strict bool decoding) is implemented in `src/siwx_verify.rs` in this
+workspace's own style over the existing `HpxRpcClient`.
+
+It is not the Ambire UniversalSigValidator singleton compiled with salt 0x0.

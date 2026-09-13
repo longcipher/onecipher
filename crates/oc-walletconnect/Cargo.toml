@@ -36,5 +36,41 @@ zeroize = { workspace = true, features = ["derive"] }
 hex-literal = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
 
+# These integration targets drive `mock_relay` / `attach_mock_relay` /
+# `process_one`, which only exist with `test-utils` (the lib itself is built
+# without `cfg(test)` for integration targets). `required-features` keeps
+# bare `cargo test -p oc-walletconnect` green by skipping them, while
+# `--features test-utils` / `--all-features` (the documented test
+# invocation) still runs everything.
+[[test]]
+name = "dapp_client"
+path = "tests/dapp_client.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "e2e"
+path = "tests/e2e.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "mock_relay"
+path = "tests/mock_relay.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "pairing_flow"
+path = "tests/pairing_flow.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "session_level_methods"
+path = "tests/session_level_methods.rs"
+required-features = ["test-utils"]
+
+[[test]]
+name = "wallet_server"
+path = "tests/wallet_server.rs"
+required-features = ["test-utils"]
+
 [lints]
 workspace = true

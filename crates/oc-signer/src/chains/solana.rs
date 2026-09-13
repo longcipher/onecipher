@@ -136,6 +136,40 @@ impl ChainSigner for SolanaSigner {
         self.sign(private_key, message)
     }
 
+    fn verify_message(
+        &self,
+        address: &str,
+        message: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, SignerError> {
+        use ed25519_dalek::Verifier as _;
+
+        if signature.len() != 64 {
+            return Err(SignerError::Input(format!(
+                "expected 64-byte Ed25519 signature, got {} bytes",
+                signature.len()
+            )));
+        }
+        let decoded = bs58::decode(address)
+            .into_vec()
+            .map_err(|e| SignerError::Input(format!("invalid base58 address: {e}")))?;
+        let raw: [u8; 32] = decoded.try_into().map_err(|v: Vec<u8>| {
+            SignerError::Input(format!("expected 32 bytes, got {}", v.len()))
+        })?;
+        let vk = VerifyingKey::from_bytes(&raw)
+            .map_err(|e| SignerError::Input(format!("invalid Ed25519 pubkey: {e}")))?;
+        if vk.is_weak() {
+            return Err(SignerError::Input("weak/small-order pubkey".into()));
+        }
+        let sig_bytes: [u8; 64] = signature
+            .try_into()
+            .map_err(|_| SignerError::Input("bad Ed25519 signature length".to_string()))?;
+        let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+        // RFC 8032 `verify` (not `verify_strict`): matches the CAIP-122
+        // Solana profile and the upstream siwx-svm behavior.
+        Ok(vk.verify(message, &sig).is_ok())
+    }
+
     fn default_derivation_path(&self, index: u32) -> String {
         format!("m/44'/501'/{}'/0'", index)
     }

@@ -12,7 +12,7 @@ pub struct EvmSigner;
 
 impl EvmSigner {
     /// Derive an EIP-55 checksummed address from a private key.
-    fn eip55_checksum(address_hex: &str) -> String {
+    pub(crate) fn eip55_checksum(address_hex: &str) -> String {
         // address_hex should be 40 hex chars (no 0x prefix)
         let lower = address_hex.to_lowercase();
         let hash = Keccak256::digest(lower.as_bytes());

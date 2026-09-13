@@ -196,6 +196,7 @@ mod tests {
             risk: RiskLevel::Safe,
             risk_reasons: vec![],
             simulation: None,
+            siwx_summary: None,
             created_at_unix: 1000,
             expires_at_unix: 1300,
         }

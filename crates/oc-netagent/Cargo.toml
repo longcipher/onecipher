@@ -35,6 +35,7 @@ oc-keyagent = { workspace = true }
 oc-policy = { workspace = true }
 oc-session-key = { workspace = true, optional = true }
 oc-signer = { workspace = true }
+oc-siwx = { workspace = true }
 oc-walletconnect = { workspace = true }
 prost = { workspace = true }
 rand = { workspace = true }

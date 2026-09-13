@@ -16,6 +16,23 @@ pub struct PendingApproval {
     pub created_at_unix: Option<u64>,
     pub expires_at_unix: Option<u64>,
     pub simulation: Option<TxSimulation>,
+    #[serde(default)]
+    pub siwx_summary: Option<SiwxSummary>,
+}
+
+/// Structured CAIP-122 Sign-In summary (mirrors the backend
+/// `oc_core::SiwxSummary`; all fields optional-tolerant for forward compat).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SiwxSummary {
+    pub domain: String,
+    pub address: String,
+    pub uri: String,
+    pub chain_name: Option<String>,
+    pub nonce: String,
+    pub issued_at: String,
+    pub expiration_time: Option<String>,
+    #[serde(default)]
+    pub resources: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -5,8 +5,10 @@
 > OneCipher-specific account-system dependency**.
 >
 > OneCipher speaks standard protocols. The capabilities described here are generic:
-> `personal_sign`-family methods, a dedicated `onecipher_signAuth` method, and the
-> WalletConnect v2 Auth protocol (`wc_authRequest`). Any OIDC/OAuth IAM can consume them.
+> `personal_sign`-family methods, a dedicated `onecipher_signAuth` method, the
+> WalletConnect v2 Auth protocol (`wc_authRequest`), and CAIP-122 Sign-In with X
+> (`solana_signIn`, Key-Agent `SignSiwx`, `onecipher sign-in`). Any OIDC/OAuth IAM
+> can consume them.
 
 ## 1. Integration Model
 
@@ -44,7 +46,9 @@ The private key never leaves the daemon; the IAM only ever sees addresses and si
 | `personal_sign` / `eth_sign` | EIP-191 message signing | passkey-gated (P0-2) |
 | `eth_signTypedData_v4` | EIP-712 typed data | passkey-gated |
 | `eth_sendTransaction` / `eth_signTransaction` | EVM tx | passkey-gated |
-| `solana_signMessage` / `solana_signTransaction` | Solana | passkey-gated |
+| `solana_signMessage` | Solana offchain message (raw ed25519 via `SignAuth` with the real chain id) | passkey-gated |
+| `solana_signTransaction` | Solana | passkey-gated |
+| `solana_signIn` | CAIP-122 Solana Sign-In (Key-Agent `SignSiwx`: parse fail-closed, chain-bound, single-use) | passkey or daemon-internal token |
 | `onecipher_listWallets` / `onecipher_getBalance` | read-only | none |
 | `onecipher_generateChallenge` | obtain passkey challenge | none |
 
@@ -120,8 +124,40 @@ method router):
 ```
 
 Supported types: `eip4361` (EIP-191 signature over the SIWE message) for EVM;
-`eip191` for generic EVM messages. Non-EVM chains return
-`METHOD_NOT_SUPPORTED` for this protocol initially (use `onecipher_signAuth` there).
+`eip191` for generic EVM messages. Solana chains take the CAIP-122 branch:
+the daemon builds the Sign-In text (`{domain} wants you to sign in with your
+Solana account:`, genesis-hash or alias chain id), gates it through policy +
+approval, and signs via the Key-Agent's replay-protected `SignSiwx` path
+(message hash consumed single-use before signing). Other namespaces return
+`METHOD_NOT_SUPPORTED` (use `onecipher_signAuth` there).
+
+### 2.4 CAIP-122 Sign-In with X (EVM + Solana)
+
+The message model lives in `oc-siwx` (ABNF parse, `AuthOpts` domain/nonce
+binding, 60s skew, DoS bounds); pure-crypto verification in `oc-signer`
+(`EvmVerifier`: EIP-191 + low-s gate + EIP-55; `SolanaVerifier`: Ed25519,
+weak-key rejection); contract/counterfactual verification in `oc-netagent`
+(`RpcVerifier`: EIP-1271 `isValidSignature`, ERC-6492 deployless simulation,
+`eth_chainId` pre-check, per-chain RPC map, URL-free errors).
+
+Local tooling (no daemon, no RPC unless noted):
+
+```bash
+onecipher sign-in message --chain eip155:1 --domain example.com \
+  --address 0x... --uri https://example.com/login   # exact signing text
+onecipher sign-in parse --message-file msg.txt [--json]
+onecipher sign-in verify --message-file msg.txt --signature 0x... \
+  --domain example.com --nonce <nonce>               # EOAs offline
+onecipher sign-in verify --message-file msg.txt --signature 0x... \
+  --domain example.com --nonce <nonce> \
+  --rpc-url https://...                             # EIP-1271 / ERC-6492
+onecipher sign-in nonce
+```
+
+Verification rules (both local and daemon paths): the original bytes are
+hashed (never a re-serialization); `domain` + `nonce` binding is mandatory;
+failures exit non-zero / return typed errors (`Invalid*` malformed,
+`VerificationFailed` crypto-false, `Backend` transport).
 
 ## 3. Configuration (all optional, generic)
 
@@ -154,8 +190,9 @@ onecipher config set wc.project_id 'YOUR_PROJECT_ID'
    Direct/local `onecipher_signAuth` calls include `auth`; `wc_authRequest` is
    authorized by the daemon's internal token path.
 5. **OneCipher WebUI** displays the human-readable message (parsed EIP-4361 fields:
-   domain, URI, nonce, expiry, statement); the user approves; policy is evaluated;
-   the signature is returned over the relay.
+   domain, URI, nonce, expiry, statement — or the structured CAIP-122 summary
+   with the sign-in domain highlighted for `solana_signIn`); the user approves;
+   policy is evaluated; the signature is returned over the relay.
 6. **IAM** verifies the signature (EVM: `ecrecover(keccak256("\x19Ethereum Signed
    Message:\n" + len + message), v, r, s)`; Ed25519 chains: verify with the stored
    public key), matches it to a bound address, and issues its own tokens.

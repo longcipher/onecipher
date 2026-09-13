@@ -561,6 +561,67 @@ fn dispatch_verify(
     })
 }
 
+fn dispatch_sign_in(subcommand: cli::SignInCommands) -> Result<(), CliError> {
+    match subcommand {
+        cli::SignInCommands::Message {
+            chain,
+            domain,
+            address,
+            uri,
+            statement,
+            nonce,
+            issued_at,
+            expiration_time,
+            not_before,
+            request_id,
+            resource,
+            json,
+        } => commands::sign_in::run_message(
+            &chain,
+            &domain,
+            &address,
+            &uri,
+            statement.as_deref(),
+            nonce.as_deref(),
+            issued_at.as_deref(),
+            expiration_time.as_deref(),
+            not_before.as_deref(),
+            request_id.as_deref(),
+            &resource,
+            json,
+        ),
+        cli::SignInCommands::Verify {
+            message,
+            message_file,
+            signature,
+            domain,
+            nonce,
+            uri,
+            scheme,
+            chain_id,
+            chain,
+            rpc_url,
+            json,
+        } => commands::sign_in::run_verify(
+            message.as_deref(),
+            message_file.as_deref(),
+            &signature,
+            &domain,
+            &nonce,
+            uri.as_deref(),
+            scheme.as_deref(),
+            chain_id.as_deref(),
+            &chain,
+            rpc_url.as_deref(),
+            json,
+        ),
+        cli::SignInCommands::Parse { message, message_file, json } => {
+            commands::sign_in::run_parse(message.as_deref(), message_file.as_deref(), json)
+        }
+        cli::SignInCommands::Nonce { len } => commands::sign_in::run_nonce(len),
+    }
+}
+
 fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> {
     let Some(command) = cli.command else {
         return Ok(());
@@ -583,6 +644,7 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         Commands::Intent { subcommand } => dispatch_intent(subcommand),
         Commands::Secret { subcommand } => dispatch_secret(subcommand),
         Commands::Password { subcommand } => dispatch_password(subcommand),
+        Commands::SignIn { subcommand } => dispatch_sign_in(subcommand),
         Commands::Totp { subcommand } => dispatch_totp(subcommand),
         Commands::Age { subcommand } => dispatch_age(subcommand),
         Commands::AgentSecret { subcommand } => dispatch_agent_secret(subcommand),

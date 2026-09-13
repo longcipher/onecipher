@@ -17,6 +17,7 @@ use crate::{
     audit::{AuditLog, DeviceKeyStore, EventType},
     error::KeyAgentError,
     global_key_cache,
+    nonce_store::NonceStore,
     passkey::{PasskeyPubkeyStore, PasskeyVerifier, StoredPasskeyPubkey},
     request::{KeyAgentRequest, KeyAgentRequestKind},
     response::KeyAgentResponse,
@@ -62,6 +63,7 @@ pub struct AgentContext {
     passkey_verifiers: Arc<Mutex<HashMap<String, PasskeyVerifier>>>,
     sign_auth_internal_token: Arc<Mutex<Option<Vec<u8>>>>,
     session_keys: SessionKeyStore,
+    nonce_store: NonceStore,
 }
 
 static DEFAULT_CONTEXT: OnceLock<AgentContext> = OnceLock::new();
@@ -105,12 +107,15 @@ impl AgentContext {
             .map_err(|e| KeyAgentError::Internal(format!("failed to open audit log: {e}")))?;
         let session_keys = SessionKeyStore::open_default()
             .map_err(|e| KeyAgentError::Internal(format!("session key store: {e}")))?;
+        let nonce_store = NonceStore::open_default()
+            .map_err(|e| KeyAgentError::Internal(format!("siwx nonce store: {e}")))?;
         Ok(Self {
             audit_log: Arc::new(Mutex::new(audit_log)),
             audit_fail_closed: false,
             passkey_verifiers: Arc::new(Mutex::new(HashMap::new())),
             sign_auth_internal_token: Arc::new(Mutex::new(None)),
             session_keys,
+            nonce_store,
         })
     }
 
@@ -702,6 +707,7 @@ pub fn dispatch_with(
         Some(KeyAgentRequestKind::SignTransaction(req)) => handle_sign_transaction(ctx, req),
         Some(KeyAgentRequestKind::SignMessage(req)) => handle_sign_message(ctx, req),
         Some(KeyAgentRequestKind::SignAuth(req)) => handle_sign_auth(ctx, req),
+        Some(KeyAgentRequestKind::SignSiwx(req)) => handle_sign_siwx(ctx, req),
         Some(KeyAgentRequestKind::SignTypedData(req)) => handle_sign_typed_data(ctx, req),
         Some(KeyAgentRequestKind::SignUserOp(req)) => handle_sign_user_op(ctx, req),
         Some(KeyAgentRequestKind::CreateSessionKey(req)) => handle_create_session_key(ctx, req),
@@ -1167,6 +1173,254 @@ fn handle_sign_auth(
     }
 
     let resp = crate::proto::SignAuthResponse {
+        signature,
+        address,
+        chain_id: req.chain_id.clone(),
+        public_key,
+    };
+    Ok(KeyAgentResponse::ok(resp.encode_to_vec()))
+}
+
+/// Expected CAIP-122 preamble label for a CAIP-2 namespace.
+///
+/// Only namespaces with a verification profile (`oc-signer` EVM / Solana
+/// verifiers) are signable via `SignSiwx`; anything else is fail-closed so a
+/// wallet can never be tricked into signing a login it cannot be verified for.
+fn siwx_expected_chain_name(namespace: &str) -> Option<&'static str> {
+    match namespace {
+        "eip155" => Some(oc_siwx::EVM_CHAIN_NAME),
+        "solana" => Some(oc_siwx::SOLANA_CHAIN_NAME),
+        _ => None,
+    }
+}
+
+/// Handle `SignSiwx` — CAIP-122 Sign-In message signing with replay protection.
+///
+/// Fail-fast order: params → authorization → UTF-8/parse → chain binding →
+/// temporal window → single-use consume → sign → address ownership → audit.
+/// The message hash is consumed *before* signing: presenting the bytes burns
+/// the nonce even when signing later fails, so a failed attempt can never be
+/// replayed with the same message (the caller must mint a fresh nonce).
+fn handle_sign_siwx(
+    ctx: &AgentContext,
+    req: &crate::proto::SignSiwxRequest,
+) -> Result<KeyAgentResponse, KeyAgentError> {
+    if req.wallet_id.is_empty() {
+        return Ok(KeyAgentResponse::error(coded(err_code::PARAM, "missing wallet_id")));
+    }
+    if req.chain_id.is_empty() {
+        return Ok(KeyAgentResponse::error(coded(err_code::PARAM, "missing chain_id")));
+    }
+    if req.message.is_empty() {
+        return Ok(KeyAgentResponse::error(coded(err_code::PARAM, "missing message")));
+    }
+
+    // Authorization: exactly one of Passkey proof / internal token.
+    let mode = if let Some(auth) = &req.auth {
+        if !req.agent_token.is_empty() {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::PARAM,
+                "sign_siwx request must carry either auth or agent_token, not both",
+            )));
+        }
+        if let Err(resp) = verify_passkey_for(ctx, auth, &req.wallet_id) {
+            return Ok(resp);
+        }
+        "passkey"
+    } else {
+        let configured = match ctx.sign_auth_internal_token.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => {
+                return Ok(KeyAgentResponse::error(coded(
+                    err_code::INTERNAL,
+                    "sign_auth internal token mutex poisoned",
+                )))
+            }
+        };
+        let Some(expected) = configured else {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                "sign_auth internal token not configured",
+            )));
+        };
+        if req.agent_token.is_empty() {
+            return Ok(KeyAgentResponse::deny(crate::proto::DenyReason::PasskeyForged));
+        }
+        if !oc_crypto::constant_time_eq(&req.agent_token, &expected) {
+            record_audit(
+                ctx,
+                EventType::AuthFailed,
+                None,
+                serde_json::json!({"action": "sign_siwx_internal_token_mismatch", "wallet_id": req.wallet_id}),
+            );
+            return Ok(KeyAgentResponse::deny(crate::proto::DenyReason::PasskeyForged));
+        }
+        "internal_token"
+    };
+
+    // The wallet signs the exact bytes verifiers will hash — they must be
+    // UTF-8 CAIP-122 text, never opaque blobs.
+    let raw = match std::str::from_utf8(&req.message) {
+        Ok(s) => s,
+        Err(_) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::PARAM,
+                "sign_siwx message is not valid UTF-8",
+            )))
+        }
+    };
+    let msg: oc_siwx::SiwxMessage = match raw.parse() {
+        Ok(m) => m,
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::PARAM,
+                format!("invalid CAIP-122 message: {e}"),
+            )))
+        }
+    };
+
+    // Chain binding: CAIP-2 reference must equal the message chain id, and
+    // the preamble label must match the namespace profile.
+    let (namespace, reference) = match req.chain_id.split_once(':') {
+        Some((ns, r)) => (ns, r),
+        None => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::PARAM,
+                format!("chain_id '{}' is not CAIP-2", req.chain_id),
+            )))
+        }
+    };
+    let Some(expected_name) = siwx_expected_chain_name(namespace) else {
+        return Ok(KeyAgentResponse::error(coded(
+            err_code::PARAM,
+            format!("unsupported sign-in namespace: {namespace}"),
+        )));
+    };
+    if reference != msg.chain_id() {
+        return Ok(KeyAgentResponse::error(coded(
+            err_code::PARAM,
+            format!(
+                "chain_id mismatch: request '{}' != message '{}'",
+                req.chain_id,
+                msg.chain_id()
+            ),
+        )));
+    }
+    if msg.chain_name() != Some(expected_name) {
+        return Ok(KeyAgentResponse::error(coded(
+            err_code::PARAM,
+            format!("chain name mismatch: expected {expected_name}, got {:?}", msg.chain_name()),
+        )));
+    }
+
+    // Temporal window, bound to the message's own domain/nonce (shape +
+    // expiry / not-before; the relying party re-binds domain/nonce at
+    // verification time).
+    if let Err(e) = msg.validate(&oc_siwx::AuthOpts::new(msg.domain(), msg.nonce())) {
+        let (code, detail) = match &e {
+            oc_siwx::SiwxError::Expired |
+            oc_siwx::SiwxError::NotYetValid |
+            oc_siwx::SiwxError::StaleIssuedAt => (err_code::AUTH, e.to_string()),
+            _ => (err_code::PARAM, e.to_string()),
+        };
+        return Ok(KeyAgentResponse::error(coded(code, format!("siwx validation: {detail}"))));
+    }
+
+    // Single-use consume before signing (see function docs).
+    let message_hash: [u8; 32] = Sha256::digest(&req.message).into();
+    let expires_at = msg.expiration_time().map_or_else(
+        || now_unix() + crate::nonce_store::DEFAULT_SIWZ_TTL_SECS,
+        |t| t.as_second().max(0) as u64,
+    );
+    match ctx.nonce_store.consume(&message_hash, expires_at) {
+        Ok(()) => {}
+        Err(crate::nonce_store::NonceStoreError::Replay) => {
+            record_audit(
+                ctx,
+                EventType::AuthFailed,
+                None,
+                serde_json::json!({
+                    "action": "sign_siwx_replay",
+                    "wallet_id": req.wallet_id,
+                    "domain": msg.domain(),
+                }),
+            );
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::AUTH,
+                "siwx message already consumed (replay detected)",
+            )));
+        }
+        Err(e) => {
+            return Ok(KeyAgentResponse::error(coded(
+                err_code::INTERNAL,
+                format!("siwx nonce store: {e}"),
+            )));
+        }
+    }
+
+    // Sign (enclave by default; in-process fallback is test / OC_ENCLAVE=off).
+    let (signature, address, public_key) = if crate::enclave::enclave_enabled() {
+        match sign_via_enclave(
+            ctx,
+            EnclaveSignArgs {
+                action: "sign_siwx",
+                session_key_id: None,
+                op: crate::enclave::OP_SIGN_AUTH,
+                wallet_id: &req.wallet_id,
+                chain_id: &req.chain_id,
+                payload_hex: &hex::encode(&req.message),
+                extra_json: "",
+            },
+        ) {
+            Ok(out) => {
+                let (address, public_key) = match (out.address, out.public_key) {
+                    (Some(a), Some(p)) => (a, p),
+                    _ => {
+                        return Ok(KeyAgentResponse::error(coded(
+                            err_code::INTERNAL,
+                            "enclave omitted address/public key",
+                        )));
+                    }
+                };
+                (out.signature, address, public_key)
+            }
+            Err(e) => return Ok(KeyAgentResponse::error(e)),
+        }
+    } else {
+        match sign_message_core(&req.wallet_id, &req.chain_id, &req.message) {
+            Ok(v) => v,
+            Err(e) => return Ok(KeyAgentResponse::error(e)),
+        }
+    };
+
+    // The signing wallet must own the address the message names — otherwise
+    // the caller selected the wrong wallet (or is probing).
+    if address.to_lowercase() != msg.address().to_lowercase() {
+        return Ok(KeyAgentResponse::error(coded(
+            err_code::AUTH,
+            format!("message address {} is not owned by wallet {}", msg.address(), req.wallet_id),
+        )));
+    }
+
+    let audit_result = record_audit_strict(
+        ctx,
+        EventType::SiwxSigned,
+        None,
+        serde_json::json!({
+            "chain_id": req.chain_id,
+            "wallet_id": req.wallet_id,
+            "domain": msg.domain(),
+            "address": address,
+            "mode": mode,
+        }),
+    );
+    if ctx.audit_fail_closed &&
+        let Err(e) = audit_result
+    {
+        return Ok(KeyAgentResponse::error(e));
+    }
+
+    let resp = crate::proto::SignSiwxResponse {
         signature,
         address,
         chain_id: req.chain_id.clone(),
@@ -1921,6 +2175,7 @@ mod tests {
             passkey_verifiers: Arc::new(Mutex::new(HashMap::new())),
             sign_auth_internal_token: Arc::new(Mutex::new(None)),
             session_keys: SessionKeyStore::open(dir.join("session_keys.json")),
+            nonce_store: NonceStore::open(dir.join("siwx_nonces.json")),
         }
     }
 
@@ -2022,6 +2277,154 @@ mod tests {
         assert!(matches!(result, Err(KeyAgentError::InvalidRequest(_))));
     }
 
+    /// Build a temporally-valid CAIP-122 signing string for `SignSiwx` tests.
+    fn siwx_test_text(chain_name: &str) -> String {
+        oc_siwx::SiwxMessage::new(
+            "example.com",
+            "0x0000000000000000000000000000000000000000",
+            "https://example.com/login",
+            "1",
+            "testnonce12345678",
+        )
+        .expect("test message")
+        .to_sign_string(chain_name)
+    }
+
+    fn siwx_req(message: Vec<u8>, chain_id: &str, token: &[u8]) -> KeyAgentRequestKind {
+        KeyAgentRequestKind::SignSiwx(crate::proto::SignSiwxRequest {
+            wallet_id: "no-such-wallet".to_string(),
+            chain_id: chain_id.to_string(),
+            message,
+            auth: None,
+            agent_token: token.to_vec(),
+        })
+    }
+
+    fn siwx_ctx_with_token(dir: &std::path::Path) -> (AgentContext, Vec<u8>) {
+        let ctx = test_ctx(dir);
+        let token = b"test-internal-token".to_vec();
+        *ctx.sign_auth_internal_token.lock().expect("token mutex") = Some(token.clone());
+        (ctx, token)
+    }
+
+    fn siwx_err_text(resp: &KeyAgentResponse) -> String {
+        match &resp.kind {
+            Some(KeyAgentResponseKind::Error(e)) => e.clone(),
+            other => panic!("expected Error response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_sign_siwx_requires_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = test_ctx(dir.path());
+        // No internal token configured and no Passkey proof: fail-closed.
+        let resp = dispatch_with(
+            &ctx,
+            &KeyAgentRequest {
+                kind: Some(siwx_req(siwx_test_text("Ethereum").into_bytes(), "eip155:1", b"")),
+            },
+        )
+        .expect("dispatch");
+        assert!(resp.is_error() || resp.is_deny(), "must not sign without auth");
+    }
+
+    #[test]
+    fn test_sign_siwx_rejects_malformed_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, token) = siwx_ctx_with_token(dir.path());
+        let resp = dispatch_with(
+            &ctx,
+            &KeyAgentRequest {
+                kind: Some(siwx_req(b"not a sign-in message".to_vec(), "eip155:1", &token)),
+            },
+        )
+        .expect("dispatch");
+        let err = siwx_err_text(&resp);
+        assert!(err.starts_with("E_PARAM"), "got {err}");
+        assert!(err.contains("invalid CAIP-122"), "got {err}");
+    }
+
+    #[test]
+    fn test_sign_siwx_rejects_chain_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, token) = siwx_ctx_with_token(dir.path());
+        let resp = dispatch_with(
+            &ctx,
+            &KeyAgentRequest {
+                kind: Some(siwx_req(
+                    siwx_test_text("Ethereum").into_bytes(),
+                    "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+                    &token,
+                )),
+            },
+        )
+        .expect("dispatch");
+        let err = siwx_err_text(&resp);
+        assert!(err.starts_with("E_PARAM"), "got {err}");
+        assert!(err.contains("chain_id mismatch"), "got {err}");
+    }
+
+    #[test]
+    fn test_sign_siwx_rejects_chain_name_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, token) = siwx_ctx_with_token(dir.path());
+        // Solana-labeled preamble presented for an EVM chain id.
+        let resp = dispatch_with(
+            &ctx,
+            &KeyAgentRequest {
+                kind: Some(siwx_req(siwx_test_text("Solana").into_bytes(), "eip155:1", &token)),
+            },
+        )
+        .expect("dispatch");
+        let err = siwx_err_text(&resp);
+        assert!(err.starts_with("E_PARAM"), "got {err}");
+        assert!(err.contains("chain name mismatch"), "got {err}");
+    }
+
+    #[test]
+    fn test_sign_siwx_rejects_unknown_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, token) = siwx_ctx_with_token(dir.path());
+        let resp = dispatch_with(
+            &ctx,
+            &KeyAgentRequest {
+                kind: Some(siwx_req(
+                    siwx_test_text("Ethereum").into_bytes(),
+                    "cosmos:cosmoshub-4",
+                    &token,
+                )),
+            },
+        )
+        .expect("dispatch");
+        let err = siwx_err_text(&resp);
+        assert!(err.starts_with("E_PARAM"), "got {err}");
+        assert!(err.contains("unsupported sign-in namespace"), "got {err}");
+    }
+
+    #[test]
+    fn test_sign_siwx_second_present_is_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, token) = siwx_ctx_with_token(dir.path());
+        let text = siwx_test_text("Ethereum");
+        let req = || KeyAgentRequest {
+            kind: Some(siwx_req(text.clone().into_bytes(), "eip155:1", &token)),
+        };
+        // First presentation burns the nonce (signing itself fails: the
+        // wallet does not exist — but the consume already happened).
+        let first = dispatch_with(&ctx, &req()).expect("dispatch");
+        let first_err = siwx_err_text(&first);
+        assert!(
+            !first_err.contains("replay"),
+            "first presentation must not be a replay, got {first_err}"
+        );
+        // Second presentation of the exact bytes is a replay.
+        let second = dispatch_with(&ctx, &req()).expect("dispatch");
+        let second_err = siwx_err_text(&second);
+        assert!(second_err.starts_with("E_AUTH"), "got {second_err}");
+        assert!(second_err.contains("replay detected"), "got {second_err}");
+    }
+
     #[test]
     fn test_all_variants_dispatch_without_panic() {
         let cases: Vec<KeyAgentRequestKind> = vec![
@@ -2056,6 +2459,13 @@ mod tests {
                 auth: None,
             }),
             KeyAgentRequestKind::SignAuth(crate::proto::SignAuthRequest {
+                wallet_id: "x".to_string(),
+                chain_id: "x".to_string(),
+                message: vec![],
+                auth: None,
+                agent_token: Vec::new(),
+            }),
+            KeyAgentRequestKind::SignSiwx(crate::proto::SignSiwxRequest {
                 wallet_id: "x".to_string(),
                 chain_id: "x".to_string(),
                 message: vec![],

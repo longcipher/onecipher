@@ -72,6 +72,7 @@ k256 = { workspace = true, features = ["ecdsa", "arithmetic"] }
 libc = { workspace = true }
 oc-core = { workspace = true }
 oc-crypto = { workspace = true }
+oc-siwx = { workspace = true }
 rand = { workspace = true }
 ripemd = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -84,6 +85,8 @@ xrpl-rust = { workspace = true, features = ["core"], optional = true }
 zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+# Clock injection for the SIWE verify-vector harness (`time` field).
+jiff = { workspace = true }
 
 [lints]
 workspace = true

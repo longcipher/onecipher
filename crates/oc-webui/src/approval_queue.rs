@@ -233,6 +233,7 @@ mod tests {
             risk: oc_core::RiskLevel::Safe,
             risk_reasons: vec![],
             simulation: None,
+            siwx_summary: None,
             created_at_unix: unix_now(),
             expires_at_unix: unix_now() + 3600,
         }

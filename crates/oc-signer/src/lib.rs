@@ -69,6 +69,8 @@ pub mod rlp;
 #[cfg(feature = "std")]
 pub mod secret;
 #[cfg(feature = "std")]
+pub mod siwx;
+#[cfg(feature = "std")]
 pub mod style;
 pub mod traits;
 
@@ -94,6 +96,11 @@ pub use pubkey::{
 };
 #[cfg(feature = "std")]
 pub use secret::{SealedKeypair, SealedPrivateKey, WifString};
+#[cfg(feature = "std")]
+pub use siwx::{
+    EvmVerifier, SolanaVerifier, eip191_hash, parse_evm_chain_id, validate_evm_address,
+    validate_solana_chain_id,
+};
 pub use traits::{ChainSigner, SignOutput};
 #[cfg(feature = "std")]
 pub type SecretBytes = HardenedBytes;

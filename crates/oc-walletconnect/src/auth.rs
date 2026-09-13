@@ -107,6 +107,11 @@ pub struct AuthRequestParams {
     /// EIP-4361 `Expiration Time` timestamp (RFC 3339).
     #[serde(default, rename = "expirationTime")]
     pub expiration_time: String,
+    /// CAIP-122 `Not Before` timestamp (RFC 3339). Ignored by the EIP-4361
+    /// builder; consumed by the CAIP-122 (`solana_signIn` / Solana
+    /// `wc_authRequest`) path.
+    #[serde(default, rename = "notBefore")]
+    pub not_before: String,
     /// EIP-4361 `Request ID` (opaque, echoed back verbatim).
     #[serde(default, rename = "requestId")]
     pub request_id: String,
@@ -150,6 +155,39 @@ impl AuthRequestParams {
         }
         Ok(())
     }
+}
+
+/// Split a CAIP-2 chain id into `(namespace, reference)`.
+///
+/// Returns [`AuthError::InvalidValue`] when there is no `:` separator.
+pub fn split_caip2(caip2: &str) -> Result<(&str, &str), AuthError> {
+    caip2.split_once(':').ok_or_else(|| AuthError::InvalidValue {
+        field: "chainId",
+        message: format!("'{caip2}' is not a CAIP-2 chain id"),
+    })
+}
+
+/// The CAIP-2 `reference` segment of a chain id (e.g. `eip155:1` → `"1"`).
+///
+/// For EVM chains the reference must be a decimal `u64` (mirrors the
+/// EIP-4361 `Chain ID:` field rule); every other namespace keeps its raw
+/// reference string.
+pub fn chain_reference(caip2: &str) -> Result<String, AuthError> {
+    let (ns, reference) = split_caip2(caip2)?;
+    if ns == "eip155" {
+        let decimal: u64 = reference.parse().map_err(|_| AuthError::InvalidValue {
+            field: "chainId",
+            message: format!("'{caip2}' has a non-numeric eip155 reference"),
+        })?;
+        return Ok(decimal.to_string());
+    }
+    if reference.is_empty() {
+        return Err(AuthError::InvalidValue {
+            field: "chainId",
+            message: format!("'{caip2}' has an empty reference"),
+        });
+    }
+    Ok(reference.to_string())
 }
 
 /// Build an EIP-4361 (SIWE) message for `address` from the auth request
@@ -263,6 +301,7 @@ mod tests {
             version: "1".into(),
             issued_at: "2021-09-30T16:25:24Z".into(),
             expiration_time: "2021-09-30T16:26:24Z".into(),
+            not_before: String::new(),
             request_id: "request-123".into(),
         }
     }

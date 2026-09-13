@@ -27,7 +27,7 @@ pub mod wallet_file;
 pub use api_key::{ApiKeyFile, SecretPermissions};
 pub use approval::{
     ApprovalDecision, DecodedAction, PendingApproval, RiskLevel, RiskReason, RiskSource,
-    TokenDelta, TokenDirection, TxSimulation,
+    SiwxSummary, TokenDelta, TokenDirection, TxSimulation,
 };
 pub use caip::{AccountId, AssetId, ChainId, ChainIdExt};
 pub use chain::{

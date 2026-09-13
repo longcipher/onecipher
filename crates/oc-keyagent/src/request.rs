@@ -12,7 +12,8 @@ use crate::proto::{
     CreateSessionKeyRequest, DrainTelemetryRequest, GenerateChallengeRequest, GenerateTotpRequest,
     GetBalanceRequest, GetSecretRequest, ListSecretsRequest, ListSessionKeysRequest,
     RegisterPasskeyRequest, RevokeSessionKeyRequest, SignAuthRequest, SignMessageRequest,
-    SignTransactionRequest, SignTypedDataRequest, SignUserOpRequest, UnlockVaultRequest,
+    SignSiwxRequest, SignTransactionRequest, SignTypedDataRequest, SignUserOpRequest,
+    UnlockVaultRequest,
 };
 
 /// A request sent from the Network-Agent to the Key-Agent over UDS.
@@ -28,7 +29,7 @@ pub struct KeyAgentRequest {
     /// The request payload (exactly one variant set).
     #[prost(
         oneof = "KeyAgentRequestKind",
-        tags = "1, 2, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20"
+        tags = "1, 2, 4, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21"
     )]
     pub kind: Option<KeyAgentRequestKind>,
 }
@@ -120,6 +121,14 @@ pub enum KeyAgentRequestKind {
     /// it exposes only metadata (ids, labels, statuses), never key material.
     #[prost(message, tag = "20")]
     ListSessionKeys(ListSessionKeysRequest),
+    /// `AgentService.SignSiwx` — CAIP-122 Sign-In message signing.
+    ///
+    /// The request must carry either a user-provided Passkey proof (`auth`) or
+    /// a daemon-internal capability token (`agent_token`). The message is
+    /// parsed fail-closed, chain-bound, and consumed single-use (replay
+    /// protection) before signing.
+    #[prost(message, tag = "21")]
+    SignSiwx(SignSiwxRequest),
 }
 
 #[cfg(test)]
@@ -221,6 +230,30 @@ mod tests {
         let bytes = req.encode_to_vec();
         let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();
         assert_eq!(req, decoded);
+    }
+
+    #[test]
+    fn test_sign_siwx_round_trip() {
+        use crate::proto::SignSiwxRequest;
+        let req = KeyAgentRequest {
+            kind: Some(KeyAgentRequestKind::SignSiwx(SignSiwxRequest {
+                wallet_id: "w1".to_string(),
+                chain_id: "eip155:1".to_string(),
+                message: b"example.com wants you to sign in".to_vec(),
+                auth: None,
+                agent_token: vec![0x01, 0x02],
+            })),
+        };
+        let bytes = req.encode_to_vec();
+        let decoded = KeyAgentRequest::decode(bytes.as_slice()).unwrap();
+        assert_eq!(req, decoded);
+        match decoded.kind {
+            Some(KeyAgentRequestKind::SignSiwx(s)) => {
+                assert_eq!(s.wallet_id, "w1");
+                assert_eq!(s.chain_id, "eip155:1");
+            }
+            other => panic!("expected SignSiwx, got {other:?}"),
+        }
     }
 
     #[test]

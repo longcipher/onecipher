@@ -18,14 +18,14 @@ use std::{
     time::Duration,
 };
 
-use oc_core::{ChainIdExt, TxSimulation, approval_log::ApprovalLog};
+use oc_core::{ChainIdExt, SiwxSummary, TxSimulation, approval_log::ApprovalLog};
 // ponytail: proto types via oc_keyagent (pure codec, R56-safe); future: move to oc_core::ipc
 use oc_keyagent::{
     KeyAgentRequest, KeyAgentRequestKind, KeyAgentResponse, KeyAgentResponseKind,
     proto::{
         GenerateChallengeRequest, ListWalletsResponse, PasskeyAuthorization, SignAuthRequest,
-        SignAuthResponse, SignMessageRequest, SignTransactionRequest, SignTypedDataRequest,
-        SignUserOpRequest,
+        SignAuthResponse, SignMessageRequest, SignSiwxRequest, SignSiwxResponse,
+        SignTransactionRequest, SignTypedDataRequest, SignUserOpRequest,
     },
 };
 use oc_walletconnect::{
@@ -283,6 +283,7 @@ impl WcMethodRouter {
             risk,
             risk_reasons,
             simulation,
+            siwx_summary: Self::siwx_summary_for(params),
             created_at_unix: now_secs,
             expires_at_unix: now_secs + self.approval_timeout.as_secs(),
         };
@@ -348,6 +349,138 @@ impl WcMethodRouter {
                     format!("system clock error (refusing to evaluate time-based policy): {e}"),
                 )
             })
+    }
+
+    /// Extract a structured CAIP-122 summary from request params, when the
+    /// `message` param parses as a Sign-In message.
+    ///
+    /// Populates [`PendingApproval`](oc_core::PendingApproval) so approval
+    /// UIs can highlight the phishing-relevant fields (domain, address, URI)
+    /// instead of raw params. Never fails: unparseable messages yield `None`.
+    fn siwx_summary_for(params: &Value) -> Option<SiwxSummary> {
+        let text = params.get("message")?.as_str()?;
+        let msg: oc_siwx::SiwxMessage = text.parse().ok()?;
+        Some(SiwxSummary {
+            domain: msg.domain().to_owned(),
+            address: msg.address().to_owned(),
+            uri: msg.uri().to_owned(),
+            chain_name: msg.chain_name().map(str::to_owned),
+            nonce: msg.nonce().to_owned(),
+            issued_at: msg.issued_at_raw().to_owned(),
+            expiration_time: msg.expiration_time_raw().map(str::to_owned),
+            resources: msg.resources().to_vec(),
+        })
+    }
+
+    /// Build a CAIP-122 signing string from WC Auth params for Solana.
+    ///
+    /// The `Chain ID:` field is the CAIP-2 reference segment; the preamble
+    /// label is always `"Solana"`. Optional fields (`statement`, `resources`,
+    /// `issuedAt`, `expirationTime`, `notBefore`, `requestId`) are applied
+    /// only when non-empty.
+    fn build_siwx_message(
+        address: &str,
+        auth_params: &oc_walletconnect::AuthRequestParams,
+    ) -> Result<String, (JsonRpcErrorCode, String)> {
+        use oc_walletconnect::chain_reference;
+
+        let reference = chain_reference(&auth_params.chain_id)
+            .map_err(|e| (JsonRpcErrorCode::Internal, format!("invalid wc_authRequest: {e}")))?;
+        let mut msg = oc_siwx::SiwxMessage::new(
+            &auth_params.domain,
+            address,
+            &auth_params.aud,
+            &reference,
+            &auth_params.nonce,
+        )
+        .map_err(|e| (JsonRpcErrorCode::Internal, format!("invalid wc_authRequest: {e}")))?;
+        if !auth_params.statement.is_empty() {
+            msg = msg.with_statement(&auth_params.statement).map_err(|e| {
+                (JsonRpcErrorCode::Internal, format!("invalid wc_authRequest: {e}"))
+            })?;
+        }
+        if !auth_params.resources.is_empty() {
+            msg = msg.with_resources(auth_params.resources.iter()).map_err(|e| {
+                (JsonRpcErrorCode::Internal, format!("invalid wc_authRequest: {e}"))
+            })?;
+        }
+        if !auth_params.issued_at.is_empty() {
+            msg = msg.with_issued_at_raw(&auth_params.issued_at).map_err(|e| {
+                (JsonRpcErrorCode::Internal, format!("invalid wc_authRequest: {e}"))
+            })?;
+        }
+        if !auth_params.expiration_time.is_empty() {
+            msg = msg.with_expiration_time_raw(&auth_params.expiration_time).map_err(|e| {
+                (JsonRpcErrorCode::Internal, format!("invalid wc_authRequest: {e}"))
+            })?;
+        }
+        if !auth_params.not_before.is_empty() {
+            msg = msg.with_not_before_raw(&auth_params.not_before).map_err(|e| {
+                (JsonRpcErrorCode::Internal, format!("invalid wc_authRequest: {e}"))
+            })?;
+        }
+        if !auth_params.request_id.is_empty() {
+            msg = msg.with_request_id(&auth_params.request_id).map_err(|e| {
+                (JsonRpcErrorCode::Internal, format!("invalid wc_authRequest: {e}"))
+            })?;
+        }
+        Ok(msg.to_sign_string(oc_siwx::SOLANA_CHAIN_NAME))
+    }
+
+    /// Solana branch of `wc_authRequest`: CAIP-122 Sign-In via SignSiwx.
+    ///
+    /// Mirrors the EVM flow (default wallet → build → policy → approval →
+    /// Key-Agent sign) but the message is CAIP-122 and signing goes through
+    /// the replay-protected SignSiwx path. `hash` is keccak256 over the
+    /// signing text (audit correlation only — Solana has no EIP-4361 hash).
+    async fn handle_wc_auth_solana(
+        &self,
+        params: &Value,
+        auth_params: &oc_walletconnect::AuthRequestParams,
+        dapp_name: &str,
+        dapp_origin: &str,
+        method: &str,
+    ) -> Result<Value, (JsonRpcErrorCode, String)> {
+        let (wallet_id, address) = self.default_wallet_for_chain(&auth_params.chain_id).await?;
+        let text = Self::build_siwx_message(&address, auth_params)?;
+        let hash = keccak256(text.as_bytes());
+
+        let (risk, risk_reasons) =
+            self.policy_evaluate_signing(method, params, &auth_params.chain_id)?;
+
+        self.maybe_gate_approval(
+            method,
+            params,
+            dapp_name,
+            dapp_origin,
+            &auth_params.chain_id,
+            risk,
+            risk_reasons,
+            None,
+        )
+        .await?;
+
+        let SignAuthMode::InternalToken(token) = &self.sign_auth_mode else {
+            return Err((
+                JsonRpcErrorCode::Unauthorized,
+                "wc_authRequest requires WalletConnect daemon internal authorization".into(),
+            ));
+        };
+        let req = SignSiwxRequest {
+            wallet_id,
+            chain_id: auth_params.chain_id.clone(),
+            message: text.into_bytes(),
+            auth: None,
+            agent_token: token.clone(),
+        };
+        let bytes = self.forward(KeyAgentRequestKind::SignSiwx(req)).await?;
+        let resp: SignSiwxResponse = Message::decode(bytes.as_slice())
+            .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+        Ok(json!({
+            "signature": format!("0x{}", hex::encode(&resp.signature)),
+            "hash": format!("0x{}", hex::encode(&hash)),
+            "payload": params,
+        }))
     }
 
     /// P0-2: Extract a [`PasskeyAuthorization`] from the WC JSON params `auth`
@@ -731,7 +864,79 @@ impl WalletMethodHandler for WcMethodRouter {
                     Ok(json!({"signature": resp.signature, "signed_tx_hex": resp.signed_tx_hex}))
                 }
 
-                "personal_sign" | "eth_sign" | "solana_signMessage" | "onecipher_signMessage" => {
+                "solana_signMessage" => {
+                    // Solana offchain messages MUST go through SignAuth with
+                    // the real chain id (raw ed25519 over raw bytes). Routing
+                    // them through SignMessage would silently sign with the
+                    // EVM key (EIP-191) — the chain_id is never discarded.
+                    let chain_id = params
+                        .get("chain_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("solana:mainnet")
+                        .to_string();
+                    let wallet_id = match params.get("wallet_id").and_then(Value::as_str) {
+                        Some(w) => w.to_string(),
+                        None => self.default_wallet_for_chain(&chain_id).await?.0,
+                    };
+                    let message = params
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing message".into())
+                        })?
+                        .as_bytes()
+                        .to_vec();
+
+                    let (risk, risk_reasons) =
+                        self.policy_evaluate_signing(&method, &params, &chain_id)?;
+
+                    self.maybe_gate_approval(
+                        &method,
+                        &params,
+                        dapp_name,
+                        dapp_origin,
+                        &chain_id,
+                        risk,
+                        risk_reasons,
+                        None,
+                    )
+                    .await?;
+
+                    let req = match &self.sign_auth_mode {
+                        SignAuthMode::RequirePasskey => {
+                            let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
+                                (
+                                    JsonRpcErrorCode::Unauthorized,
+                                    "missing passkey authorization".into(),
+                                )
+                            })?;
+                            SignAuthRequest {
+                                wallet_id,
+                                chain_id: chain_id.clone(),
+                                message,
+                                auth: Some(auth),
+                                agent_token: Vec::new(),
+                            }
+                        }
+                        SignAuthMode::InternalToken(token) => SignAuthRequest {
+                            wallet_id,
+                            chain_id: chain_id.clone(),
+                            message,
+                            auth: None,
+                            agent_token: token.clone(),
+                        },
+                    };
+                    let bytes = self.forward(KeyAgentRequestKind::SignAuth(req)).await?;
+                    let resp: SignAuthResponse = Message::decode(bytes.as_slice())
+                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    Ok(json!({
+                        "signature": resp.signature,
+                        "address": resp.address,
+                        "chain_id": resp.chain_id,
+                    }))
+                }
+
+                "personal_sign" | "eth_sign" | "onecipher_signMessage" => {
                     // P0-2: Passkey gate — signing RPCs require auth.
                     let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
                         (JsonRpcErrorCode::Unauthorized, "missing passkey authorization".into())
@@ -859,6 +1064,101 @@ impl WalletMethodHandler for WcMethodRouter {
                     }))
                 }
 
+                // Solana Sign-In (CAIP-122). The caller supplies the exact
+                // signing string in `message` plus the CAIP-2 `chain_id`;
+                // the Key-Agent parses it fail-closed, enforces chain
+                // binding, consumes it single-use (replay protection), and
+                // signs with the Solana key (raw ed25519). Structured
+                // field-based construction is the CLI's `sign-in message`.
+                "solana_signIn" => {
+                    let chain_id = params
+                        .get("chain_id")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing chain_id".into())
+                        })?
+                        .to_string();
+                    let message = params
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| {
+                            (JsonRpcErrorCode::UnsupportedMethod, "missing message".into())
+                        })?
+                        .as_bytes()
+                        .to_vec();
+
+                    // Fail fast on malformed CAIP-122 before any wallet
+                    // resolution, policy, or approval I/O.
+                    let _: oc_siwx::SiwxMessage = std::str::from_utf8(&message)
+                        .map_err(|_| {
+                            (
+                                JsonRpcErrorCode::UnsupportedMethod,
+                                "solana_signIn message is not valid UTF-8".to_string(),
+                            )
+                        })?
+                        .parse()
+                        .map_err(|e| {
+                            (
+                                JsonRpcErrorCode::UnsupportedMethod,
+                                format!("invalid CAIP-122 message: {e}"),
+                            )
+                        })?;
+
+                    let wallet_id = match params.get("wallet_id").and_then(Value::as_str) {
+                        Some(w) => w.to_string(),
+                        None => self.default_wallet_for_chain(&chain_id).await?.0,
+                    };
+
+                    let (risk, risk_reasons) =
+                        self.policy_evaluate_signing(&method, &params, &chain_id)?;
+
+                    self.maybe_gate_approval(
+                        &method,
+                        &params,
+                        dapp_name,
+                        dapp_origin,
+                        &chain_id,
+                        risk,
+                        risk_reasons,
+                        None,
+                    )
+                    .await?;
+
+                    let req = match &self.sign_auth_mode {
+                        SignAuthMode::RequirePasskey => {
+                            let auth = Self::extract_passkey_auth(&params)?.ok_or_else(|| {
+                                (
+                                    JsonRpcErrorCode::Unauthorized,
+                                    "missing auth for solana_signIn".into(),
+                                )
+                            })?;
+                            SignSiwxRequest {
+                                wallet_id,
+                                chain_id: chain_id.clone(),
+                                message,
+                                auth: Some(auth),
+                                agent_token: Vec::new(),
+                            }
+                        }
+                        SignAuthMode::InternalToken(token) => SignSiwxRequest {
+                            wallet_id,
+                            chain_id: chain_id.clone(),
+                            message,
+                            auth: None,
+                            agent_token: token.clone(),
+                        },
+                    };
+                    let bytes = self.forward(KeyAgentRequestKind::SignSiwx(req)).await?;
+                    let resp: SignSiwxResponse = Message::decode(bytes.as_slice())
+                        .map_err(|e| (JsonRpcErrorCode::Internal, format!("decode: {e}")))?;
+                    Ok(json!({
+                        "signature": format!("0x{}", hex::encode(&resp.signature)),
+                        "address": resp.address,
+                        "chain_id": resp.chain_id,
+                        "public_key": format!("0x{}", hex::encode(&resp.public_key)),
+                    }))
+                }
+
                 // WalletConnect v2 Auth protocol (`wc_authRequest`) — one-time
                 // sign-in on a pairing topic, no session needed. The router
                 // builds the EIP-4361 (SIWE) message from the dApp's params,
@@ -877,13 +1177,18 @@ impl WalletMethodHandler for WcMethodRouter {
                         (JsonRpcErrorCode::Internal, format!("invalid wc_authRequest: {e}"))
                     })?;
 
-                    // Only EVM chains are supported by the Auth protocol for
-                    // now — non-EVM chains should use `onecipher_signAuth`.
-                    let is_evm = auth_params
+                    // EVM chains use the EIP-4361 (SIWE) flow below; Solana
+                    // uses CAIP-122 Sign-In via the Key-Agent's SignSiwx
+                    // path (single-use replay protection included). Any other
+                    // namespace falls through to `onecipher_signAuth`.
+                    let namespace: Option<String> = auth_params
                         .chain_id
                         .parse::<oc_core::ChainId>()
-                        .map_or(false, |c| c.is_evm());
-                    if !is_evm {
+                        .ok()
+                        .map(|c| c.namespace().to_string());
+                    let is_evm = namespace.as_deref() == Some("eip155");
+                    let is_solana = namespace.as_deref() == Some("solana");
+                    if !is_evm && !is_solana {
                         return Err((
                             JsonRpcErrorCode::UnsupportedMethod,
                             format!(
@@ -891,6 +1196,18 @@ impl WalletMethodHandler for WcMethodRouter {
                                 auth_params.chain_id
                             ),
                         ));
+                    }
+
+                    if is_solana {
+                        return self
+                            .handle_wc_auth_solana(
+                                &params,
+                                &auth_params,
+                                dapp_name,
+                                dapp_origin,
+                                &method,
+                            )
+                            .await;
                     }
 
                     // Resolve the default wallet + its address for the chain.
@@ -1892,12 +2209,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wc_auth_request_non_evm_chain_is_method_not_supported() {
+    async fn wc_auth_request_unsupported_namespace_is_method_not_supported() {
         let key_agent = KeyAgentClient::new("/tmp/nonexistent.sock");
         let router = WcMethodRouter::new(key_agent);
         let params = json!({
             "type": "eip4361",
-            "chainId": "solana:mainnet",
+            "chainId": "cosmos:cosmoshub-4",
             "aud": "https://iam.example.com",
             "domain": "iam.example.com",
             "nonce": "abcdefgh12345678"
@@ -1906,6 +2223,152 @@ mod tests {
         let (code, msg) = result.unwrap_err();
         assert_eq!(code, JsonRpcErrorCode::UnsupportedMethod);
         assert!(msg.contains("non-EVM"));
+    }
+
+    fn sample_list_wallets_solana() -> ListWalletsResponse {
+        ListWalletsResponse {
+            wallets: vec![oc_keyagent::proto::WalletInfo {
+                id: "w1".into(),
+                name: "primary".into(),
+                key_type: "mnemonic".into(),
+                created_at: 0,
+                accounts: vec![oc_keyagent::proto::WalletAccount {
+                    account_id: "acc-sol".into(),
+                    address: "GwAF45zjfyGzUbd3i3hXxzGeuchzEZXwpRYHZM5912F1".into(),
+                    chain_id: "solana:mainnet".into(),
+                    derivation_path: "m/44'/501'/0'/0'".into(),
+                }],
+            }],
+        }
+    }
+
+    fn sample_sign_siwx_response() -> oc_keyagent::proto::SignSiwxResponse {
+        oc_keyagent::proto::SignSiwxResponse {
+            signature: vec![0xBB; 64],
+            address: "GwAF45zjfyGzUbd3i3hXxzGeuchzEZXwpRYHZM5912F1".into(),
+            chain_id: "solana:mainnet".into(),
+            public_key: vec![0x03; 32],
+        }
+    }
+
+    fn solana_auth_params() -> Value {
+        json!({
+            "type": "eip4361",
+            "chainId": "solana:mainnet",
+            "aud": "https://iam.example.com/login",
+            "domain": "iam.example.com",
+            "nonce": "abcdefgh12345678",
+            "statement": "Sign in with your wallet",
+            "resources": ["https://iam.example.com/terms"]
+        })
+    }
+
+    #[test]
+    fn build_siwx_message_renders_caip122_solana() {
+        use oc_walletconnect::AuthRequestParams;
+        let params: AuthRequestParams =
+            serde_json::from_value(solana_auth_params()).expect("params");
+        let text = WcMethodRouter::build_siwx_message(
+            "GwAF45zjfyGzUbd3i3hXxzGeuchzEZXwpRYHZM5912F1",
+            &params,
+        )
+        .expect("build");
+        assert!(
+            text.starts_with("iam.example.com wants you to sign in with your Solana account:"),
+            "{text}"
+        );
+        assert!(text.contains("Chain ID: mainnet"), "{text}");
+        assert!(text.contains("Nonce: abcdefgh12345678"), "{text}");
+        // Round-trips through the strict parser.
+        let parsed: oc_siwx::SiwxMessage = text.parse().expect("parse");
+        assert_eq!(parsed.chain_name(), Some("Solana"));
+    }
+
+    #[tokio::test]
+    async fn wc_auth_request_solana_builds_caip122_and_signs() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ka-sol-auth.sock").to_string_lossy().to_string();
+        let canned = sample_sign_siwx_response().encode_to_vec();
+        let _mock = spawn_mock_keyagent(sock.clone(), sample_list_wallets_solana(), canned).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let key_agent = KeyAgentClient::new(&sock);
+        let router = WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(SignAuthMode::InternalToken(vec![7; 32]));
+        let params = solana_auth_params();
+        let result =
+            router.handle("wc_authRequest", params.clone(), "pairing-topic", None, None).await;
+        let value = result.expect("solana wc_authRequest must succeed");
+        assert_eq!(value["signature"], format!("0x{}", hex::encode(vec![0xBB; 64])));
+        let hash_hex = value["hash"].as_str().unwrap();
+        assert!(hash_hex.starts_with("0x"));
+        assert_eq!(hash_hex.len(), 2 + 64);
+        assert_eq!(value["payload"], params);
+    }
+
+    #[tokio::test]
+    async fn solana_sign_in_routes_to_sign_siwx() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ka-sol-signin.sock").to_string_lossy().to_string();
+        let canned = sample_sign_siwx_response().encode_to_vec();
+        let _mock = spawn_mock_keyagent(sock.clone(), sample_list_wallets_solana(), canned).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let text = oc_siwx::SiwxMessage::new(
+            "iam.example.com",
+            "GwAF45zjfyGzUbd3i3hXxzGeuchzEZXwpRYHZM5912F1",
+            "https://iam.example.com/login",
+            "mainnet",
+            "abcdefgh12345678",
+        )
+        .expect("message")
+        .to_sign_string("Solana");
+        let key_agent = KeyAgentClient::new(&sock);
+        let router = WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(SignAuthMode::InternalToken(vec![7; 32]));
+        let params = json!({ "chain_id": "solana:mainnet", "message": text });
+        let result = router.handle("solana_signIn", params, "topic-sol", None, None).await;
+        let value = result.expect("solana_signIn must succeed");
+        assert_eq!(value["signature"], format!("0x{}", hex::encode(vec![0xBB; 64])));
+        assert_eq!(value["address"], "GwAF45zjfyGzUbd3i3hXxzGeuchzEZXwpRYHZM5912F1");
+        assert_eq!(value["chain_id"], "solana:mainnet");
+    }
+
+    #[tokio::test]
+    async fn solana_sign_in_rejects_malformed_message() {
+        let key_agent = KeyAgentClient::new("/tmp/nonexistent.sock");
+        let router = WcMethodRouter::new(key_agent);
+        let params = json!({ "chain_id": "solana:mainnet", "message": "not a sign-in" });
+        let result = router.handle("solana_signIn", params, "t", None, None).await;
+        let (code, msg) = result.expect_err("malformed must fail");
+        assert_eq!(code, JsonRpcErrorCode::UnsupportedMethod);
+        assert!(msg.contains("invalid CAIP-122"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn solana_sign_message_uses_auth_path_with_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("ka-sol-msg.sock").to_string_lossy().to_string();
+        let canned = sample_sign_auth_response().encode_to_vec();
+        let _mock = spawn_mock_keyagent(sock.clone(), sample_list_wallets_solana(), canned).await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let key_agent = KeyAgentClient::new(&sock);
+        let router = WcMethodRouter::new(key_agent)
+            .with_sign_auth_mode(SignAuthMode::InternalToken(vec![7; 32]));
+        let params = json!({
+            "wallet_id": "w1",
+            "chain_id": "solana:mainnet",
+            "message": "hello solana"
+        });
+        let result = router.handle("solana_signMessage", params, "topic-sol-msg", None, None).await;
+        let value = result.expect("solana_signMessage must succeed");
+        // The mock answers every non-listing request with the canned
+        // SignAuth response: the point is that solana_signMessage reaches
+        // the auth path (which returns the signer address) instead of the
+        // EVM SignMessage path (signature only).
+        assert_eq!(value["signature"], json!(vec![0xAA; 65]));
+        assert_eq!(value["address"], "0x9858EfFD232B4033E47d90003D41EC34EcaEda94");
     }
 
     #[tokio::test]

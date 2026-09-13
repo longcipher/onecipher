@@ -1,0 +1,22 @@
+[package]
+name = "oc-siwx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "CAIP-122 Sign-In with X message model, parsing, validation and authentication for OneCipher"
+
+[dependencies]
+iri-string = { workspace = true }
+jiff = { workspace = true, features = ["serde", "std"] }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

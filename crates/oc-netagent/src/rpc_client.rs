@@ -121,6 +121,41 @@ impl HpxRpcClient {
         }
     }
 
+    /// `eth_chainId` as a strict `u64` (used by the EIP-1271 / ERC-6492
+    /// Sign-In verifier to confirm the endpoint serves the message chain
+    /// before any contract call — a wrong-chain endpoint must never see
+    /// `isValidSignature`).
+    pub async fn eth_chain_id(&self) -> Result<u64, RpcError> {
+        let result = self.rpc_call("eth_chainId", json!([])).await?;
+        let hex_str = result.as_str().ok_or_else(|| {
+            RpcError::Parse(format!("eth_chainId: expected hex string, got {result}"))
+        })?;
+        parse_hex_u64(hex_str)
+    }
+
+    /// Raw `eth_call` returning the decoded response bytes.
+    ///
+    /// `to` is `None` for deployless create-calls (ERC-6492 simulation);
+    /// both `input` and `data` carry the payload for legacy-RPC
+    /// compatibility. A malformed `0x` response is a typed parse error,
+    /// never silent bytes.
+    pub async fn eth_call_bytes(&self, to: Option<&str>, data: &[u8]) -> Result<Vec<u8>, RpcError> {
+        let payload = format!("0x{}", hex::encode(data));
+        let mut obj = json!({ "input": payload, "data": payload });
+        if let Some(to) = to {
+            obj["to"] = json!(to);
+        }
+        let result = self.rpc_call("eth_call", json!([obj, "latest"])).await?;
+        let hex_str = result.as_str().ok_or_else(|| {
+            RpcError::Parse(format!("eth_call: expected hex data string, got {result}"))
+        })?;
+        let stripped = hex_str.trim_start_matches("0x");
+        if stripped.len() % 2 != 0 || !stripped.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(RpcError::Parse(format!("eth_call: malformed hex data '{hex_str}'")));
+        }
+        hex::decode(stripped).map_err(|e| RpcError::Parse(format!("eth_call: hex decode: {e}")))
+    }
+
     /// Build the EVM call object from [`CallData`].
     ///
     /// `data` is hex-encoded with a `0x` prefix. A decimal `value` string is

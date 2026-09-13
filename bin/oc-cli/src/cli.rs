@@ -183,6 +183,13 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         subcommand: TotpCommands,
     },
+    /// CAIP-122 Sign-In with X: build, parse, verify (LOCAL — no RPC,
+    /// except `sign-in verify --rpc-url` for EIP-1271 / ERC-6492)
+    #[command(name = "sign-in")]
+    SignIn {
+        #[command(subcommand)]
+        subcommand: SignInCommands,
+    },
     /// age encryption key management (Phase 4 — unified vault)
     Age {
         #[command(subcommand)]
@@ -855,6 +862,104 @@ pub(crate) enum TotpCommands {
         /// Output `{"name","kind","counter","code"}` as JSON
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum SignInCommands {
+    /// Build a CAIP-122 Sign-In message (prints the exact signing text)
+    Message {
+        /// CAIP-2 chain id (e.g. eip155:1, solana:mainnet)
+        #[arg(long)]
+        chain: String,
+        /// Authority requesting the signing (e.g. example.com)
+        #[arg(long)]
+        domain: String,
+        /// Blockchain address performing the signing
+        #[arg(long)]
+        address: String,
+        /// URI that is the subject of the signing
+        #[arg(long)]
+        uri: String,
+        /// Human-readable statement
+        #[arg(long)]
+        statement: Option<String>,
+        /// Anti-replay nonce (generated when omitted)
+        #[arg(long)]
+        nonce: Option<String>,
+        /// Issuance time (RFC 3339, defaults to now)
+        #[arg(long)]
+        issued_at: Option<String>,
+        /// Expiration time (RFC 3339)
+        #[arg(long)]
+        expiration_time: Option<String>,
+        /// Not-before time (RFC 3339)
+        #[arg(long)]
+        not_before: Option<String>,
+        /// Opaque request id
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Resource URI (repeatable, max 32)
+        #[arg(long)]
+        resource: Vec<String>,
+        /// Output structured JSON instead of the raw text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify a CAIP-122 Sign-In signature (exit 1 on failure)
+    Verify {
+        /// Exact signing text (or use --message-file)
+        #[arg(long)]
+        message: Option<String>,
+        /// Path to a file holding the exact signing text
+        #[arg(long)]
+        message_file: Option<String>,
+        /// Signature (hex, 0x optional; Solana also accepts base58)
+        #[arg(long)]
+        signature: String,
+        /// Expected domain binding (required)
+        #[arg(long)]
+        domain: String,
+        /// Expected nonce binding (required)
+        #[arg(long)]
+        nonce: String,
+        /// Expected URI binding
+        #[arg(long)]
+        uri: Option<String>,
+        /// Expected scheme binding
+        #[arg(long)]
+        scheme: Option<String>,
+        /// Expected chain-id binding (message reference segment)
+        #[arg(long)]
+        chain_id: Option<String>,
+        /// CAIP-2 chain id selecting the verifier (default: eip155:1)
+        #[arg(long, default_value = "eip155:1")]
+        chain: String,
+        /// EVM JSON-RPC endpoint for contract/counterfactual accounts
+        /// (EIP-1271 / ERC-6492). EOAs verify offline without it.
+        #[arg(long)]
+        rpc_url: Option<String>,
+        /// Output structured JSON instead of human text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Parse a CAIP-122 message and print its fields
+    Parse {
+        /// Exact signing text (or use --message-file)
+        #[arg(long)]
+        message: Option<String>,
+        /// Path to a file holding the exact signing text
+        #[arg(long)]
+        message_file: Option<String>,
+        /// Output structured JSON instead of human text
+        #[arg(long)]
+        json: bool,
+    },
+    /// Generate a cryptographically secure nonce
+    Nonce {
+        /// Nonce length (min 8, default 17)
+        #[arg(long, short = 'l', default_value = "17")]
+        len: usize,
     },
 }
 

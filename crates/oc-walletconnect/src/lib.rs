@@ -22,7 +22,10 @@ pub mod session;
 pub mod uri;
 pub mod wallet_server;
 
-pub use auth::{AuthError, AuthRequestParams, AuthType, build_siwe_message, eip4361_hash};
+pub use auth::{
+    AuthError, AuthRequestParams, AuthType, build_siwe_message, chain_reference, eip4361_hash,
+    split_caip2,
+};
 pub use crypto::{WcCipher, WcKeyPair, WcSharedSecret, WcSymKey};
 pub use dapp_client::WcDappClient;
 pub use error::{WcError, WcResult};
