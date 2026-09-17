@@ -516,6 +516,12 @@ fn dispatch_env(
 }
 
 fn dispatch_tui() -> Result<(), CliError> {
+    // crossterm needs a real terminal (raw mode on stdin, alternate screen
+    // on stdout). Fail fast with a clear message instead of a raw OS error
+    // (`Device not configured`) or an escape-code dump into a pipe.
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Err(CliError::InvalidArgs("tui requires an interactive terminal".into()));
+    }
     let store = commands::open_secret_store()?;
     tui::run(store).map_err(|e| CliError::InvalidArgs(e.to_string()))
 }

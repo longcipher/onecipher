@@ -1196,7 +1196,7 @@ pub(crate) enum SignCommands {
         /// Wallet name or ID (uses stored encrypted mnemonic)
         #[arg(long, env = "ONECIPHER_WALLET")]
         wallet: String,
-        /// Hex-encoded unsigned transaction bytes
+        /// Hex-encoded unsigned transaction bytes (legacy, EIP-2930, or EIP-1559)
         #[arg(long)]
         tx: String,
         /// Account index

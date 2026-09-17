@@ -10,10 +10,22 @@ pub(crate) fn create(name: &str, words: u32, show_mnemonic: bool) -> Result<(), 
     // generate_mnemonic returns SecretBytes (HardenedBytes): mlocked,
     // MADV_DONTDUMP-marked and zeroized on drop — no manual zeroize call is
     // needed (or possible); dropping the buffer wipes it.
+    //
+    // The passphrase is honored (env `ONECIPHER_PASSPHRASE` burn-after-reading,
+    // or an interactive prompt; empty means no passphrase). Ignoring it here
+    // would silently store the wallet unprotected while the user believes
+    // their env passphrase applies.
     let mnemonic_phrase = oc_wallet::generate_mnemonic(words)?;
     let phrase_str = std::str::from_utf8(mnemonic_phrase.expose())
         .map_err(|e| CliError::InvalidArgs(format!("generated mnemonic not valid UTF-8: {e}")))?;
-    let info = oc_wallet::import_wallet_mnemonic(name, phrase_str, None, Some(0), None)?;
+    let passphrase = super::read_passphrase();
+    let info = oc_wallet::import_wallet_mnemonic(
+        name,
+        phrase_str,
+        Some(passphrase.as_str()),
+        Some(0),
+        None,
+    )?;
 
     audit::log_wallet_created(&info);
 
@@ -143,17 +155,18 @@ pub(crate) fn export_public_key(
         ));
     }
 
-    let passphrase = if let Ok(b) = oc_wallet::export_wallet(wallet_name, None, None) {
-        let _ = b;
+    // Read the passphrase exactly once: the env source is burn-after-reading,
+    // so a second read (e.g. inside `resolve_signing_key`) would see nothing.
+    // `None` and `Some("")` are equivalent downstream, so "" covers
+    // empty-passphrase wallets uniformly.
+    let passphrase = if oc_wallet::export_wallet(wallet_name, None, None).is_ok() {
         String::new()
     } else {
         super::read_passphrase().to_string()
     };
 
-    let passphrase_ref = if passphrase.is_empty() { None } else { Some(passphrase.as_str()) };
-
     // Export the private key to derive the public key
-    let secret = oc_wallet::export_wallet(wallet_name, passphrase_ref, None)?;
+    let secret = oc_wallet::export_wallet(wallet_name, Some(&passphrase), None)?;
     let secret_str = std::str::from_utf8(secret.expose())
         .map_err(|e| CliError::InvalidArgs(format!("exported wallet not valid UTF-8: {e}")))?;
 
@@ -175,11 +188,19 @@ pub(crate) fn export_public_key(
         let point = verifying_key.to_sec1_point(compressed);
         println!("{}", hex::encode(point.as_bytes()));
     } else {
-        // Mnemonic wallet — derive key for specified chain, then get public key
+        // Mnemonic wallet — derive key for specified chain, then get public key.
+        // Decrypt directly with the passphrase read above instead of
+        // `resolve_signing_key` (which would read the drained env source again).
         let chain_str = chain.unwrap_or("evm");
         let chain_parsed = oc_core::parse_chain(chain_str)
             .map_err(|e| CliError::InvalidArgs(format!("invalid chain: {e}")))?;
-        let key = super::resolve_signing_key(wallet_name, chain_parsed.chain_type, 0)?;
+        let key = oc_wallet::decrypt_signing_key(
+            wallet_name,
+            chain_parsed.chain_type,
+            passphrase.as_bytes(),
+            Some(0),
+            None,
+        )?;
 
         let signer = oc_signer::signer_for_chain(chain_parsed.chain_type);
         match signer.curve() {
@@ -222,6 +243,8 @@ pub(crate) fn import_interactive(name: &str, chain: Option<&str>) -> Result<(), 
     std::io::stdin().lock().read_line(&mut choice)?;
     let choice = choice.trim();
 
+    // Honor the wallet passphrase like `create` does (see above).
+    let passphrase = super::read_passphrase();
     let info = match choice {
         "" | "1" => {
             eprint!("Enter mnemonic (hidden): ");
@@ -231,7 +254,13 @@ pub(crate) fn import_interactive(name: &str, chain: Option<&str>) -> Result<(), 
             if phrase.trim().is_empty() {
                 return Err(CliError::InvalidArgs("mnemonic cannot be empty".into()));
             }
-            oc_wallet::import_wallet_mnemonic(name, phrase.trim(), None, Some(0), None)?
+            oc_wallet::import_wallet_mnemonic(
+                name,
+                phrase.trim(),
+                Some(passphrase.as_str()),
+                Some(0),
+                None,
+            )?
         }
         "2" => {
             eprint!("Enter private key hex (hidden): ");
@@ -241,7 +270,15 @@ pub(crate) fn import_interactive(name: &str, chain: Option<&str>) -> Result<(), 
             if key.trim().is_empty() {
                 return Err(CliError::InvalidArgs("private key cannot be empty".into()));
             }
-            oc_wallet::import_wallet_private_key(name, key.trim(), chain, None, None, None, None)?
+            oc_wallet::import_wallet_private_key(
+                name,
+                key.trim(),
+                chain,
+                Some(passphrase.as_str()),
+                None,
+                None,
+                None,
+            )?
         }
         _ => return Err(CliError::InvalidArgs(format!("invalid choice: '{choice}'"))),
     };
@@ -292,9 +329,18 @@ pub(crate) fn import(
         ));
     }
 
+    // Honor the wallet passphrase like `create` does (see above): silently
+    // dropping it would store the wallet unprotected.
+    let passphrase = super::read_passphrase();
     let info = if use_mnemonic {
         let phrase = super::read_mnemonic()?;
-        oc_wallet::import_wallet_mnemonic(name, &phrase, None, Some(index), None)?
+        oc_wallet::import_wallet_mnemonic(
+            name,
+            &phrase,
+            Some(passphrase.as_str()),
+            Some(index),
+            None,
+        )?
     } else {
         // Read from env/stdin only when both curve keys are not already provided
         let private_key_hex = if both_curve_keys {
@@ -306,7 +352,7 @@ pub(crate) fn import(
             name,
             &private_key_hex,
             chain,
-            None,
+            Some(passphrase.as_str()),
             None,
             secp256k1_key,
             ed25519_key,

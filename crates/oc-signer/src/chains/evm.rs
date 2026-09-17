@@ -269,7 +269,13 @@ impl ChainSigner for EvmSigner {
             .try_into()
             .map_err(|_| SignerError::Transaction("bad s".into()))?;
 
-        crate::rlp::encode_signed_typed_tx(tx_bytes, v, &r, &s)
+        // Typed transactions (EIP-2930 / EIP-1559) start with a type byte;
+        // legacy transactions are a bare RLP list.
+        if tx_bytes.first().is_some_and(|b| *b == 0x01 || *b == 0x02) {
+            crate::rlp::encode_signed_typed_tx(tx_bytes, v, &r, &s)
+        } else {
+            crate::rlp::encode_signed_legacy_tx(tx_bytes, v, &r, &s)
+        }
     }
 
     fn sign_message(&self, private_key: &[u8], message: &[u8]) -> Result<SignOutput, SignerError> {
@@ -588,6 +594,47 @@ mod tests {
         // Verify structure
         assert_eq!(signed_tx[0], 0x02, "should preserve type byte");
         assert!(signed_tx.len() > unsigned_tx.len(), "signed tx should be larger than unsigned tx");
+    }
+
+    #[test]
+    fn test_encode_signed_transaction_legacy() {
+        use crate::rlp;
+
+        // Build an unsigned EIP-155 legacy transaction (chain_id = 1)
+        let to = [0x11u8; 20];
+        let items: Vec<u8> = [
+            rlp::encode_u64(0),             // nonce
+            rlp::encode_u64(1_000_000_000), // gasPrice
+            rlp::encode_u64(21_000),        // gasLimit
+            rlp::encode_bytes(&to),         // to
+            rlp::encode_u64(1),             // value
+            rlp::encode_bytes(&[]),         // data
+            rlp::encode_u64(1),             // chain_id
+            rlp::encode_bytes(&[]),         // 0
+            rlp::encode_bytes(&[]),         // 0
+        ]
+        .concat();
+        let unsigned_tx = rlp::encode_list(&items);
+
+        // Sign it
+        let privkey =
+            hex::decode("4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318")
+                .unwrap();
+        let signer = EvmSigner;
+        let output = signer.sign_transaction(&privkey, &unsigned_tx).unwrap();
+
+        // Encode the signed transaction
+        let signed_tx = signer.encode_signed_transaction(&unsigned_tx, &output).unwrap();
+
+        // A legacy signed tx is a bare RLP list (no type byte) with 9 items.
+        assert!(matches!(signed_tx[0], 0xc0..=0xff), "must be a bare RLP list");
+        assert!(signed_tx.len() > unsigned_tx.len(), "signed tx should be larger");
+
+        // The signature must recover to the signer's address.
+        let address = signer.derive_address(&privkey).unwrap();
+        let sighash = Keccak256::digest(&unsigned_tx);
+        let valid = signer.verify_hash(&address, &sighash, &output.signature).unwrap();
+        assert!(valid, "legacy tx signature should verify");
     }
 
     #[test]

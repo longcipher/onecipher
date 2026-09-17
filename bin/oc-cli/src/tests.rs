@@ -1298,6 +1298,14 @@ fn test_local_readonly_commands_run() {
     let _home = HomeGuard::new();
     run_ok(&["onecipher", "status"]);
     run_ok(&["onecipher", "wallet", "info"]);
+    // doctor fails closed on an empty home (missing age identity / store /
+    // index), so bootstrap the secret store first — mirroring e2e_l6_doctor.
+    // `secret add` reads the value from ONECIPHER_SECRET (no stdin piping
+    // in-process).
+    age_init();
+    set_env("ONECIPHER_SECRET", "doctor-probe");
+    run_ok(&["onecipher", "secret", "add", "doctor/probe", "--type", "note"]);
+    remove_env("ONECIPHER_SECRET");
     run_ok(&["onecipher", "doctor"]);
     run_ok(&["onecipher", "completion", "bash"]);
     run_ok(&["onecipher", "completion", "zsh"]);
@@ -1753,8 +1761,11 @@ fn test_wallet_export_empty_passphrase_wallet() {
     let _home = HomeGuard::new();
     // Create wallet without setting a passphrase env → empty passphrase.
     run_ok(&["onecipher", "wallet", "create", "--name", "nopw", "--words", "12"]);
-    // Empty passphrase wallet exports without any env var, no TTY required.
+    // Export stays fail-closed without a TTY: an explicit (here empty) env
+    // passphrase opts in to non-interactive disclosure.
+    set_env("ONECIPHER_PASSPHRASE", "");
     run_ok(&["onecipher", "wallet", "export", "--wallet", "nopw"]);
+    remove_env("ONECIPHER_PASSPHRASE");
 }
 
 // -----------------------------------------------------------------------
@@ -2659,6 +2670,20 @@ fn ws_accept_key(key: &str) -> String {
     hasher.update(key.as_bytes());
     hasher.update(GUID.as_bytes());
     base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
+}
+
+// -----------------------------------------------------------------------
+// TUI without a terminal fails fast with a clear message (not a raw OS
+// error). The test harness never provides a TTY on stdin, so this is
+// deterministic here.
+// -----------------------------------------------------------------------
+
+#[test]
+fn test_tui_without_terminal_fails_clean() {
+    let _home = HomeGuard::new();
+    let res = run_cli(&["onecipher", "tui"]);
+    let err = res.expect_err("tui without a terminal must fail");
+    assert!(err.to_string().contains("interactive terminal"), "unexpected error: {err}");
 }
 
 /// Write a WebSocket text frame (unmasked, server→client).

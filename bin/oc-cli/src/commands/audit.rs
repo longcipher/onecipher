@@ -204,11 +204,18 @@ fn parse_duration(s: &str) -> Result<Span, CliError> {
 
 /// Print one audit entry as a single human-readable line to `out`.
 ///
-/// Fields printed: `device_id`, `seq`, `timestamp`, `event_type`,
-/// `session_key_id` ("-" if None), `status` (uppercased from
-/// `payload.status`, "-" if missing), `amount_usd` (from payload, "-" if
-/// missing). For DENIED entries, `deny_reason` is also printed.
+/// Two schemas share the log file:
+/// - Daemon entries (`event_type`): fields printed are `device_id`, `seq`, `timestamp`,
+///   `event_type`, `session_key_id` ("-" if None), `status` (uppercased from `payload.status`, "-"
+///   if missing), `amount_usd` (from payload, "-" if missing). For DENIED entries, `deny_reason` is
+///   also printed.
+/// - CLI entries (`operation`, written by wallet/secret/password/totp/age commands): fields printed
+///   are `timestamp`, `operation`, `wallet_id`, plus `chain_id` / `address` / `secret_name` /
+///   `details` when present.
 fn print_entry(out: &mut dyn Write, entry: &Value) -> Result<(), CliError> {
+    if let Some(op) = entry.get("operation").and_then(|v| v.as_str()) {
+        return print_cli_entry(out, entry, op);
+    }
     let device_id = entry.get("device_id").and_then(|v| v.as_str()).unwrap_or("");
     let seq = entry.get("seq").and_then(|v| v.as_u64()).unwrap_or(0);
     let timestamp = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
@@ -237,6 +244,23 @@ fn print_entry(out: &mut dyn Write, entry: &Value) -> Result<(), CliError> {
         line.push_str(&format!(" deny_reason={deny_reason}"));
     }
 
+    writeln!(out, "{line}")?;
+    Ok(())
+}
+
+/// Print a CLI-schema entry (`operation`, no `event_type`).
+fn print_cli_entry(out: &mut dyn Write, entry: &Value, op: &str) -> Result<(), CliError> {
+    let timestamp = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+    let wallet_id = entry.get("wallet_id").and_then(|v| v.as_str()).unwrap_or("");
+    let mut line = format!("timestamp={timestamp} operation={op} wallet_id={wallet_id}");
+    for key in ["chain_id", "address", "secret_name"] {
+        if let Some(v) = entry.get(key).and_then(|v| v.as_str()) {
+            line.push_str(&format!(" {key}={v}"));
+        }
+    }
+    if let Some(details) = entry.get("details").and_then(|v| v.as_str()) {
+        line.push_str(&format!(" details={details}"));
+    }
     writeln!(out, "{line}")?;
     Ok(())
 }
@@ -298,6 +322,41 @@ mod tests {
         assert!(s.contains("amount_usd=1.50"), "got: {s}");
         // ALLOWED entries do NOT print deny_reason.
         assert!(!s.contains("deny_reason"), "got: {s}");
+    }
+
+    #[test]
+    fn print_entry_renders_cli_wallet_schema() {
+        // CLI wallet commands write `{timestamp, wallet_id, operation, ...}`
+        // (no `device_id`/`event_type`); `audit list` must render them with
+        // their own operation instead of blank daemon fields.
+        let entry = serde_json::json!({
+            "timestamp": "2026-09-17T06:15:31Z",
+            "wallet_id": "44957259-1e98-4df4-b60c-d640ca676d40",
+            "operation": "wallet.create",
+            "details": "eip155:1=0x65007aCDfa4cABB878A3f7267D1262FdeD18f51E"
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        print_entry(&mut buf, &entry).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("operation=wallet.create"), "got: {s}");
+        assert!(s.contains("wallet_id=44957259-1e98-4df4-b60c-d640ca676d40"), "got: {s}");
+        assert!(s.contains("0x65007aCDfa4cABB878A3f7267D1262FdeD18f51E"), "got: {s}");
+        assert!(!s.contains("event_type="), "CLI entries must not use daemon fields: {s}");
+    }
+
+    #[test]
+    fn print_entry_renders_cli_secret_schema() {
+        let entry = serde_json::json!({
+            "timestamp": "2026-09-17T06:15:31Z",
+            "wallet_id": "github/personal",
+            "operation": "secret.read",
+            "secret_name": "github/personal"
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        print_entry(&mut buf, &entry).unwrap();
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("operation=secret.read"), "got: {s}");
+        assert!(s.contains("secret_name=github/personal"), "got: {s}");
     }
 
     #[test]

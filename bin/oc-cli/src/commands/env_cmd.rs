@@ -137,19 +137,22 @@ pub(crate) fn run(
 
     if exec {
         // Replace current process with the child (Unix exec(3)).
-        // This never returns on success.
-        #[cfg(unix)]
+        // This never returns on success. Under `cfg(test)` the CLI runs
+        // inside the test harness, so exec would replace the harness —
+        // fall through to spawn + wait instead.
+        #[cfg(all(unix, not(test)))]
         {
             use std::os::unix::process::CommandExt;
             let err = cmd.exec();
             // exec() only returns on failure.
             return Err(CliError::Io(err));
         }
-        #[cfg(not(unix))]
+        #[cfg(any(not(unix), test))]
         {
-            // Fall back to spawn + wait on non-Unix platforms.
+            // Fall back to spawn + wait on non-Unix platforms (and in tests).
             let status = cmd.status().map_err(CliError::Io)?;
-            std::process::exit(status.code().unwrap_or(1));
+            drop(env_pairs);
+            return exit_with_status(status);
         }
     }
 
@@ -157,8 +160,28 @@ pub(crate) fn run(
     let status = cmd.status().map_err(CliError::Io)?;
 
     // env_pairs are dropped here, zeroizing all secret values in memory.
+    drop(env_pairs);
 
+    exit_with_status(status)
+}
+
+/// Propagate the child exit status: exit the process in production.
+///
+/// Under `cfg(test)` the CLI runs in-process, so `process::exit` would kill
+/// the test harness and silently truncate the whole suite — return instead
+/// (`Ok` for success, `Err` carrying the status otherwise).
+#[cfg(not(test))]
+fn exit_with_status(status: std::process::ExitStatus) -> Result<(), CliError> {
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(test)]
+fn exit_with_status(status: std::process::ExitStatus) -> Result<(), CliError> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CliError::InvalidArgs(format!("command exited with status: {status}")))
+    }
 }
 
 /// Convert a secret name to an environment variable key.
@@ -206,5 +229,15 @@ mod env_extra_tests {
     fn to_env_key_keeps_full_path() {
         assert_eq!(to_env_key("a/b/c", false), "A_B_C");
         assert_eq!(to_env_key("a/b/c", true), "a_b_c");
+    }
+
+    #[test]
+    fn exit_with_status_never_exits_harness() {
+        // `true` succeeds, `false` fails — and neither may kill the runner.
+        let ok = std::process::Command::new("true").status().unwrap();
+        assert!(exit_with_status(ok).is_ok());
+        let fail = std::process::Command::new("false").status().unwrap();
+        let err = exit_with_status(fail).expect_err("false must fail");
+        assert!(err.to_string().contains("exited with status"), "got: {err}");
     }
 }
