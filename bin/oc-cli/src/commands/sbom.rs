@@ -93,12 +93,23 @@ pub(crate) fn generate(output: &str) -> Result<(), CliError> {
         .status()
         .is_ok_and(|s| s.success())
     {
-        let status = Command::new("cargo").args(["cyclonedx", "--output-file", output]).status()?;
-        if status.success() {
+        // Capture the child's stderr: an unsupported flag (older/newer
+        // cargo-cyclonedx releases) is expected here and must not leak a raw
+        // clap error into the user's terminal.
+        let child = Command::new("cargo")
+            .args(["cyclonedx", "--output-file", output])
+            .stderr(std::process::Stdio::piped())
+            .output()?;
+        if child.status.success() {
             println!("SBOM generated via cargo-cyclonedx: {output}");
             return Ok(());
         }
-        eprintln!("cargo cyclonedx failed, falling back to minimal SBOM generation");
+        let reason = String::from_utf8_lossy(&child.stderr).trim().to_string();
+        if reason.is_empty() {
+            eprintln!("cargo cyclonedx failed, falling back to minimal SBOM generation");
+        } else {
+            eprintln!("cargo cyclonedx failed ({reason}), falling back to minimal SBOM generation");
+        }
     }
 
     // Fallback: build a minimal CycloneDX SBOM from workspace members.

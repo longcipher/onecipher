@@ -14,18 +14,23 @@ help:
 	@echo "  format test build check ci lint audit deny security no-std skill-check makefile-check ..."
 
 format:
+	rumdl fmt .
 	cargo sort -w -g
 	cargo +nightly fmt --all
 	cargo shear --fix
 
 fix:
+	rumdl check --fix .
 	RUSTC_WRAPPER= cargo +nightly clippy --fix --allow-dirty --all
+	cargo workspace-inheritance-check --fix
 
 lint:
+	rumdl check .
 	cargo +nightly fmt --all -- --check
 	RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
 	cargo sort -w -g -c
 	cargo shear
+	cargo workspace-inheritance-check
 	./scripts/check-duplicate-deps.sh
 
 test:

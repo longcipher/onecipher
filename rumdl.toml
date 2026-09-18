@@ -1,0 +1,16 @@
+# rumdl configuration — markdown lint for the OneCipher workspace.
+
+[global]
+# Never lint generated or vendored trees.
+exclude = [
+  "target/**",
+  "node_modules/**",
+  ".codebuddy/**",
+  ".codegraph/**",
+]
+
+# MD013 (line length) is intentionally off. Prose in this repo is kept on one
+# logical line so that diffs, greps and reviews stay meaningful, and the wide
+# ASCII architecture diagrams and reference tables cannot be reflowed at all
+# without losing their meaning. Every other rule stays on.
+disable = ["MD013"]

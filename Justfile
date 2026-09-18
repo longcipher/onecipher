@@ -16,20 +16,25 @@ default:
 
 # Format all code (rustfmt nightly + cargo sort + shear unused deps).
 format:
+    rumdl fmt .
     cargo sort -w -g
     cargo +nightly fmt --all
     cargo shear --fix
 
 # Auto-fix clippy warnings.
 fix:
+    rumdl check --fix .
     RUSTC_WRAPPER= cargo +nightly clippy --fix --allow-dirty --all
+    cargo workspace-inheritance-check --fix
 
 # Run all lints (clippy + fmt check + cargo sort + shear + duplicate-dep ratchet).
 lint:
+    rumdl check .
     cargo +nightly fmt --all -- --check
     RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
     cargo sort -w -g -c
     cargo shear
+    cargo workspace-inheritance-check
     ./scripts/check-duplicate-deps.sh
 
 # ============================================================

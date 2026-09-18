@@ -4,6 +4,7 @@
 # AI tool caches
 .claude
 .codegraph
+.rumdl_cache
 .superpowers
 bugs/
 
