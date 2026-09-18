@@ -75,7 +75,6 @@ oc-crypto = { workspace = true }
 oc-siwx = { workspace = true }
 rand = { workspace = true }
 ripemd = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 sha3 = { workspace = true }

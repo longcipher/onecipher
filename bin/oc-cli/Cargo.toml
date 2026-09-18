@@ -58,7 +58,6 @@ dirs = { workspace = true }
 ed25519-dalek = { workspace = true }
 eyre = { workspace = true }
 hex = { workspace = true }
-hmac = { workspace = true }
 hpx = { workspace = true, features = ["rustls-tls", "http1", "http2", "json"] }
 jiff = { workspace = true, features = ["serde", "std"] }
 k256 = { workspace = true }
