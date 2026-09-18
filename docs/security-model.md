@@ -4,7 +4,7 @@
 
 ## Key Lifecycle
 
-```
+```text
 1. OneCipher receives a sign request
 2. Authenticate the caller with explicit request-scoped authorization
 3. Evaluate attached policies before decryption when the surface requires them
@@ -35,9 +35,11 @@ The `oc-crypto` crate has zero I/O and zero network dependencies (R51/R52). It i
 ## Authorization Handling
 
 ### 1. Interactive prompt (CLI mode)
+
 The CLI prompts for the passphrase when an owner-driven flow needs it.
 
 ### 2. Passkey per request (local HTTP surfaces)
+
 Local signing-sensitive JSON-RPC and WalletSigner requests carry a fresh
 `PasskeyAuthorization` proof. Read-only helper methods such as health checks,
 wallet listing, challenge minting, and balance reads remain unauthenticated,
@@ -45,12 +47,14 @@ but any auth-class signing or wallet-rpc operation verifies the
 challenge/signature pair before it proceeds.
 
 ### 3. Daemon-internal capability token
+
 WalletConnect-owned auth flows (`wc_authRequest`, daemon-controlled
 `onecipher_signAuth`) do not forward a passkey proof over the relay. Instead,
 the daemon injects a startup-minted internal token that the Key-Agent validates
 before deriving the device-bound unlock token.
 
 ### 4. Environment variable (CLI mode)
+
 The CLI reads `ONECIPHER_PASSPHRASE` and clears it immediately after reading.
 
 > **Warning:** Environment variables remain the weakest supported owner credential delivery mechanism. They can leak via process inspection, crash dumps, or child-process inheritance if not cleared promptly.
@@ -89,7 +93,7 @@ Decrypting key material via age scrypt adds latency. The implementation maintain
 
 ### Enclaved signing (default on all surfaces)
 
-```
+```text
 Caller → sign_transaction / sign_message / signAuth / sign_typed_data /
          sign_user_op / wallet-rpc sign / intent Execute
            │
@@ -197,7 +201,7 @@ unparseable values fall back to the default, never to "no timeout").
   audit trail, not the authorization.
 - ~~Timeout + kill semantics under load (per-request spawn cost vs pool of
   pre-spawned children — pool reintroduces statefulness)~~ — per-request
-   spawn kept (age scrypt dominates the cost, not `fork/exec`); timeout kill
+  spawn kept (age scrypt dominates the cost, not `fork/exec`); timeout kill
   uses SIGKILL plus a bounded ~2 s reap (no zombies, no unbounded parent
   block). Pooling was rejected: reused children reintroduce cross-request
   state and break the wipe-per-request guarantee.
@@ -243,12 +247,14 @@ OneCipher <supported profiles>
 ```
 
 Examples:
+
 - `OneCipher Storage + Signing + Policy + EVM Chain Profile`
 - `OneCipher Storage + Signing + Lifecycle + Solana Chain Profile`
 
 ### Required Interoperability
 
 Conforming implementations SHOULD ship or consume machine-readable test vectors for:
+
 - Wallet file decryption and encryption
 - API key file resolution and token verification
 - Policy rule evaluation
@@ -256,6 +262,7 @@ Conforming implementations SHOULD ship or consume machine-readable test vectors 
 - Transaction and message signing
 
 When two conforming implementations exchange OneCipher artifacts, the following MUST remain interoperable:
+
 - Wallet files can be parsed and validated consistently
 - API key files can be resolved consistently by token hash
 - Policy files produce the same allow or deny result for the same `PolicyContext`
@@ -264,6 +271,7 @@ When two conforming implementations exchange OneCipher artifacts, the following 
 ### Error Consistency
 
 Implementations MUST preserve the error meanings defined by the [Signing Interface](signing-interface.md). They MUST NOT:
+
 - Turn a policy denial into a generic authentication failure
 - Collapse unsupported-chain errors into malformed-input errors
 - Treat expired API keys as missing keys
@@ -271,16 +279,19 @@ Implementations MUST preserve the error meanings defined by the [Signing Interfa
 ### Security Requirements
 
 **Secret Material** — implementations MUST:
+
 - Decrypt wallet or API-key-backed secret material only for the duration of the operation
 - Zeroize decrypted mnemonic, private key, derived key, and KDF output buffers after use
 - Avoid writing decrypted secret material to logs, telemetry, or audit records
 
 **Credential Handling** — implementations MUST:
+
 - Treat owner credentials and API tokens as secrets
 - Avoid echoing credentials in logs or human-readable errors
 - Verify API token scope and policy attachments before any token-backed secret is decrypted
 
 **Policy Enforcement** — implementations MUST:
+
 - Evaluate built-in policy rules deterministically
 - Short-circuit on denial when the policy model requires it
 - Deny the request if an executable policy exits unsuccessfully or returns malformed output

@@ -6,7 +6,7 @@
 
 OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wallet implemented in Rust. The `onecipher` binary embeds both an async runtime (tokio) for network communication and a sync-only signing core for key operations.
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────────┐
 │                    onecipher (single binary)                          │
 │                                                                      │
@@ -94,7 +94,7 @@ OneCipher is a **single-binary, cross-chain, AI Agent Native** cryptographic wal
 
 ## Workspace Layout
 
-```
+```text
 onecipher/
 ├── bin/
 │   └── oc-cli/                 # `onecipher` single binary
@@ -129,7 +129,7 @@ These are non-negotiable invariants enforced by CI:
 
 ## Crate Dependency Tree
 
-```
+```text
 oc-signing core crates (R56 leaf — zero async/network deps)
 ├── oc-policy      (declarative + executable policy evaluation)
 ├── oc-crypto      (HardenedBytes, KeyCache, page guards)
@@ -169,7 +169,7 @@ bin/oc-cli (single binary)
 
 ## Signing Flow
 
-```
+```text
 1. Request arrives (CLI command or WC v2 JSON-RPC)
 2. If daemon mode: forward to SigningEngine via spawn_blocking
 3. SigningEngine verifies unlock token (not expired)

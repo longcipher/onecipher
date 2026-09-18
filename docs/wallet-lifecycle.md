@@ -15,6 +15,7 @@ onecipher wallet create --name "verify-once" --show-mnemonic   # DANGEROUS: prin
 ```
 
 **Flow:**
+
 1. Generate 128–256 bits of cryptographically secure randomness
 2. Encode as BIP-39 mnemonic (12/15/18/21/24 words)
 3. Derive master seed via PBKDF2
@@ -171,7 +172,7 @@ keys. To rotate blockchain keys, create a new wallet and transfer assets.
 
 ## Lifecycle State Diagram
 
-```
+```text
                     ┌─────────┐
                     │ Create  │
                     │ Import  │

@@ -18,7 +18,7 @@ stack fully designed and implemented in accordance with the WalletConnect v2 pro
 
 ## Workspace Layout
 
-```
+```text
 .
 ├── bin/                    # Binary crates
 │   └── oc-cli/             # `onecipher` CLI
@@ -86,7 +86,7 @@ workspace entirely; there is no directory to keep.
 - ALWAYS run `cargo check`, `cargo build`, or `cargo test` sequentially.
 - If the local machine has a `rustc-wrapper` (sccache / kache) configured
   globally but the wrapper binary is missing, prefix cargo commands with
-  `RUSTC_WRAPPER= ` to disable the wrapper for that invocation.
+  `RUSTC_WRAPPER=` to disable the wrapper for that invocation.
 - Use `just <recipe>` for common tasks — see `Justfile`.
 
 ## Cargo Workspace Rules (Critical)

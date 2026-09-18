@@ -41,7 +41,7 @@ onecipher wallet create --name "my-wallet"
 
 Output:
 
-```
+```text
 Created wallet 3198bc9c-...
   eip155:1                              0xab16...   m/44'/60'/0'/0/0
   solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp  7Kz9...    m/44'/501'/0'/0'
@@ -699,7 +699,7 @@ onecipher uninstall --purge   # also remove ~/.onecipher
 
 ## File Layout
 
-```
+```text
 ~/.onecipher/
   wallets/
     <uuid>.json             # Encrypted wallet (age scrypt passphrase)

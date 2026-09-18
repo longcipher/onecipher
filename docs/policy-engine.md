@@ -4,7 +4,7 @@
 
 ## Access Model
 
-```
+```text
 sign_transaction(wallet, chain, tx, credential)
                                        │
                           ┌────────────┴────────────┐
@@ -40,7 +40,7 @@ When the owner creates an API key, OneCipher decrypts the wallet secret using th
 API tokens are 256-bit random values (`oc_key_<64 hex chars>`). The token
 bytes ARE the age X25519 static secret:
 
-```
+```text
 token     = oc_key_<random 256 bits, hex-encoded>
 recipient = age1... (bech32 of the X25519 public key, stored in the key file)
 copy      = age-encrypt(wallet secret → recipient)
@@ -66,7 +66,7 @@ onecipher key create --name "claude-agent" --wallet agent-treasury --policy spen
 
 ### Agent signing flow
 
-```
+```text
 Agent calls: sign_transaction(wallet, chain, tx, "oc_key_a1b2c3...")
 
 1. Detect oc_key_ prefix → agent mode
@@ -121,6 +121,7 @@ Restricts which smart contracts an API key can sign EIP-712 typed data for. The 
 ```
 
 **Behavior:**
+
 - For `sign_message` and `sign_transaction` calls, this rule **passes through**.
 - For `sign_typed_data` calls where the domain includes a `verifyingContract`, the address must be in the `contracts` list (case-insensitive).
 - For `sign_typed_data` calls where the domain **omits** `verifyingContract`, the rule **denies**.
@@ -131,7 +132,7 @@ For anything declarative rules can't express — on-chain simulation, external A
 
 ### Protocol
 
-```
+```text
 echo '<PolicyContext JSON>' | /path/to/policy-executable
 ```
 

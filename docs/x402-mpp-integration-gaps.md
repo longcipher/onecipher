@@ -24,6 +24,7 @@ the fail-closed `UnsupportedSigner`.
 signer is available before deriving.
 
 **Fix** (applied):
+
 - Added `ChainSigner::is_available() -> bool` (default `true`) in
   `crates/oc-signer/src/traits.rs`.
 - `UnsupportedSigner` overrides it to return `false` (chains/mod.rs).

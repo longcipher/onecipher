@@ -44,7 +44,7 @@ npm install -g @onecipher/core  # provides `onecipher` command
 
 ## File Layout
 
-```
+```text
 ~/.onecipher/
   wallets/
     <uuid>.json             # Encrypted wallet (AES-256-GCM + scrypt)

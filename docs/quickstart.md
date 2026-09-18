@@ -23,7 +23,7 @@ Sui, Bitcoin, Cosmos, Tron, TON, XRPL, Filecoin, Nano, NEAR.
 onecipher wallet create --name "agent-treasury"
 ```
 
-```
+```text
 Created wallet 3198bc9c-...
   eip155:1        0xab16...   m/44'/60'/0'/0/0
   solana:5eykt4   7Kz9...    m/44'/501'/0'/0'
@@ -171,7 +171,7 @@ See [signing-interface.md](signing-interface.md) for surface rules.
 
 ## How It Works
 
-```
+```text
 Agent / CLI / App
        │
        │  OneCipher CLI

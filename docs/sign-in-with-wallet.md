@@ -12,7 +12,7 @@
 
 ## 1. Integration Model
 
-```
+```text
 ┌─────────────────────────┐         ┌─────────────────────────────┐
 │ Relying Party (IAM)     │         │ User machine                 │
 │  e.g. an OIDC provider  │         │  OneCipher daemon (wallet)   │
@@ -81,6 +81,7 @@ Human confirmation is still provided by the daemon's approval flow (WebUI / CLI 
 ```
 
 Behaviour:
+
 - Signs the raw `message` bytes using the chain's message-signing convention
   (EVM: `personal_sign`/EIP-191; Solana: raw bytes ed25519; Cosmos: ADR-036; …) —
   identical to OneCipher's existing `signMessage` path.
@@ -91,6 +92,7 @@ Behaviour:
 - Generic: no realm, issuer, or account-system fields are hardcoded.
 
 Implementation notes:
+
 - **Direct/local calls are passkey-gated.** Local JSON-RPC callers must
   present a `PasskeyAuthorization`; the Key-Agent verifies it before signing.
 - **WalletConnect daemon calls use an internal token.** `wc_authRequest` and
@@ -198,6 +200,7 @@ onecipher config set wc.project_id 'YOUR_PROJECT_ID'
    public key), matches it to a bound address, and issues its own tokens.
 
 Security notes for the IAM:
+
 - The nonce MUST be single-use, short-TTL, and bound to the auth session / user.
 - The signed message MUST include the nonce and the IAM's domain/URI; verify both.
 - Bind addresses to accounts only after signature verification (store

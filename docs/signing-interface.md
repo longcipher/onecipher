@@ -22,6 +22,7 @@ interface SignResult {
 ```
 
 **Flow:**
+
 1. Resolve `walletId` → wallet file
 2. Resolve `chainId` → chain plugin
 3. Authenticate caller with explicit authorization material
@@ -76,6 +77,7 @@ interface SignMessageResult {
 ```
 
 Message signing follows chain-specific conventions:
+
 - **EVM**: `personal_sign` (EIP-191) or `eth_signTypedData_v4` (EIP-712)
 - **Solana**: Ed25519 signature over the raw message bytes
 - **Sui**: Intent-prefixed (scope=3) BLAKE2b-256 digest, Ed25519 signature

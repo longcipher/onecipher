@@ -54,7 +54,7 @@ violates "single Rust binary" philosophy).
 
 ### Build artifact layout
 
-```
+```text
 crates/oc-webui/                # new crate (axum router + approval queue + WebAuthn)
   src/
     router.rs                   # axum Router, mounts /api/* and /ws
@@ -78,6 +78,7 @@ bin/oc-cli/src/main.rs          # run_daemon() spawns axum::serve on loopback
 **before** `forward(KeyAgentRequestKind::...)` for signing methods only.
 
 Signing methods covered (from `wc_method_router.rs:143-264`):
+
 - `eth_sendTransaction`, `eth_signTransaction`, `solana_signTransaction`,
   `onecipher_signTransaction` → `SignTransaction`
 - `personal_sign`, `eth_sign`, `solana_signMessage`, `onecipher_signMessage`
@@ -109,7 +110,7 @@ and `oc-webui` settings route. Toggling via `POST /api/settings` or
 
 ### Data flow (approval_mode = ON)
 
-```
+```text
 dApp ─WSS─▶ WC relay ─▶ WcWalletServer::run()
                               │ decrypt wc-2.0 envelope
                               ▼
@@ -225,10 +226,11 @@ pub struct ApprovalChannel {
 - No CORS (loopback only, no cross-origin).
 
 ### 3.2 R12 revision (current R12 is broken — `nm` returns nothing because
+
 binary is stripped; `strings | grep TcpStream` already matches 1 line from
 `hpx-yawc` WSS client)
 
-```
+```text
 R12 (revised): Key-Agent code-path isolation
 - R12a: oc-keyagent/oc-crypto/oc-policy/oc-session-key source MUST NOT
         reference TcpListener or TcpStream (verified via source grep, not nm)
@@ -265,7 +267,7 @@ Passkey-first identity model.
 
 ### 3.4 Bootstrap flow (first-time registration)
 
-```
+```text
 1. daemon start → generate one-time bootstrap_token (32 bytes random, base64url)
    write to ~/.onecipher/bootstrap_token (mode 0600), TTL 5 min
 2. user runs `onecipher webui open` → CLI reads port + token, opens
@@ -280,7 +282,7 @@ Passkey-first identity model.
 
 ### 3.5 Subsequent login
 
-```
+```text
 1. browser opens https://127.0.0.1:port/
 2. daemon returns 401 + WWW-Authenticate: WebAuthn
 3. front-end calls navigator.credentials.get() → user Face ID/Touch ID
@@ -318,7 +320,7 @@ spec, so HTTP suffices. Cookie `Secure` flag cannot be set over HTTP; use
 
 ### 3.8 oc-webui crate dependencies
 
-```
+```text
 oc-webui/Cargo.toml:
   axum (ws, macros), tower, tower-http (cors for dev only), rust-embed,
   webauthn-rs (danger-allow-state-serialisation), webauthn-rs-proto,
@@ -355,7 +357,7 @@ to `oc-policy`, no R56 impact.
 
 Risk-level precedence (from Rabby `SignTx.tsx:817-828`):
 
-```
+```text
 FORBIDDEN > DANGER > WARNING > SAFE
 ```
 
@@ -370,7 +372,7 @@ FORBIDDEN > DANGER > WARNING > SAFE
 
 ### 5.1 Crate `oc-sim`
 
-```
+```text
 crates/oc-sim/Cargo.toml:
   evm2 = { git = "https://github.com/alloy-rs/evm2", rev = "<pin>",
            default-features = false, features = ["std", "parse", "asm-keccak"] }
@@ -431,7 +433,7 @@ and UI shows raw params. `tracing::warn!` records the error for diagnosis.
 
 State machine (from Rabby `SubmitActions.tsx:32-90` + `SignTx.tsx:2966-2976`):
 
-```
+```text
 Disabled ───────────────► Armed ──────────────► Submitting
    │  (first click)         │  (Confirm click)    │  (await sign receipt)
    │                        │
@@ -460,7 +462,7 @@ independently via `trunk` to `dist/`, embedded into `oc-webui` via
 
 ### 8.2 Routing & SortHat dispatcher (Improvement F)
 
-```
+```text
 /                    → SortHat (dispatcher, Redirects based on state)
 /welcome             → first-time onboarding
 /unlock              → WebAuthn login
@@ -481,7 +483,7 @@ independently via `trunk` to `dist/`, embedded into `oc-webui` via
 
 SortHat decision order (single Redirect, no top-level switch):
 
-```
+```text
 1. no auth + no wallets        → /welcome
 2. no auth + has wallets       → /unlock
 3. authed + no wallets         → /no-address
@@ -501,7 +503,7 @@ WebSocket events / re-querying IndexedDB on each tab switch.
 
 ### 8.4 API contract
 
-```
+```text
 GET    /api/health
 POST   /api/auth/bootstrap                           { token }
 POST   /api/auth/webauthn/register/begin             → challenge
@@ -557,7 +559,7 @@ GET    /ws  → WebSocket upgrade
 
 Schema (Dexie via `rexie`):
 
-```
+```text
 wallets          id, updated_at
 balances         wallet_id, chain_id, [wallet_id+chain_id], updated_at
 wc_sessions      topic, state, created_at, updated_at
@@ -569,7 +571,7 @@ abi_cache        address, fetched_at
 
 **Freshness ledger** (Rabby `db/schema/sync.ts` + `db/constants.ts`):
 
-```
+```text
 const CACHE_TTL_SECS = 600; // 10 min
 
 read_or_fetch(scene, wallet_id?, fetch_fn):
@@ -583,7 +585,7 @@ read_or_fetch(scene, wallet_id?, fetch_fn):
 
 **Force-expire-on-event** (Rabby `background/index.ts:206-236`):
 
-```
+```text
 WebSocket event → invalidate(scene, wallet_id?) → set sync.updated_at = 0
   SignCompleted      → invalidate(balances, approval_history, audit_log, wc_sessions)
   WCSessionChanged   → invalidate(wc_sessions)

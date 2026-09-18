@@ -8,7 +8,7 @@ OneCipher is the **wallet** in a two-project sibling architecture with
 [LedgerFlow](https://github.com/longcipher/ledgerflow). The two projects are
 decoupled by responsibility and communicate only through standard protocols:
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────┐
 │  LedgerFlow  (payment protocol + authz layer, sibling repo)  │
 │                                                              │
@@ -108,7 +108,7 @@ so a TOTP read and a signing operation are governed by one consistent ruleset.
 
 ## Workspace Layout
 
-```
+```text
 .
 ├── bin/                    # Binary crates
 │   └── oc-cli/             # `onecipher` CLI (sole binary)
@@ -130,7 +130,7 @@ so a TOTP read and a signing operation are governed by one consistent ruleset.
 
 ## Architecture
 
-```
+```text
                     dApps / External Agents
                            │
               WalletConnect v2 relay (WSS)
@@ -200,7 +200,7 @@ The unified sensitive-data vault sits above the same hardened core, so
 passwords, TOTP secrets, and notes enjoy the same memory and policy
 guarantees as private keys:
 
-```
+```text
 ┌─────────────────────────────────────────────┐
 │              onecipher CLI / TUI              │
 │         (ratatui + crossterm + arboard)       │

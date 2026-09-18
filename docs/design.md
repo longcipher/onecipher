@@ -5,12 +5,14 @@
 ## Stage 0–3: Architecture Retrospective
 
 ### Stage 0 — Security Foundations
+
 Fixed critical security vulnerabilities: empty-password signing paths,
 Passkey verification stubs, x402 amount parsing, audit log keys, and
 CLI client connections. Established the HardenedBytes memory-hardening
 contract and the R56 dependency isolation hard gates.
 
 ### Stage 1 — Unified Binary
+
 Merged the dual-process architecture (Key-Agent + Network-Agent) into a
 single `onecipher` binary. Created the signing-core facade (the
 `oc-signer` crate; formerly referenced as `oc-signing-core`) and used
@@ -18,6 +20,7 @@ single `onecipher` binary. Created the signing-core facade (the
 runs as a sync `std::thread` with UDS; the WC v2 server runs on tokio.
 
 ### Stage 2 — AI Agent Native Features
+
 - **Intent Layer (`oc-netagent::intent`):** Declarative intent framing,
   simulation, and execution for Pay/SignTransaction/SignMessage/CrossChainTransfer.
 - **Real Session Keys:** ERC-7579 (EVM) and Session Tokens (Solana).
@@ -28,6 +31,7 @@ runs as a sync `std::thread` with UDS; the WC v2 server runs on tokio.
   server.
 
 ### Stage 3 — TEE + Cross-Chain (Planned)
+
 Documented but not yet implemented: TEE-based subprocess enclave,
 cross-chain routing via ERC-7683, and Cedar-policy full integration.
 
@@ -128,6 +132,7 @@ cross-chain routing via ERC-7683, and Cedar-policy full integration.
 ## §6 Component Design References
 
 ### §6.1 Intent Layer (`oc-netagent::intent`)
+
 The Intent Layer provides a declarative interface for AI agents to
 express signing and payment intentions (e.g. "pay 10.5 USDC to 0xABC
 on Base") without constructing raw transactions. Intents flow through
@@ -163,6 +168,7 @@ client — it does not sign directly. `MockRpcClient` backs unit tests.
 > done behind an explicit opt-in to avoid breaking existing clients.
 
 ### §6.2 Session Keys (`oc-session-key`)
+
 Session keys enable delegated signing for AI agents without exposing
 the master key. EVM uses ERC-7715 `grantPermission` on an ERC-7579
 SCA; Solana uses the Session Tokens program. Per R21, the crate

@@ -85,7 +85,7 @@ Implementations MAY ship convenience endpoint defaults, but those defaults are d
 
 Implementations MAY support shorthand aliases in CLI contexts:
 
-```
+```text
 ethereum  → eip155:1
 base      → eip155:8453
 plasma    → eip155:9745
@@ -120,7 +120,7 @@ Aliases MUST be resolved to full CAIP-2 identifiers before any processing. They 
 
 OneCipher uses BIP-39 mnemonics as the root key material, with BIP-32/BIP-44 derivation for all chains:
 
-```
+```text
 Mnemonic (BIP-39)
     │
     ▼

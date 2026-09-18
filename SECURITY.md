@@ -11,7 +11,7 @@
 **DO NOT** open a public GitHub issue for security vulnerabilities.
 
 Instead, please report them responsibly via email to:
-**security@onecipher.dev** (or the repository owner's email if the domain is not yet active).
+**<security@onecipher.dev>** (or the repository owner's email if the domain is not yet active).
 
 ### What to include
 

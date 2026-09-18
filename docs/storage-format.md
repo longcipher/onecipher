@@ -6,7 +6,7 @@ OneCipher extends the Ethereum Keystore v3 format with per-chain type adaptation
 
 ## Vault Directory Structure
 
-```
+```text
 ~/.onecipher/
 ├── config.json                    # Global configuration
 ├── wallets/
@@ -24,7 +24,7 @@ OneCipher extends the Ethereum Keystore v3 format with per-chain type adaptation
 
 ### Filesystem Permissions
 
-```
+```text
 ~/.onecipher/                       drwx------  (700)
 ~/.onecipher/wallets/               drwx------  (700)
 ~/.onecipher/wallets/*.json         -rw-------  (600)
