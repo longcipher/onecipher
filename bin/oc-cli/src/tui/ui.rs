@@ -539,7 +539,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
         Line::from(vec![Span::styled("  q          ", cyan), Span::raw("Quit")]),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "Set ONECIPHER_AGE_IDENTITY to enable copy/TOTP features.",
+            "Run `onecipher age init` once to enable copy/TOTP features.",
             dim,
         )]),
         Line::from(""),

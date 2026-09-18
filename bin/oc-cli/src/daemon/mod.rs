@@ -610,6 +610,12 @@ fn notify_on_exit(
     name: &'static str,
     tx: tokio::sync::mpsc::UnboundedSender<&'static str>,
 ) {
+    // A `None` handle means the server was never started (feature or config
+    // disabled) — not an exit event. Reporting it would shut the daemon down
+    // immediately on startup.
+    if handle.is_none() {
+        return;
+    }
     tokio::spawn(async move {
         if let Some(h) = handle {
             let _ = h.await;

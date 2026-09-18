@@ -236,9 +236,10 @@ pub(crate) struct App {
     pub(crate) should_quit: bool,
     /// Optional age identity for decrypting secrets (copy / TOTP).
     ///
-    /// Loaded from the `ONECIPHER_AGE_IDENTITY` env var at construction
-    /// time. When `None`, copy and TOTP features display a guidance
-    /// message instead of failing.
+    /// Loaded at construction time: `ONECIPHER_AGE_IDENTITY` env var first,
+    /// then the local `~/.onecipher/keys/age-identity.txt` file. When both
+    /// are absent, copy and TOTP features display a guidance message
+    /// instead of failing.
     identity: Option<AgeIdentity>,
     /// New-secret / edit-secret form state (active when in `Mode::Insert`).
     pub(crate) form: Option<FormState>,
@@ -259,11 +260,14 @@ pub(crate) struct App {
 impl App {
     /// Create a new `App` from a [`SecretStore`].
     ///
-    /// Attempts to load an age identity from `ONECIPHER_AGE_IDENTITY` so
-    /// that copy / TOTP features work out of the box.
+    /// Loads the age identity from `ONECIPHER_AGE_IDENTITY` first, falling
+    /// back to the local `~/.onecipher/keys/age-identity.txt` file, so that
+    /// copy / TOTP features work out of the box after `age init`.
     pub(crate) fn new(store: SecretStore) -> Self {
-        let identity =
-            std::env::var("ONECIPHER_AGE_IDENTITY").ok().and_then(|s| AgeIdentity::parse(&s).ok());
+        let identity = std::env::var("ONECIPHER_AGE_IDENTITY")
+            .ok()
+            .and_then(|s| AgeIdentity::parse(s.trim()).ok())
+            .or_else(load_local_age_identity);
 
         Self {
             store,
@@ -639,8 +643,9 @@ impl App {
         // Editing must be able to decrypt to preserve unchanged fields.
         if is_edit && self.identity.is_none() {
             if let Some(f) = self.form.as_mut() {
-                f.error =
-                    Some("Editing requires an age identity (set ONECIPHER_AGE_IDENTITY)".into());
+                f.error = Some(
+                    "Editing requires an age identity — run `onecipher age init` first".into(),
+                );
             }
             return;
         }
@@ -799,8 +804,9 @@ impl App {
     ///
     /// Takes `&self` so it doesn't conflict with `&mut self` in the caller.
     fn copy_entry_secret(&self, name: &str) -> Result<Instant, String> {
-        let identity =
-            self.identity.as_ref().ok_or("No age identity loaded (set ONECIPHER_AGE_IDENTITY)")?;
+        let identity = self.identity.as_ref().ok_or(
+            "No age identity — run `onecipher age init` first (or set ONECIPHER_AGE_IDENTITY)",
+        )?;
         let entry = self.store.get(name).map_err(|e| format!("Store error: {e}"))?;
         let payload = entry.decrypt(identity).map_err(|e| format!("Decrypt error: {e}"))?;
         clipboard::copy_to_clipboard(&payload.secret).map_err(|e| format!("Clipboard error: {e}"))
@@ -808,8 +814,9 @@ impl App {
 
     /// Generate a fresh TOTP code for the named entry and copy it.
     fn generate_and_copy_totp(&self, name: &str) -> Result<(String, Instant), String> {
-        let identity =
-            self.identity.as_ref().ok_or("No age identity loaded (set ONECIPHER_AGE_IDENTITY)")?;
+        let identity = self.identity.as_ref().ok_or(
+            "No age identity — run `onecipher age init` first (or set ONECIPHER_AGE_IDENTITY)",
+        )?;
         let entry = self.store.get(name).map_err(|e| format!("Store error: {e}"))?;
         let payload = entry.decrypt(identity).map_err(|e| format!("Decrypt error: {e}"))?;
         let code = oc_secret::totp::generate_totp(&payload.secret)
@@ -818,6 +825,14 @@ impl App {
             clipboard::copy_to_clipboard(&code).map_err(|e| format!("Clipboard error: {e}"))?;
         Ok((code, clear_at))
     }
+}
+
+/// Load the age identity from the local `~/.onecipher/keys/age-identity.txt`
+/// file (created by `onecipher age init`). Returns `None` when the file is
+/// missing or unparseable — callers fall back to a guidance message.
+fn load_local_age_identity() -> Option<AgeIdentity> {
+    let content = std::fs::read_to_string(crate::commands::age_identity_path()).ok()?;
+    AgeIdentity::parse(content.trim()).ok()
 }
 
 /// Build [`SecretMetadata`] from the form's type-specific fields.

@@ -44,6 +44,39 @@ impl Drop for RawModeGuard {
     }
 }
 
+/// Best-effort background launch of the Key-Agent daemon.
+///
+/// The TUI itself drives the local secret store and never sends Key-Agent
+/// RPCs, so instead of blocking startup on the daemon socket, this probes
+/// the socket and — only when nothing is listening — fire-and-forgets
+/// `onecipher --daemon` on a helper thread and returns immediately. No
+/// warning is printed: daemon absence is not an error for the TUI.
+pub(crate) fn ensure_daemon_background() {
+    use std::os::unix::net::UnixStream;
+
+    let socket_path = oc_keyagent::server::default_socket_path();
+    if UnixStream::connect(&socket_path).is_ok() {
+        return;
+    }
+    // Clean up a stale socket file so the daemon can bind on launch.
+    if std::path::Path::new(&socket_path).exists() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
+    std::thread::Builder::new()
+        .name("onecipher-daemon-spawn".into())
+        .spawn(|| {
+            use std::process::Stdio;
+            let Ok(exe) = std::env::current_exe() else { return };
+            let _ = std::process::Command::new(exe)
+                .arg("--daemon")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        })
+        .ok();
+}
+
 /// Run the TUI loop. Returns when the user quits (q) or an unrecoverable
 /// error occurs.
 pub(crate) fn run(store: SecretStore) -> eyre::Result<()> {

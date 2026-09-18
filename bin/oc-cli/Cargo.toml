@@ -12,12 +12,10 @@ name = "onecipher"
 path = "src/main.rs"
 
 [features]
-# `git` is OFF by default: `git2` pulls in `libgit2-sys` → `libssh2-sys` →
-# OpenSSL. Linking OpenSSL into a signing wallet that already links a C-crypto
-# stack (webauthn-rs's OpenSSL when `webui` is enabled) doubles the C-crypto
-# attack surface and inflates both binary size and cold-build time, for a
-# feature most users never touch.
-# Build with `--features git` to enable the `onecipher git` subcommand.
+# `git` is ON by default: every secret change is version-controlled and the
+# `onecipher git` subcommand manages sync. `git2` pulls in `libgit2-sys` →
+# `libssh2-sys` → OpenSSL, so environments without a working libssh2 toolchain
+# can opt out with `--no-default-features`.
 #
 # `webui` is ON by default but can be switched off. `webauthn-rs` is the sole
 # source of OpenSSL in the dependency graph. hpx's HTTP client uses pure-Rust
@@ -38,7 +36,7 @@ path = "src/main.rs"
 # via `oc-signer/all-chains`). The workspace has NO `default-members`
 # (owx trap): `just build` (`cargo build --workspace`) always builds every
 # crate regardless of these feature flags.
-default = ["webui", "qr", "mainstream"]
+default = ["webui", "qr", "mainstream", "git"]
 mainstream = ["oc-signer/mainstream"]
 all-chains = ["mainstream", "oc-signer/all-chains"]
 git = ["oc-secret/git"]

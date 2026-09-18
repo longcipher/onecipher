@@ -50,7 +50,7 @@ all-chains = ["mainstream", "spark", "filecoin", "nano", "near", "xrpl"]
 # (2.x), `curve25519-dalek` (4.x) and `secp256k1` on top of the 3.x/5.x
 # versions the rest of the tree uses. Shipping two independent Ed25519
 # implementations inside a signing wallet is exactly the dual-crypto attack
-# surface that keeps `git` (OpenSSL via libssh2) off by default.
+# surface behind the `oc-secret/git` feature (OpenSSL via libssh2).
 #
 # Only three symbols are actually used: `binarycodec::{encode, decode}` and
 # `keypairs::derive_classic_address`. Build with `--features xrpl` to enable.

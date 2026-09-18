@@ -303,6 +303,35 @@ pub(crate) fn open_secret_store() -> Result<SecretStore, CliError> {
     SecretStore::open(config).map_err(|e| CliError::InvalidArgs(e.to_string()))
 }
 
+/// Initialize the secret store as a git repository if it isn't one already.
+///
+/// Mirrors GoPass behaviour: the first time the store is used it is turned
+/// into a git repo so every secret change is version-controlled.  Prints a
+/// short onboarding message telling the user where the repo lives and how to
+/// add a remote.
+pub(crate) fn maybe_init_git_store() -> Result<(), CliError> {
+    let root = secret_store_root();
+    let git_dir = root.join(".git");
+    if git_dir.exists() {
+        return Ok(());
+    }
+
+    let output =
+        std::process::Command::new("git").arg("init").current_dir(&root).output().map_err(|e| {
+            CliError::InvalidArgs(format!("failed to run `git init`: {e} — is git installed?"))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CliError::InvalidArgs(format!("`git init` failed: {stderr}")));
+    }
+
+    eprintln!("✓ Initialized empty Git repository in {}", root.display());
+    eprintln!("  Your secrets are version-controlled. To sync with a remote, run:");
+    eprintln!("    cd {} && git remote add origin <url>", root.display());
+    Ok(())
+}
+
 /// Keys directory: `<onecipher_home>/keys/`.
 pub(crate) fn keys_dir() -> PathBuf {
     onecipher_home().join("keys")
@@ -321,6 +350,22 @@ pub(crate) fn age_recipient_public_path() -> PathBuf {
 /// Age recipients list file path: `<onecipher_home>/.age-recipients`.
 pub(crate) fn age_recipients_path() -> PathBuf {
     onecipher_home().join(".age-recipients")
+}
+
+/// Ensure an age identity exists, generating one on first use (GoPass-style
+/// onboarding). Returns `true` when a new identity was generated.
+///
+/// When `~/.onecipher/keys/age-identity.txt` already exists this is a no-op.
+/// Otherwise it delegates to [`age_cmd::init`], which also seeds
+/// `~/.onecipher/.age-recipients`, and prints where the key material lives.
+pub(crate) fn maybe_init_age_identity() -> Result<bool, CliError> {
+    if age_identity_path().exists() {
+        return Ok(false);
+    }
+    age_cmd::init()?;
+    eprintln!("  Your age identity lives at {}", age_identity_path().display());
+    eprintln!("  Keep a backup of this file — without it your secrets cannot be decrypted.");
+    Ok(true)
 }
 
 /// Load the age identity from disk (`~/.onecipher/keys/age-identity.txt`).

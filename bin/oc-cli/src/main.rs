@@ -99,6 +99,21 @@ fn main() {
     // immediately is correct. Daemons never reach this line.
     oc_signer::process_hardening::install_signal_handlers();
 
+    // TUI drives the local secret store only — it never talks to the
+    // Key-Agent. Blocking on `connect_or_spawn` here would stall TUI
+    // startup (and print a spurious warning) whenever the daemon is slow
+    // to start, so TUI takes the early path: best-effort background spawn
+    // and straight into the fullscreen loop.
+    if matches!(cli.command, Some(Commands::Tui)) {
+        match run_tui_only() {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(e.exit_code());
+            }
+        }
+    }
+
     // Try the Key-Agent daemon first; auto-spawn if not running.
     // Falls back to the stub client only if spawn + connect fails.
     let client: Box<dyn netagent::NetAgentClient> =
@@ -515,6 +530,18 @@ fn dispatch_env(
     commands::env_cmd::run(&names, &set, &prompt, keep_case, exec, &command)
 }
 
+/// TUI entry point that skips Key-Agent client setup entirely.
+///
+/// The TUI drives the local secret store and never sends Key-Agent RPCs,
+/// so there is no need to block on the daemon socket before entering the
+/// fullscreen loop.
+fn run_tui_only() -> Result<(), CliError> {
+    // The fullscreen TUI cannot speak the single-object JSON
+    // stream; refuse explicitly instead of hanging the agent.
+    output::reject_interactive_if_json("tui")?;
+    dispatch_tui()
+}
+
 fn dispatch_tui() -> Result<(), CliError> {
     // crossterm needs a real terminal (raw mode on stdin, alternate screen
     // on stdout). Fail fast with a clear message instead of a raw OS error
@@ -523,6 +550,22 @@ fn dispatch_tui() -> Result<(), CliError> {
         return Err(CliError::InvalidArgs("tui requires an interactive terminal".into()));
     }
     let store = commands::open_secret_store()?;
+    // Auto-init the store as a git repo on first use (GoPass-style onboarding).
+    // Best-effort: a failed init should not block the TUI from launching.
+    if let Err(e) = commands::maybe_init_git_store() {
+        eprintln!("warning: {e}");
+    }
+    // Auto-generate the age identity on first use so copy/TOTP work without
+    // any manual setup. Best-effort for the same reason as above.
+    match commands::maybe_init_age_identity() {
+        Ok(true) => eprintln!("  Copy/paste and TOTP are now unlocked in the TUI."),
+        Ok(false) => {}
+        Err(e) => eprintln!("warning: {e}"),
+    }
+    // Best-effort background daemon launch (fire-and-forget, non-blocking).
+    // The TUI itself only touches the local secret store, so daemon absence
+    // is not an error and must not print a warning.
+    crate::tui::ensure_daemon_background();
     tui::run(store).map_err(|e| CliError::InvalidArgs(e.to_string()))
 }
 
@@ -685,12 +728,10 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         Commands::Find { query, regex, json, r#type } => {
             commands::find::run(query.as_deref(), regex, json, r#type.as_deref())
         }
-        Commands::Tui => {
-            // The fullscreen TUI cannot speak the single-object JSON
-            // stream; refuse explicitly instead of hanging the agent.
-            output::reject_interactive_if_json("tui")?;
-            dispatch_tui()
-        }
+        // Unreachable via `main()` (TUI takes the early `run_tui_only`
+        // path that skips Key-Agent client setup); kept so `run()` stays
+        // total for tests and other callers.
+        Commands::Tui => run_tui_only(),
         Commands::Doctor { verbose, json, repair_generations } => {
             commands::doctor::run_ext(verbose, json, repair_generations)
         }
