@@ -81,8 +81,8 @@ hex = "0.4.3"
 hex-literal = "1.1.0"
 hkdf = "0.13.0"
 hmac = "0.13"
-hpx = { version = "2.5.25", default-features = false }
-hpx-yawc = "2.5.25"
+hpx = { version = "2.5.26", default-features = false }
+hpx-yawc = "2.5.26"
 # Pure RFC 3986 parser (zero dependencies, no I/O) for CAIP-122 URI /
 # authority validation in `oc-siwx`. R56-safe by construction.
 iri-string = "0.7.12"
@@ -110,7 +110,7 @@ p256 = "0.14.0"
 proptest = "1.11.0"
 prost = "0.14.4"
 qr2term = "0.3"
-rand = "0.10.2"
+rand = "0.10.3"
 ratatui = "0.30.2"
 regex-lite = "0.1"
 ripemd = "0.2.0"
@@ -125,7 +125,7 @@ signal-hook = "0.4.4"
 subtle = { version = "2.6.1", default-features = false }
 tap-caip = "0.7.0"
 tempfile = "3.27.0"
-thiserror = "2.0.20"
+thiserror = "2.0.21"
 tokio = "1.53.1"
 toml = "1.1.6"
 totp-rs = { version = "6.0.0", default-features = false }
