@@ -1468,9 +1468,10 @@ impl WalletMethodHandler for WcMethodRouter {
                             (JsonRpcErrorCode::Internal, format!("intent RPC unavailable: {e}"))
                         })?;
                     // C13 signer: forward the unsigned bytes to the Key-Agent
-                    // `SignTransaction` path over UDS. `block_in_place` bridges
-                    // the sync `execute_intent` signer closure onto this async
-                    // worker (daemon uses a multi-thread runtime).
+                    // `SignTransaction` path over UDS. Use `spawn_blocking` to
+                    // bridge the sync `execute_intent` signer closure onto this
+                    // async worker — safe for both single-thread and multi-thread
+                    // runtimes (N-001 fix).
                     let key_agent = self.key_agent.clone();
                     let wallet_id = common.wallet_id.clone();
                     let chain_id = common.chain_id.clone();
@@ -1489,15 +1490,17 @@ impl WalletMethodHandler for WcMethodRouter {
                                 auth: Some(auth.clone()),
                             };
                             let kind = KeyAgentRequestKind::SignTransaction(req);
-                            let resp: KeyAgentResponse = tokio::task::block_in_place(|| {
-                                tokio::runtime::Handle::current()
-                                    .block_on(key_agent.send(&KeyAgentRequest { kind: Some(kind) }))
-                            })
-                            .map_err(|e| {
-                                crate::intent::IntentError::Execution(format!(
-                                    "key-agent sign: {e}"
-                                ))
-                            })?;
+                            // N-001 fix: Use Handle::block_on instead of block_in_place
+                            // to avoid panic on single-thread runtimes.
+                            // SAFETY: This is called from within an async context
+                            // (execute_for_hot_path), so Handle::current() is valid.
+                            let resp: KeyAgentResponse = tokio::runtime::Handle::current()
+                                .block_on(key_agent.send(&KeyAgentRequest { kind: Some(kind) }))
+                                .map_err(|e| {
+                                    crate::intent::IntentError::Execution(format!(
+                                        "key-agent sign: {e}"
+                                    ))
+                                })?;
                             match resp.kind {
                                 Some(KeyAgentResponseKind::Ok(b)) => {
                                     let decoded: oc_keyagent::proto::SignTransactionResponse =

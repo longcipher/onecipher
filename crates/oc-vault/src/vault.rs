@@ -175,6 +175,12 @@ pub fn delete_wallet_file(id: &str, vault_path: Option<&Path>) -> Result<(), OcV
     if !path.exists() {
         return Err(OcVaultError::WalletNotFound(id.to_string()));
     }
+    // E-007 fix: Reject symlinks to prevent symlink attacks
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| OcVaultError::WalletNotFound(id.to_string()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(OcVaultError::InvalidInput("symlink not allowed in wallet directory".into()));
+    }
     fs::remove_file(&path)?;
     Ok(())
 }

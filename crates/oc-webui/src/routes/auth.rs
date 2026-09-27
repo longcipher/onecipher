@@ -345,14 +345,27 @@ pub async fn login_finish(
     response
 }
 
-/// `POST /api/auth/logout`
-#[derive(Debug, Deserialize)]
-pub struct LogoutRequest {
-    pub session_id: String,
-}
+/// `POST /api/auth/logout` — destroy the current authenticated session.
+///
+/// N-002 fix: This endpoint now requires authentication. The session ID is
+/// extracted from the validated session (via headers/cookies), not from the
+/// request body. This prevents unauthenticated users from destroying arbitrary
+/// sessions by guessing session IDs.
+pub async fn logout(State(state): State<AuthState>, headers: axum::http::HeaderMap) -> Response {
+    // Validate the session from headers
+    let session = match validate_session_headers(&headers, &state.session_store) {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "authentication required"})),
+            )
+                .into_response()
+        }
+    };
 
-pub async fn logout(State(state): State<AuthState>, Json(body): Json<LogoutRequest>) -> Response {
-    state.session_store.remove(&body.session_id);
+    // Destroy the validated session
+    state.session_store.remove(&session.id);
     Json(serde_json::json!({"ok": true})).into_response()
 }
 

@@ -140,6 +140,17 @@ impl HardenedBytes {
     pub fn expose(&self) -> &[u8] {
         &self.inner
     }
+
+    /// Returns `true` if the underlying buffer is currently page-locked (mlock).
+    ///
+    /// This allows callers to detect when `from_slice_best_effort` or `clone`
+    /// has degraded to unlocked memory (e.g., in containers with restrictive
+    /// `RLIMIT_MEMLOCK`). Callers that require hard guarantees can use this
+    /// to decide whether to fail closed or retry.
+    pub fn is_locked(&self) -> bool {
+        // Query the page guard module to check if the buffer is locked
+        page_guard::is_locked(self.inner.as_ptr(), self.inner.len())
+    }
 }
 
 impl Clone for HardenedBytes {

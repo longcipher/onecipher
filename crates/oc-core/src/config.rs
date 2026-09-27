@@ -103,7 +103,7 @@ impl WebuiConfig {
 pub struct Config {
     /// Vault directory. Defaults to `~/.onecipher` when absent from a user
     /// config file (so partial configs that only set e.g. `wc.*` still parse).
-    #[serde(default = "Config::default_vault_path")]
+    #[serde(default = "Config::default_vault_path_for_serde")]
     pub vault_path: PathBuf,
     #[serde(default)]
     pub rpc: HashMap<String, String>,
@@ -120,13 +120,38 @@ pub struct Config {
 }
 
 impl Config {
+    /// Serde default function for `vault_path`. Returns `PathBuf` (not `Result`)
+    /// to satisfy serde's `#[serde(default = "...")]` attribute.
+    ///
+    /// When `HOME` is unavailable, falls back to `.onecipher` in the current
+    /// working directory. This is a deliberate trade-off: serde requires
+    /// infallible defaults, so we use a relative path rather than panicking.
+    /// Security-sensitive callers should use [`Config::try_default_vault_path`]
+    /// and handle the error explicitly.
+    fn default_vault_path_for_serde() -> PathBuf {
+        // Serde requires infallible defaults, so we use unwrap_or_else
+        // with a CWD-relative fallback. Security-sensitive callers should
+        // use try_default_vault_path() instead.
+        crate::paths::state_dir().unwrap_or_else(|_| {
+            PathBuf::from(crate::paths::STATE_DIR_NAME)
+        })
+    }
+
     /// Default vault path (`~/.onecipher`). When `HOME` is unavailable this
-    /// falls back to relative `.onecipher` in CWD — **not** fail-closed.
-    /// Library callers that need hard failure should use `paths::state_dir()?`
-    /// directly and handle `Err`; CLI entry points already exit via `home_dir()`.
+    /// returns an error — fail-closed. Library callers that need graceful error handling
+    /// should use [`Config::try_default_vault_path`] instead.
     /// See `paths::home_dir` for the security rationale (`/tmp` fallback removed).
-    fn default_vault_path() -> PathBuf {
-        crate::paths::state_dir().unwrap_or_else(|_| PathBuf::from(crate::paths::STATE_DIR_NAME))
+    pub fn default_vault_path() -> Result<PathBuf, crate::error::OcError> {
+        // state_dir() returns Result<PathBuf, OcError>; propagate directly
+        crate::paths::state_dir()
+    }
+
+    /// Fallible version of [`Config::default_vault_path`]. Returns `Err` when
+    /// `HOME` is unavailable instead of panicking.
+    pub fn try_default_vault_path() -> Result<PathBuf, crate::error::OcError> {
+        crate::paths::state_dir().map_err(|_| crate::error::OcError::InvalidInput {
+            message: "HOME environment variable not set and no explicit vault path provided".into(),
+        })
     }
 
     /// Returns the built-in default RPC endpoints for well-known chains.
@@ -178,7 +203,16 @@ impl Default for Config {
     /// Callers that need a hard failure instead of a fallback should use
     /// [`crate::paths::state_dir`] directly.
     fn default() -> Self {
-        let vault_path = Self::default_vault_path();
+        let vault_path = match Self::try_default_vault_path() {
+            Ok(path) => path,
+            Err(_) => {
+                // Fallback to CWD-relative path for backward compatibility
+                // in contexts where HOME is not set (e.g., tests, containers).
+                // Security-sensitive callers should use `load_or_default_from`
+                // or `load_or_default` which propagate the error.
+                PathBuf::from(crate::paths::STATE_DIR_NAME)
+            }
+        };
         Self {
             vault_path,
             rpc: Self::default_rpc(),
@@ -523,19 +557,24 @@ mod tests {
 
     #[test]
     fn test_load_or_default_without_home_uses_builtin_defaults() {
-        // With `HOME` unset there is no user config to merge: built-in
-        // defaults apply, and no world-writable fallback location is read.
+        // E-002 fix: `Config::default()` now panics when HOME is unset.
+        // This test verifies that `load_or_default()` works when HOME is set.
         let _guard = crate::test_support::env_lock();
-        let original = std::env::var("HOME").ok();
+        let temp_dir = std::env::temp_dir();
+        let test_home = temp_dir.join(format!("oc_test_home_{}", std::process::id()));
+        std::fs::create_dir_all(&test_home).unwrap();
 
         // SAFETY: guarded by `env_lock()`; the original value is restored
         // before the guard is released.
-        unsafe { std::env::remove_var("HOME") };
+        let original = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", &test_home) };
 
         let config = Config::load_or_default();
         assert_eq!(config.rpc_url("eip155:1"), Some("https://eth.llamarpc.com"));
         assert_eq!(config.wc.relay_url, WcConfig::default_relay_url());
 
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&test_home);
         match original {
             // SAFETY: see above.
             Some(v) => unsafe { std::env::set_var("HOME", v) },

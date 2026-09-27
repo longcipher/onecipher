@@ -146,6 +146,53 @@ pub fn wipe_on_fork(addr: *const u8, len: usize) -> Result<(), MemGuardError> {
     }
 }
 
+/// Check if a region of memory is currently page-locked (mlock).
+///
+/// This is a best-effort check that uses `mincore` on Unix to verify that
+/// pages are resident in memory. Note that this is not a perfect check:
+/// - Pages may be resident for reasons other than mlock (e.g., recent access)
+/// - On Windows, this always returns `true` as there is no direct equivalent
+///
+/// Returns `true` if the region appears to be locked, `false` otherwise.
+pub fn is_locked(addr: *const u8, len: usize) -> bool {
+    if len == 0 {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        // Use mincore to check if pages are resident
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+        if page_size == 0 {
+            return false;
+        }
+        let start = addr as usize;
+        let aligned_start = (start + page_size - 1) & !(page_size - 1);
+        let end = start + len;
+        let aligned_end = end & !(page_size - 1);
+        let check_len =
+            if aligned_end > aligned_start { aligned_end - aligned_start } else { page_size };
+        let num_pages = check_len.div_ceil(page_size);
+        let mut vec = vec![0u8; num_pages];
+        let ret = unsafe {
+            libc::mincore(aligned_start as *mut libc::c_void, check_len, vec.as_mut_ptr())
+        };
+        if ret != 0 {
+            // mincore failed, assume not locked
+            return false;
+        }
+        // Check if all pages are resident (bit 0 set)
+        vec.iter().all(|&v| v & 1 == 1)
+    }
+    #[cfg(windows)]
+    {
+        // On Windows, we can't easily check if pages are locked
+        // Return true as a conservative default
+        let _ = addr;
+        let _ = len;
+        true
+    }
+}
+
 /// Unlock a previously locked region of memory. Best-effort: failures are
 /// logged via `tracing::warn` and otherwise ignored.
 ///

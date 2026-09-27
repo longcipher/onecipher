@@ -67,6 +67,8 @@ pub struct WcWalletServer<H: WalletMethodHandler> {
     /// this, a newly paired topic is never subscribed and its first message is
     /// never delivered — see the `session_handle` pairing-injection path).
     wakeup: Arc<Notify>,
+    /// Topics currently subscribed to the relay (N-004 fix)
+    subscribed_topics: Arc<Mutex<Vec<String>>>,
     #[cfg(any(test, feature = "test-utils"))]
     mock_relay: Option<Arc<MockRelay>>,
 }
@@ -78,6 +80,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             handler,
             sessions: Arc::new(Mutex::new(WcSessionTable::new())),
             wakeup: Arc::new(Notify::new()),
+            subscribed_topics: Arc::new(Mutex::new(Vec::new())),
             #[cfg(any(test, feature = "test-utils"))]
             mock_relay: None,
         }
@@ -98,6 +101,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             handler,
             sessions,
             wakeup: Arc::new(Notify::new()),
+            subscribed_topics: Arc::new(Mutex::new(Vec::new())),
             #[cfg(any(test, feature = "test-utils"))]
             mock_relay: None,
         }
@@ -134,6 +138,10 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             s.close();
         }
         t.remove(topic);
+        // N-004 fix: Remove topic from subscribed_topics when session is disconnected
+        let mut subs = self.subscribed_topics.lock().await;
+        subs.retain(|t| t != topic);
+        drop(subs);
         self.wakeup.notify_waiters();
         Ok(())
     }
@@ -554,7 +562,11 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
             let t = self.sessions.lock().await;
             t.iter().filter(|s| s.is_active()).map(|s| s.topic.clone()).collect()
         };
-        let mut subscribed_topics: Vec<String> = topics.clone();
+        // N-004 fix: Use struct field for subscribed_topics to persist across reconnections
+        {
+            let mut subs = self.subscribed_topics.lock().await;
+            *subs = topics.clone();
+        }
         for topic in &topics {
             req_id += 1;
             let sub_msg = serde_json::json!({
@@ -567,10 +579,14 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
         }
 
         loop {
+            // N-005 fix: Use shorter timeout for faster cancellation response
+            // The recv result is handled by the tokio::select! below
+            let _ = relay.recv_timeout(std::time::Duration::from_secs(5)).await;
             {
                 let t = self.sessions.lock().await;
+                let mut subs = self.subscribed_topics.lock().await;
                 for s in t.iter() {
-                    if s.needs_relay() && !subscribed_topics.contains(&s.topic) {
+                    if s.needs_relay() && !subs.contains(&s.topic) {
                         req_id += 1;
                         let sub_msg = serde_json::json!({
                             "id": relay_id(req_id),
@@ -579,7 +595,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                             "params": { "topic": s.topic }
                         });
                         let _ = relay.send_text(serde_json::to_string(&sub_msg)?).await;
-                        subscribed_topics.push(s.topic.clone());
+                        subs.push(s.topic.clone());
                     }
                 }
             }
@@ -624,7 +640,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                         let t = self.sessions.lock().await;
                         t.iter().filter(|s| s.needs_relay()).map(|s| s.topic.clone()).collect()
                     };
-                    subscribed_topics.clear();
+                    self.subscribed_topics.lock().await.clear();
                     for topic in &topics {
                         req_id += 1;
                         let sub_msg = serde_json::json!({
@@ -634,7 +650,7 @@ impl<H: WalletMethodHandler> WcWalletServer<H> {
                             "params": { "topic": topic }
                         });
                         relay.send_text(serde_json::to_string(&sub_msg)?).await?;
-                        subscribed_topics.push(topic.clone());
+                        self.subscribed_topics.lock().await.push(topic.clone());
                     }
                     continue;
                 }

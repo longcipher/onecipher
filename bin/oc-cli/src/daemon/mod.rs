@@ -87,7 +87,10 @@ pub(crate) fn run_daemon() -> Result<(), CliError> {
     let key_agent_sock = oc_keyagent::server::default_socket_path();
     eprintln!("key-agent socket: {}", key_agent_sock);
     let ka_sock_clone = key_agent_sock.clone();
-    let sign_auth_internal_token = rand::random::<[u8; 32]>().to_vec();
+    // E-001 fix: Use cryptographically secure RNG for internal capability token
+    let mut sign_auth_internal_token = vec![0u8; 32];
+    getrandom::fill(&mut sign_auth_internal_token)
+        .expect("failed to generate cryptographically secure random bytes for internal token");
     if let Err(e) =
         oc_keyagent::handler::set_sign_auth_internal_token(Some(sign_auth_internal_token.clone()))
     {
@@ -577,6 +580,8 @@ pub(crate) fn run_daemon() -> Result<(), CliError> {
                 ),
             }
             eprintln!("daemon stopped by signal {sig}");
+            // E-006 fix: Explicitly clear the key cache before exiting
+            oc_signer::global_key_cache().clear();
             // The notifier already ran the registered cleanup hooks (key-cache
             // zeroization); exit with the conventional death-by-signal status.
             std::process::exit(signal_exit_status(sig));

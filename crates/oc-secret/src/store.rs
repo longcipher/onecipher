@@ -180,12 +180,27 @@ impl SecretStore {
 
     /// Read the raw index including tombstones (no filtering, no sorting).
     fn read_index_raw(&self) -> Result<Vec<SecretIndexEntry>, SecretStoreError> {
+        // E-008 fix: Limit index file size to prevent OOM from malicious input
+        const MAX_INDEX_SIZE: u64 = 1024 * 1024; // 1 MB
+        let metadata = std::fs::metadata(self.config.index_path())?;
+        if metadata.len() > MAX_INDEX_SIZE {
+            return Err(SecretStoreError::InvalidName(format!(
+                "index file too large: {} bytes (max {MAX_INDEX_SIZE})",
+                metadata.len()
+            )));
+        }
         let content = std::fs::read_to_string(self.config.index_path())?;
         let mut entries = Vec::new();
         for line in content.lines() {
             let line = line.trim();
             if line.is_empty() {
                 continue;
+            }
+            // E-008 fix: Limit individual line length
+            if line.len() > 1024 {
+                return Err(SecretStoreError::InvalidName(
+                    "index line too long (max 1024 bytes)".into(),
+                ));
             }
             let entry: SecretIndexEntry = serde_json::from_str(line)?;
             entries.push(entry);
@@ -377,11 +392,18 @@ impl SecretStore {
         // Write the new copy atomically at 0600 BEFORE unlinking the old one,
         // so an interruption can leave both but never neither.
         oc_core::paths::write_atomic_private(&new_path, &json)?;
+        // E-005 fix: Write a WAL entry before removing the old file
+        // This ensures crash recovery can complete the rename
+        let wal_path = self.config.root.join(".rename_wal");
+        let wal_entry = format!("{old}\t{new}\n");
+        std::fs::write(&wal_path, wal_entry.as_bytes())?;
         std::fs::remove_file(&old_path)?;
         // Tombstone the old name at its floor (kind preserved), upsert the new live row.
         let old_floor = self.floor(old)?.max(old_entry.generation);
         self.write_tombstone(old, old_entry.item_type, old_floor)?;
         self.upsert_index(new_entry.to_index_entry())?;
+        // Clear WAL after successful rename
+        let _ = std::fs::remove_file(&wal_path);
         let index_path = self.config.index_path();
         let paths = [old_path.as_path(), new_path.as_path(), index_path.as_path()];
         maybe_auto_commit(&self.config.root, &paths, &format!("Rename secret: {old} to {new}"));
