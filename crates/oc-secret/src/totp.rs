@@ -270,7 +270,7 @@ pub fn verify_totp_at(
         let candidate = generate_counter_code(&params.seed, params.algorithm, params.digits, step)?;
         // E-003 fix: Use constant-time comparison to prevent timing attacks
         use subtle::ConstantTimeEq;
-        if candidate.as_str().as_bytes().ct_eq(want.as_bytes()).into() {
+        if candidate.as_bytes().ct_eq(want.as_bytes()).into() {
             return Ok(true);
         }
         if step == end {

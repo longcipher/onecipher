@@ -485,7 +485,7 @@ impl PolicyState {
 
         // C-10: 3 consecutive DENYs → fire alert, then reset.
         if self.consecutive_deny_counter == 3 {
-            let device_id = self.policy.as_ref().map(|p| p.device_id.clone()).unwrap_or_default();
+            let device_id = self.policy.as_ref().map_or_default(|p| p.device_id.clone());
             let alert = HumanAlert {
                 session_key_id: session_key_id.to_string(),
                 device_id,

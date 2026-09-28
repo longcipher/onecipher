@@ -442,6 +442,36 @@ impl SecretStore {
             .collect())
     }
 
+    /// Fuzzy search the plaintext index using edit distance (case-insensitive).
+    ///
+    /// Returns entries sorted by relevance (lowest edit distance first).
+    /// Only returns entries with an edit distance <= `max_distance`.
+    ///
+    /// This is useful for finding secrets when the user doesn't remember the
+    /// exact name or spelling.
+    pub fn fuzzy_search(
+        &self,
+        query: &str,
+        max_distance: usize,
+    ) -> Result<Vec<SecretIndexEntry>, SecretStoreError> {
+        let entries = self.list()?;
+        if query.is_empty() {
+            return Ok(entries);
+        }
+        let q = query.to_ascii_lowercase();
+        let mut results: Vec<(usize, SecretIndexEntry)> = entries
+            .into_iter()
+            .filter_map(|e| {
+                let name_lower = e.name.to_ascii_lowercase();
+                let dist = oc_core::text::edit_distance(&q, &name_lower);
+                (dist <= max_distance).then_some((dist, e))
+            })
+            .collect();
+        // Sort by edit distance (lowest first)
+        results.sort_by_key(|(dist, _)| *dist);
+        Ok(results.into_iter().map(|(_, e)| e).collect())
+    }
+
     // ── Index management (rewrite-on-write; fine for local vaults) ──
 
     fn upsert_index(&self, entry: SecretIndexEntry) -> Result<(), SecretStoreError> {

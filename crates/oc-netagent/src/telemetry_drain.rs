@@ -111,7 +111,7 @@ impl MemorySink {
 
     /// Snapshot everything exported so far.
     pub fn records(&self) -> Vec<TelemetryRecord> {
-        self.records.lock().map(|r| r.clone()).unwrap_or_default()
+        self.records.lock().map_or_default(|r| r.clone())
     }
 
     /// Total records reported lost to Key-Agent buffer overflow.

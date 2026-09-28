@@ -132,9 +132,7 @@ impl Config {
         // Serde requires infallible defaults, so we use unwrap_or_else
         // with a CWD-relative fallback. Security-sensitive callers should
         // use try_default_vault_path() instead.
-        crate::paths::state_dir().unwrap_or_else(|_| {
-            PathBuf::from(crate::paths::STATE_DIR_NAME)
-        })
+        crate::paths::state_dir().unwrap_or_else(|_| PathBuf::from(crate::paths::STATE_DIR_NAME))
     }
 
     /// Default vault path (`~/.onecipher`). When `HOME` is unavailable this

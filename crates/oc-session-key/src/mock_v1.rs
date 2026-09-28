@@ -291,7 +291,11 @@ impl SessionKeyProvider for EvmSessionKeyProvider {
         let bundler = &self.bundler;
         Box::pin(async move {
             let tx_hash = bundler.send_user_operation(&user_op).await?;
-            Ok(GrantReceipt::Evm { tx_hash, merkle_root, sca_address: sca })
+            Ok(GrantReceipt::Evm {
+                tx_hash: crate::types::TxHash(tx_hash),
+                merkle_root: crate::types::HexBytes(merkle_root),
+                sca_address: crate::types::EvmAddress(sca),
+            })
         })
     }
 
@@ -454,7 +458,11 @@ impl SessionKeyProvider for SolanaSessionKeyProvider {
         Box::pin(async move {
             let sig = rpc.send_transaction(vec![ix]).await?;
             let slot = rpc.get_slot().await.unwrap_or(0);
-            Ok(GrantReceipt::Solana { session_tokens_account: sig, program_id, slot })
+            Ok(GrantReceipt::Solana {
+                session_tokens_account: sig,
+                program_id: crate::types::SolanaPubkey(program_id),
+                slot,
+            })
         })
     }
 

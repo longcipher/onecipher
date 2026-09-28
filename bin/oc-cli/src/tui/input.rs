@@ -27,6 +27,7 @@ pub(crate) fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     match app.mode {
         Mode::Normal => handle_normal_key(app, key),
         Mode::Search => handle_search_key(app, key),
+        Mode::FuzzySearch => handle_fuzzy_search_key(app, key),
         Mode::Insert => handle_insert_key(app, key),
         Mode::Confirm => handle_confirm_key(app, key),
         Mode::Detail => handle_detail_key(app, key),
@@ -78,6 +79,10 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) -> bool {
             app.enter_search();
             false
         }
+        KeyCode::Char('f') => {
+            app.enter_fuzzy_search();
+            false
+        }
         KeyCode::Enter => {
             app.enter_detail();
             false
@@ -126,6 +131,32 @@ fn handle_search_key(app: &mut App, key: KeyEvent) -> bool {
             app.search_query = app.input_buffer.clone();
             app.mode = Mode::Normal;
             app.filter();
+            app.selected = 0;
+            false
+        }
+        KeyCode::Backspace => {
+            app.input_buffer.pop();
+            false
+        }
+        KeyCode::Char(c) => {
+            app.input_buffer.push(c);
+            false
+        }
+        _ => false,
+    }
+}
+
+fn handle_fuzzy_search_key(app: &mut App, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Esc => {
+            app.mode = Mode::Normal;
+            app.input_buffer.clear();
+            false
+        }
+        KeyCode::Enter => {
+            app.search_query = app.input_buffer.clone();
+            app.mode = Mode::Normal;
+            app.fuzzy_filter();
             app.selected = 0;
             false
         }

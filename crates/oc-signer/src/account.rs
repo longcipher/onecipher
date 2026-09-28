@@ -782,8 +782,7 @@ impl From<String> for CasperAccount {
         let tagged_ed25519 = hex::decode(public_key_hex.trim())
             .ok()
             .and_then(|b| b.try_into().ok())
-            .map(|arr: [u8; 32]| casper_tagged_ed25519(&arr))
-            .unwrap_or_default();
+            .map_or_default(|arr: [u8; 32]| casper_tagged_ed25519(&arr));
         Self { public_key_hex, tagged_ed25519 }
     }
 }

@@ -93,7 +93,11 @@ impl SessionKeyProvider for EvmSessionKeyProvider {
         let rpc = &self.rpc;
         Box::pin(async move {
             let tx_hash = rpc.send_evm_tx(&sca, &calldata).await?;
-            Ok(GrantReceipt::Evm { tx_hash, merkle_root, sca_address: sca })
+            Ok(GrantReceipt::Evm {
+                tx_hash: crate::types::TxHash(tx_hash),
+                merkle_root: crate::types::HexBytes(merkle_root),
+                sca_address: crate::types::EvmAddress(sca),
+            })
         })
     }
 

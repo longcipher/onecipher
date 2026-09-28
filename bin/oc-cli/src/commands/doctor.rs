@@ -128,9 +128,9 @@ fn count_orphan_tmp(store_root: &std::path::Path) -> usize {
 }
 
 fn load_tombstones(store_root: &std::path::Path) -> std::collections::BTreeSet<String> {
-    std::fs::read_to_string(store_root.join("tombstones"))
-        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
-        .unwrap_or_default()
+    std::fs::read_to_string(store_root.join("tombstones")).map_or_default(|s| {
+        s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect()
+    })
 }
 
 #[cfg(unix)]
@@ -282,8 +282,8 @@ fn collect_report(verbose: bool, repair_generations: bool) -> Result<DoctorRepor
     {
         let secrets_dir = store_root.join("secrets");
         let index_path = store_root.join("index.jsonl");
-        let index_names: HashSet<String> = std::fs::read_to_string(&index_path)
-            .map(|content| {
+        let index_names: HashSet<String> =
+            std::fs::read_to_string(&index_path).map_or_default(|content| {
                 content
                     .lines()
                     .filter_map(|l| {
@@ -291,10 +291,9 @@ fn collect_report(verbose: bool, repair_generations: bool) -> Result<DoctorRepor
                     })
                     .map(|e| e.name)
                     .collect()
-            })
-            .unwrap_or_default();
-        let file_names: HashSet<String> = std::fs::read_dir(&secrets_dir)
-            .map(|entries| {
+            });
+        let file_names: HashSet<String> =
+            std::fs::read_dir(&secrets_dir).map_or_default(|entries| {
                 entries
                     .flatten()
                     .filter(|e| e.path().extension().is_some_and(|ext| ext == "age"))
@@ -303,8 +302,7 @@ fn collect_report(verbose: bool, repair_generations: bool) -> Result<DoctorRepor
                         f.strip_suffix(".age").map(|s| s.replace("%2F", "/").replace("%25", "%"))
                     })
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         let orphans = file_names.difference(&index_names).count();
         let phantoms = index_names.difference(&file_names).count();
         if orphans > 0 || phantoms > 0 {
@@ -357,12 +355,10 @@ fn collect_report(verbose: bool, repair_generations: bool) -> Result<DoctorRepor
     let local = oc_secret::generations::load_generations(&store_root);
     let sealed: std::collections::BTreeMap<String, u64> =
         std::fs::read_to_string(store_root.join("generations.sealed"))
-            .map(|s| oc_secret::generations::parse_generations(&s))
-            .unwrap_or_default();
+            .map_or_default(|s| oc_secret::generations::parse_generations(&s));
     let tombstones = load_tombstones(&store_root);
     let wallet_names: Vec<String> = oc_vault::list_encrypted_wallets(None)
-        .map(|wallets| wallets.into_iter().map(|w| w.name).collect())
-        .unwrap_or_default();
+        .map_or_default(|wallets| wallets.into_iter().map(|w| w.name).collect());
     let wallet_keys = wallet_names.len();
     let c = oc_secret::protection::census_including_wallets(
         &local,

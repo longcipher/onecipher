@@ -21,6 +21,7 @@ pub mod secret;
 pub mod secure_types;
 #[cfg(test)]
 mod test_support;
+pub mod text;
 pub mod types;
 pub mod wallet_file;
 

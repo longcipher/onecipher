@@ -91,7 +91,11 @@ impl SessionKeyProvider for SolanaSessionKeyProvider {
         let program_id = self.program_id.clone();
         Box::pin(async move {
             let sig = rpc.send_solana_tx(vec![ix]).await?;
-            Ok(GrantReceipt::Solana { session_tokens_account: sig, program_id, slot: 0 })
+            Ok(GrantReceipt::Solana {
+                session_tokens_account: sig,
+                program_id: crate::types::SolanaPubkey(program_id),
+                slot: 0,
+            })
         })
     }
 

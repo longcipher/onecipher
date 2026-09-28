@@ -264,7 +264,7 @@ impl TelemetryBuffer {
 
     /// Take everything buffered, resetting the drop counter.
     pub fn drain(&self) -> TelemetryBatch {
-        let records = self.inner.lock().map(|mut b| b.drain(..).collect()).unwrap_or_default();
+        let records = self.inner.lock().map_or_default(|mut b| b.drain(..).collect());
         TelemetryBatch { records, dropped: self.dropped.swap(0, Ordering::Relaxed) }
     }
 

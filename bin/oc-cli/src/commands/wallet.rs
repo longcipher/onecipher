@@ -464,9 +464,8 @@ pub(crate) fn list(json: bool) -> Result<(), CliError> {
         println!("Name:    {}", w.name);
         println!("Secured: ✓ (encrypted)");
         for acct in &w.accounts {
-            let label = oc_core::parse_chain(&acct.chain_id)
-                .map(|c| format!(" ({})", c.name))
-                .unwrap_or_default();
+            let label =
+                oc_core::parse_chain(&acct.chain_id).map_or_default(|c| format!(" ({})", c.name));
             println!("  {}{} → {}", acct.chain_id, label, acct.address);
         }
         println!("Created: {}", w.created_at);

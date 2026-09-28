@@ -56,36 +56,125 @@ fn test_anti_ptrace_linux() {
 #[cfg(target_os = "linux")]
 #[test]
 fn test_seccomp_filter_install_linux() {
-    // TODO(T12+): fork() a child process, apply seccomp in the child, have
-    // the child attempt `socket(AF_INET, ...)` and verify it is killed
-    // with SIGSYS. The parent waits via `waitpid` and checks `WIFSIGNALED`
-    // + `WTERMSIG == SIGSYS`.
-    //
-    // Skipped in T12 because:
-    // 1. The current BPF default is `SECCOMP_RET_ALLOW` (see deviation note in sandbox.rs) — the
-    //    filter installs but does not kill.
-    // 2. The sockaddr-aware filter (T12+ stretch goal) is what makes this test meaningful.
-    // 3. `fork()` in a Rust test is fragile (LLVM sanitizer, allocator state) — better to do this
-    //    as a shell-script CI test using `strace -f -e trace=network target/release/oc-keyagent`.
-    //
-    // For T12, this test just verifies `apply_sandbox()` returns Ok on Linux
-    // (i.e. the prctl + seccomp + capset calls all succeed).
+    // Verify that apply_sandbox() returns Ok on Linux (i.e. the prctl + seccomp
+    // + capset calls all succeed). The full fork()-based seccomp behavior test
+    // is in `test_seccomp_kills_inet_socket_linux` below.
     oc_keyagent::apply_sandbox().expect("seccomp install path should succeed on Linux");
 }
 
 #[cfg(target_os = "linux")]
 #[test]
-fn test_seccomp_allows_uds_linux() {
-    // TODO(T12+): fork() a child, apply seccomp, child creates a UDS pair
-    // via `UnixStream::pair()`, sends a byte, exits 0. Parent verifies
-    // exit 0 (not SIGSYS).
+fn test_seccomp_kills_inet_socket_linux() {
+    // Fork a child, apply seccomp in the child, have the child attempt
+    // `socket(AF_INET, ...)` and verify it is killed with SIGSYS. The parent
+    // waits via `waitpid` and checks `WIFSIGNALED` + `WTERMSIG == SIGSYS`.
     //
-    // Skipped in T12 for the same reasons as test_seccomp_filter_install_linux.
-    // The UDS path is implicitly tested by the T11 server tests
-    // (test_handle_conn_request_response_round_trip etc.), which all pass
-    // through UDS — if UDS were blocked by the sandbox, those tests would
-    // fail.
-    oc_keyagent::apply_sandbox().expect("seccomp should not block UDS on Linux");
+    // This test is Linux-only because seccomp is a Linux kernel feature.
+    // On macOS / Windows the sandbox uses different mechanisms (Seatbelt /
+    // process mitigation policies) that cannot be tested the same way.
+    use std::os::unix::net::UnixStream;
+
+    // Create a UDS pair before forking so the child has a communication channel.
+    let (parent_sock, child_sock) = UnixStream::pair().expect("UDS pair creation should succeed");
+
+    // Fork the child process.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        panic!("fork() failed: {}", std::io::Error::last_os_error());
+    }
+
+    if pid == 0 {
+        // Child process: apply seccomp, then attempt to create an AF_INET socket.
+        // The seccomp filter should kill the process with SIGSYS.
+        let _ = child_sock; // Keep the socket alive (unused in child).
+
+        // Apply the full sandbox (includes seccomp).
+        // If this fails, the seccomp filter is not installed and the test
+        // would be meaningless — exit with a distinct error code.
+        if let Err(e) = oc_keyagent::apply_sandbox() {
+            unsafe { libc::_exit(44) };
+        }
+
+        // Attempt to create an AF_INET socket — this should trigger SIGSYS.
+        // SAFETY: `socket(AF_INET, SOCK_STREAM, 0)` is a standard POSIX syscall.
+        // The seccomp filter should kill the process before the syscall completes.
+        let ret = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        // If we reach here, the seccomp filter did NOT kill the process.
+        // This is a test failure — exit with a non-zero code.
+        unsafe { libc::_exit(if ret >= 0 { 42 } else { 43 }) };
+    }
+
+    // Parent process: wait for the child and verify it was killed by SIGSYS.
+    let mut status: libc::c_int = 0;
+    let ret = unsafe { libc::waitpid(pid, &mut status, 0) };
+    assert!(ret == pid, "waitpid() failed: {}", std::io::Error::last_os_error());
+
+    // The child should have been killed by a signal (SIGSYS = 31 on x86_64 Linux).
+    assert!(
+        libc::WIFSIGNALED(status),
+        "child should have been killed by a signal, status={status}"
+    );
+    let signal = libc::WTERMSIG(status);
+    assert_eq!(signal, libc::SIGSYS, "child should have been killed by SIGSYS (31), got {signal}");
+
+    // Clean up the parent socket.
+    drop(parent_sock);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_seccomp_allows_uds_linux() {
+    // Fork a child, apply seccomp, child creates a UDS pair via `UnixStream::pair()`,
+    // sends a byte, exits 0. Parent verifies exit 0 (not SIGSYS).
+    //
+    // This test verifies that the seccomp filter does NOT block AF_UNIX sockets,
+    // which are required for the Key-Agent UDS communication channel.
+    use std::os::unix::net::UnixStream;
+
+    // Create a UDS pair before forking so the child has a communication channel.
+    let (parent_sock, child_sock) = UnixStream::pair().expect("UDS pair creation should succeed");
+
+    // Fork the child process.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        panic!("fork() failed: {}", std::io::Error::last_os_error());
+    }
+
+    if pid == 0 {
+        // Child process: apply seccomp, then create a UDS pair and send a byte.
+        let _ = child_sock; // Keep the socket alive (unused in child).
+
+        // Apply the full sandbox (includes seccomp).
+        // If this fails, the seccomp filter is not installed and the test
+        // would be meaningless — exit with a distinct error code.
+        if let Err(e) = oc_keyagent::apply_sandbox() {
+            unsafe { libc::_exit(44) };
+        }
+
+        // Create a new UDS pair — this should succeed (AF_UNIX is allowed).
+        let (sock_a, _sock_b) =
+            UnixStream::pair().expect("UDS pair creation should succeed in child");
+
+        // Send a byte through the UDS pair.
+        use std::io::Write;
+        sock_a.try_clone().unwrap().write_all(b"x").expect("write to UDS should succeed");
+
+        // Exit with success.
+        unsafe { libc::_exit(0) };
+    }
+
+    // Parent process: wait for the child and verify it exited normally.
+    let mut status: libc::c_int = 0;
+    let ret = unsafe { libc::waitpid(pid, &mut status, 0) };
+    assert!(ret == pid, "waitpid() failed: {}", std::io::Error::last_os_error());
+
+    // The child should have exited normally (not killed by a signal).
+    assert!(libc::WIFEXITED(status), "child should have exited normally, status={status}");
+    let exit_code = libc::WEXITSTATUS(status);
+    assert_eq!(exit_code, 0, "child should have exited with code 0, got {exit_code}");
+
+    // Clean up the parent socket.
+    drop(parent_sock);
 }
 
 #[test]

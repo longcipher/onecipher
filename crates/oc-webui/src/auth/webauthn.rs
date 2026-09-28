@@ -275,9 +275,9 @@ impl WebAuthnManager {
 
     async fn load_credentials(&self) -> Vec<StoredCredential> {
         match tokio::fs::read_to_string(&self.credentials_path).await {
-            Ok(content) => serde_json::from_str::<CredentialFile>(&content)
-                .map(|f| f.credentials)
-                .unwrap_or_default(),
+            Ok(content) => {
+                serde_json::from_str::<CredentialFile>(&content).map_or_default(|f| f.credentials)
+            }
             Err(_) => Vec::new(),
         }
     }

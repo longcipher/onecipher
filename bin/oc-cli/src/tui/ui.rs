@@ -115,18 +115,15 @@ fn render_list(app: &mut App, frame: &mut Frame<'_>, area: Rect) {
                 let indent = if entry.name.contains('/') { "  " } else { "" };
 
                 let totp_span = if entry.item_type == ItemType::Totp {
-                    app.totp_cache
-                        .get(&entry.name)
-                        .map(|(code, _)| {
-                            vec![
-                                Span::raw("  "),
-                                Span::styled(
-                                    code.as_str(),
-                                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                                ),
-                            ]
-                        })
-                        .unwrap_or_default()
+                    app.totp_cache.get(&entry.name).map_or_default(|(code, _)| {
+                        vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                code.as_str(),
+                                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                            ),
+                        ]
+                    })
                 } else {
                     Vec::new()
                 };
@@ -183,6 +180,7 @@ fn render_status(app: &App, frame: &mut Frame<'_>, area: Rect) {
             "j/k:move  /:search  Enter:detail  c:copy  t:totp  n:new  e:edit  d:delete  g:git  ?:help  q:quit"
         }
         Mode::Search => "Type to search, Enter:confirm, Esc:cancel",
+        Mode::FuzzySearch => "Type to fuzzy search, Enter:confirm, Esc:cancel",
         Mode::Detail => "Esc:back  c:copy  t:totp  q:quit",
         Mode::Help => "Esc/q:back",
         Mode::Insert => "Up/Down:field  Left/Right:type  Enter:next/submit  Esc:cancel",

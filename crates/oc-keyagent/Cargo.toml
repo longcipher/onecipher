@@ -63,6 +63,8 @@ rand = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
+# Note: libc is already available via [target.'cfg(target_os = "linux")'.dependencies]
+# for the sandbox tests (fork/waitpid/socket syscalls).
 
 [lints]
 workspace = true

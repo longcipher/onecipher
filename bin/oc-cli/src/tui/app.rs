@@ -31,6 +31,8 @@ pub(crate) enum Mode {
     Normal,
     /// Typing a search query.
     Search,
+    /// Typing a fuzzy search query.
+    FuzzySearch,
     /// Creating (`n`) or editing (`e`) a secret via the shared form.
     Insert,
     /// Confirmation dialog (e.g. delete entry).
@@ -402,6 +404,42 @@ impl App {
         }
     }
 
+    /// Apply fuzzy search using edit distance (case-insensitive).
+    ///
+    /// Returns entries sorted by relevance (lowest edit distance first).
+    /// Only returns entries with an edit distance <= `max_distance`.
+    ///
+    /// The maximum edit distance is dynamically calculated based on the query
+    /// length: `max(1, query.len() / 3)`. This allows for more typos in longer
+    /// names while keeping short names precise.
+    pub(crate) fn fuzzy_filter(&mut self) {
+        if self.search_query.is_empty() {
+            self.filtered_indices = (0..self.entries.len()).collect();
+        } else {
+            let q = self.search_query.to_ascii_lowercase();
+            let max_distance = std::cmp::max(1, q.len() / 3);
+            let mut results: Vec<(usize, usize)> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| {
+                    let name_lower = e.name.to_ascii_lowercase();
+                    let dist = oc_core::text::edit_distance(&q, &name_lower);
+                    (dist <= max_distance).then_some((dist, i))
+                })
+                .collect();
+            // Sort by edit distance (lowest first)
+            results.sort_by_key(|(dist, _)| *dist);
+            self.filtered_indices = results.into_iter().map(|(_, i)| i).collect();
+        }
+        self.build_tree();
+        // Clamp selection to the last selectable (Entry) row.
+        if self.selected >= self.tree_rows.len() || !self.current_row_is_entry() {
+            self.selected =
+                self.tree_rows.iter().rposition(|r| matches!(r, TreeRow::Entry(_))).unwrap_or(0);
+        }
+    }
+
     /// Build `tree_rows` from `filtered_indices`, grouping `/`-namespaced
     /// entries under a header. Namespaces sort alphabetically; flat entries
     /// (no `/`) render at the top without a header.
@@ -472,6 +510,12 @@ impl App {
     /// Enter search mode (pre-fills the input buffer with the current query).
     pub(crate) fn enter_search(&mut self) {
         self.mode = Mode::Search;
+        self.input_buffer = self.search_query.clone();
+    }
+
+    /// Enter fuzzy search mode (pre-fills the input buffer with the current query).
+    pub(crate) fn enter_fuzzy_search(&mut self) {
+        self.mode = Mode::FuzzySearch;
         self.input_buffer = self.search_query.clone();
     }
 
