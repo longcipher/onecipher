@@ -169,7 +169,7 @@ Hard-gate boundaries are preserved: nothing in `oc-keyagent`, `oc-crypto`,
 | Anti-DNS-rebinding | The daemon MUST reject requests whose `Host` header host is not `127.0.0.1` / `localhost` / `[::1]`. |
 | CORS | Preflight `OPTIONS` answered with `Access-Control-Allow-Origin` echoing the validated extension origin, `Access-Control-Allow-Headers: content-type`. No wildcard. |
 | No secrets in transit beyond loopback | Passphrases transit only to `127.0.0.1`. TLS is not required on loopback (same trust assumption as `oc-webui`); remote ends (§7.2) require TLS. |
-| Rate limiting | Per-session and per-origin request budgets on `oc_rpc` (§5.3). |
+| Rate limiting | Per-session and per-origin request budgets on `oc_rpc` (§5.3). The buckets are keyed on the validated `chrome-extension://` origin and the session — both daemon-vouchesable. A dApp `origin` passed in the params is client-supplied and therefore attribution only; keying a budget on it would let a caller mint itself fresh quota by varying the string. |
 
 ### 3.5 Authentication and Session Model
 
@@ -246,6 +246,7 @@ ends are views over it.**
 | Audit log | `oc-keyagent` JSONL | Read via `oc_audit_tail` | Local only |
 | Custom chains | **New** daemon chain registry (§6.5) | Immediate | `.ocbk` / daemon-attached |
 | Extension UI prefs | `chrome.storage.local` (per browser profile) | n/a | Not synced (intentionally local) |
+| Known recipients | `chrome.storage.local` (per browser profile) | n/a | Not synced. Feeds the first-time-recipient badge only; the daemon's `sites.json` stays authoritative for authorization |
 | User secrets (TOTP…) | `oc-secret` | CLI/TUI only in v1 | `.ocbk` |
 
 Consequences: on one device, CLI, Web UI, and extension are consistent by
@@ -368,10 +369,17 @@ Notes:
   (legacy alias of `eth_requestAccounts`), events `accountsChanged`,
   `chainChanged`, `connect`, `disconnect`, `message`.
 - **EIP-6963**: announces via `eip6963:announceProvider` with
-  `providerInfo = {uuid (per-install, persisted), name: "OneCipher Wallet",
-  icon: <inline SVG data URI>, rdns: "com.onecipher.wallet"}`; listens for
-  `eip6963:requestProvider`. Multi-wallet coexistence is first-class; the
-  extension never fights over `window.ethereum`.
+  `providerInfo = {name: "OneCipher Wallet", icon: <inline SVG data URI>,
+  rdns: "com.onecipher.wallet"}`; listens for `eip6963:requestProvider`.
+  Multi-wallet coexistence is first-class; the extension never fights over
+  `window.ethereum`.
+  The `uuid` is minted once and persisted in `chrome.storage.local`
+  (`oc:eip6963:uuid`), then handed to the page by the content script before it
+  injects the provider — the page realm cannot read extension storage itself.
+  It must be stable: a per-injection uuid gives a dApp that discovers the wallet
+  twice two distinct entries for one wallet, defeating the deduplication
+  EIP-6963 exists to provide. A malformed stored uuid is replaced rather than
+  trusted.
 - **Legacy**: if `window.ethereum` is unset, define it with
   `writable: false, configurable: true` and dispatch `ethereum#initialized`
   (F18-adjacent race discipline from clawd-wallet). Flags: `isOneCipher: true`
@@ -514,6 +522,7 @@ Direct port of F8/F9/F10, with EVM-specific additions:
 | `chrome.storage.local` `oc:sites` | Authorized origins + **each origin's chain binding** (mirror of daemon `sites.json`) | Persistent |
 | `chrome.storage.session` `oc:session` | `{session_id, wallet, expires_at_unix}` — a **handle**, never key material | Browser session (F13) |
 | `chrome.storage.session` `oc:passkey` | private JWK of the step-up software authenticator (see §3.5 deviation) | Browser session |
+| `chrome.storage.local` `oc:eip6963:uuid` | the EIP-6963 provider uuid (§4.3) | Persistent — required to be stable per install |
 | SW module memory | `pendingActions`, account/chain caches, daemon health | SW lifetime |
 
 INV-1: no *wallet* mnemonic, private key, passphrase, or API token is ever
@@ -529,9 +538,14 @@ only in `chrome.storage.session` and therefore wiped with the browser.
 
 - Base URL validation: only `http://127.0.0.1:<port>` / `http://localhost:<port>`
   accepted; anything else is refused client-side (R12c alignment).
-- Health: `oc_hello` probe on popup open and on SW startup (non-blocking);
-  connection states drive UI (`daemon-offline` screen with the exact
-  `onecipher daemon` / `onecipher wallet-rpc serve` command to run).
+- Health: `oc_hello` probe on SW startup, on browser startup, and after every
+  daemon-URL change, in addition to on popup open (all non-blocking). The
+  outcome is cached so a popup opening after an SW resume reports the real
+  state without its own round trip; connection states drive the
+  `daemon-offline` screen, which names the exact
+  `onecipher daemon` / `onecipher wallet-rpc serve` command to run.
+  A worker is suspended and resumed constantly, so probing only on popup open
+  leaves the offline screen stale most of the time.
 - Single in-flight request per call; no retry of non-idempotent methods
   (`oc_sign_*`, `oc_send_transaction` are never auto-retried).
 - All errors normalized to `{code, message, data?}` (§5.4).
@@ -687,7 +701,7 @@ All methods except `oc_hello` require `session_id` (server/automation end:
 | `oc_unlock` | `{wallet, passphrase, policies?: string[]}` | `{session_id, wallet_id, expires_at_unix, accounts[]}` |
 | `oc_lock` | `{session_id}` | `{}` |
 | `oc_session_status` | `{session_id}` | `{unlocked, wallet_id, expires_at_unix}` |
-| `oc_passkey_challenge` | `{credential_id?}` | `{challenge_hex, rp_id, timeout_ms}` |
+| `oc_passkey_challenge` | `{credential_id?}` | `{challenge_hex, rp_id, credential_id, timeout_ms}`. With `credential_id` omitted, the daemon resolves the session wallet's registered credential — absent or ambiguous both fail closed |
 
 #### Accounts and sites
 
@@ -736,7 +750,7 @@ produce a transaction the user did not approve.
 
 | Method | Params | Result |
 |---|---|---|
-| `oc_rpc` | `{session_id, chain_id, method, params}` | raw JSON-RPC result |
+| `oc_rpc` | `{session_id, chain_id, method, params, origin?}` | raw JSON-RPC result. `origin` is the dApp origin, client-supplied and therefore **attribution only** — the rate-limit buckets use the validated extension origin and the session (§3.4) |
 | `oc_simulate` | `{session_id, chain_id, transaction}` | `{ok, gas_used?, revert_reason?}` |
 | `oc_chain_registry` | `{session_id}` | `{chains[{chain_id, name, rpc_url, explorer_url?, native_currency}]}` |
 
@@ -1028,8 +1042,14 @@ tests and the TS client tests (`just ext-conformance`).
   `--load-extension=dist`; the user's real profile is never touched.
 - Fixture dApp page drives `window.ethereum` through connect → sign → reject
   paths; the daemon runs against a fixture wallet (never funded).
-- Signature correctness verified end-to-end (recover signer from the returned
-  signature).
+- **Signature correctness is proven at the layer that can prove it.** The e2e
+  runs against a *stub* daemon, so recovering a signer from the returned
+  signature there would only check the stub's own constant. What the e2e does
+  assert is the EIP-191 *shape* of what the extension hands the page — 65 bytes,
+  `r`/`s` non-zero and below the secp256k1 group order, `v` ∈ {27, 28} — which
+  catches the real extension-side failure modes (truncation, a dropped `0x`, a
+  result unwrapped into an object). Signer-vs-signature correctness lives with
+  the signer and is covered by `oc-signer`'s sign/recover round-trip tests.
 - Results written to `extension/docs/verification/e2e.json` as auditable
   evidence (F20): profile disposal, zero captures, zero non-daemon network
   calls, HTTP 402 preserved.

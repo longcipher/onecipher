@@ -263,7 +263,12 @@ export function buildMessageView(messageB64: string, encoding: string): ConsentV
   return { title: 'Sign message', summary, fields, warnings };
 }
 
-export function buildTypedDataView(typedData: Record<string, unknown>): ConsentView {
+export function buildTypedDataView(
+  typedData: Record<string, unknown>,
+  /// Contracts the user has marked verified (design §4.6). Supplying it enables
+  /// the unverified-contract warning; omitting it shows the domain as-is.
+  verifiedContracts: readonly string[] = [],
+): ConsentView {
   const fields: ConsentField[] = [];
   const warnings: string[] = [];
   const domain = (typedData['domain'] ?? {}) as Record<string, unknown>;
@@ -274,6 +279,17 @@ export function buildTypedDataView(typedData: Record<string, unknown>): ConsentV
   if (typeof domain['chainId'] === 'number') fields.push({ label: 'Chain', value: `eip155:${domain['chainId']}` });
   const verifyingContract = typeof domain['verifyingContract'] === 'string' ? domain['verifyingContract'] : null;
   if (verifyingContract) fields.push({ label: 'Verifying contract', value: verifyingContract, kind: 'code' });
+  // A domain the user has not verified is the classic EIP-712 phishing shape:
+  // a well-formed-looking Permit that drains an allowance. The selector table
+  // cannot help here, so the domain gets its own warning (§4.8).
+  if (
+    verifyingContract !== null &&
+    !verifiedContracts.some((contract) => contract.toLowerCase() === verifyingContract.toLowerCase())
+  ) {
+    warnings.push(
+      `Unverified contract — you have not marked ${verifyingContract} as verified. Structured signatures can grant token allowances.`,
+    );
+  }
   const message = typedData['message'];
   if (message !== null && typeof message === 'object') {
     for (const [key, value] of Object.entries(message as Record<string, unknown>).slice(0, 12)) {

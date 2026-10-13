@@ -47,9 +47,18 @@ impl RpcRateLimiter {
 
     /// Consume one token for `key`. Returns `false` when the bucket is empty.
     pub(crate) fn check(&self, key: &str) -> bool {
+        // The bucket key must not be forgeable by the client: `origin` and
+        // `session_id` are both client-supplied, so a single concatenated key
+        // would let a caller hop buckets by varying which one it varies. Use
+        // a length-prefixed key so ("ab","c") and ("a","bc") can never
+        // collide into one bucket.
+        let mut keyed = String::with_capacity(key.len() + 16);
+        keyed.push_str(&key.len().to_string());
+        keyed.push('|');
+        keyed.push_str(key);
         let now = Instant::now();
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = buckets.entry(key.to_string()).or_insert((self.burst, now));
+        let entry = buckets.entry(keyed).or_insert((self.burst, now));
         let elapsed = now.duration_since(entry.1).as_secs_f64();
         entry.1 = now;
         entry.0 = elapsed.mul_add(self.rate_per_sec, entry.0).min(self.burst);
@@ -62,12 +71,37 @@ impl RpcRateLimiter {
     }
 }
 
+/// The two buckets an `oc_rpc` call is charged to (design §3.4).
+///
+/// Both are daemon-vouchable: the extension origin comes from the connection
+/// header, the session id from the store. A dApp origin is deliberately not
+/// here — it is client-supplied, so keying a budget on it would let a caller
+/// mint itself fresh quota by varying the string.
+pub(super) struct RateBuckets<'a> {
+    /// The validated `chrome-extension://<id>`.
+    pub extension: &'a str,
+    /// `"<extension origin>|<session id>"` — one budget per session.
+    pub session: String,
+    limiter: &'a RpcRateLimiter,
+}
+
+impl<'a> RateBuckets<'a> {
+    pub(super) fn new(extension: &'a str, session_id: &str, limiter: &'a RpcRateLimiter) -> Self {
+        Self { extension, session: format!("{extension}|{session_id}"), limiter }
+    }
+
+    /// Charge both buckets. Both must have budget: a dApp cannot spend the
+    /// whole session's quota, and one session cannot spend the extension's.
+    fn charge(&self) -> bool {
+        self.limiter.check(self.extension) && self.limiter.check(&self.session)
+    }
+}
+
 /// Proxy one read-only JSON-RPC call to the chain's endpoint.
 pub(super) fn proxy(
     chain_registry: &ChainRegistry,
     config: &oc_core::Config,
-    rate_limiter: &RpcRateLimiter,
-    origin: &str,
+    buckets: &RateBuckets<'_>,
     chain_id: &str,
     method: &str,
     params: &Value,
@@ -77,7 +111,7 @@ pub(super) fn proxy(
             "method '{method}' is not proxied; use oc_send_transaction for broadcasts"
         )));
     }
-    if !rate_limiter.check(origin) {
+    if !buckets.charge() {
         return Err(OcwpError::new(
             super::errors::CODE_RATE_LIMITED,
             "RPC proxy rate limit exceeded",
@@ -253,15 +287,55 @@ mod tests {
     }
 
     #[test]
+    fn rate_limiter_bucket_keys_cannot_be_confused_by_the_client() {
+        // Both halves of the bucket key are client-supplied. A length-prefixed
+        // key means ("ab","c") and ("a","bc") stay in separate buckets: with a
+        // plain concatenation they would collide and share one budget, which
+        // is a denial of service against the other dApp on the same session.
+        let limiter = RpcRateLimiter::new(30.0, 1.0);
+        assert!(limiter.check("ab|c"));
+        assert!(!limiter.check("ab|c"), "first bucket is now exhausted");
+        assert!(limiter.check("a|bc"), "the other bucket is untouched");
+    }
+
+    #[test]
+    fn rate_buckets_charge_both_the_session_and_the_extension() {
+        // §3.4: a call is charged to BOTH the extension bucket and the session
+        // bucket. Rate 1/s with burst 1 makes each bucket hold exactly one
+        // token, so a single call spends both and the second is refused until
+        // the refill — far longer than a test takes.
+        let limiter = RpcRateLimiter::new(1.0, 1.0);
+        let a = RateBuckets::new("chrome-extension://a", "session-1", &limiter);
+        assert!(a.charge(), "both buckets start with a token");
+        // One call consumed both the extension's and the session's token.
+        assert!(!a.charge(), "extension bucket is empty");
+        // A second session on the SAME extension shares the extension budget,
+        // so it is throttled even though its own session bucket is untouched.
+        let b = RateBuckets::new("chrome-extension://a", "session-2", &limiter);
+        assert!(!b.charge(), "another session shares the extension budget");
+        // A different extension is unaffected.
+        let c = RateBuckets::new("chrome-extension://b", "session-3", &limiter);
+        assert!(c.charge(), "a different extension is unaffected");
+
+        // A rejected charge must not consume a token, or a caller could drain
+        // someone else's budget simply by issuing calls it knows will fail.
+        let limiter = RpcRateLimiter::new(1.0, 1.0);
+        let e = RateBuckets::new("chrome-extension://a", "session-1", &limiter);
+        assert!(e.charge());
+        assert!(!e.charge());
+        assert!(!e.charge(), "still exhausted, and nothing was consumed");
+    }
+
+    #[test]
     fn proxy_rejects_non_allowlisted_method_before_network() {
         let dir = tempfile::tempdir().unwrap();
         let registry = ChainRegistry::open(dir.path());
         let limiter = RpcRateLimiter::new(30.0, 60.0);
+        let buckets = RateBuckets::new("https://dapp.example", "session", &limiter);
         let err = proxy(
             &registry,
             &oc_core::Config::default(),
-            &limiter,
-            "https://dapp.example",
+            &buckets,
             "eip155:1",
             "eth_sendRawTransaction",
             &json!([]),

@@ -6,7 +6,13 @@
 // and these tests hold that line.
 
 import { describe, expect, it } from 'vitest';
-import { clearPasskey, loadPasskey, savePasskey } from '../src/lib/storage/passkey';
+import {
+  clearPasskey,
+  loadPasskey,
+  passkeyUsesMemoryFallback,
+  resetMemoryFallback,
+  savePasskey,
+} from '../src/lib/storage/passkey';
 import {
   loadSessionHandle,
   saveSessionHandle,
@@ -105,6 +111,33 @@ describe('step-up passkey storage (INV-1, D-8)', () => {
     expect(await loadPasskey(s.chrome)).toBeNull();
     await s.session.set({ 'oc:passkey': { credentialId: '', jwk: {} } });
     expect(await loadPasskey(s.chrome)).toBeNull();
+  });
+
+  it('falls back to process memory when the browser has no storage.session (OQ-4)', async () => {
+    // chrome.storage.session landed in Chrome 102 / Firefox 128. On an older
+    // browser there is no session area at all — and the passkey must NOT fall
+    // back to `local` (see storage/passkey.ts), or the key outlives the
+    // browser session and INV-1 is silently violated.
+    resetMemoryFallback();
+    const memoryOnly = { local: area() } as unknown as Parameters<typeof savePasskey>[0] & {
+      local: { values: Record<string, unknown> };
+    };
+    expect(passkeyUsesMemoryFallback(memoryOnly)).toBe(true);
+    await savePasskey(memoryOnly, { credentialId: 'oc-ext-9', jwk: { kty: 'EC' } });
+    expect(await loadPasskey(memoryOnly)).toEqual({ credentialId: 'oc-ext-9', jwk: { kty: 'EC' } });
+    // Nothing reached the persistent area — that is the whole point.
+    expect(Object.keys(memoryOnly.local?.values ?? {})).toHaveLength(0);
+    await clearPasskey(memoryOnly);
+    expect(await loadPasskey(memoryOnly)).toBeNull();
+  });
+
+  it('treats a partially-implemented session area as absent', () => {
+    const partial = { session: { get: async () => ({}) } } as unknown as Parameters<
+    typeof passkeyUsesMemoryFallback
+  >[0];
+    // A shape that exists but cannot `set` would throw on save and lose the
+    // key; treating it as absent keeps the memory fallback intact.
+    expect(passkeyUsesMemoryFallback(partial)).toBe(true);
   });
 });
 

@@ -1,10 +1,17 @@
-// Risk badges (design §4.1 `policy-view.ts`, §4.8).
+// Risk badges (design §4.1 `policy-view.ts`, §4.8) and the EIP-6963 provider
+// identity (§4.3).
 //
 // The three badges a user cannot derive by eye: a first-time recipient, a value
 // over their own threshold, and a call to a contract they never verified. All
 // advisory — INV-15 says a badge is never an authorization.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { pageUuid, providerUuid } from '../src/lib/eip6963';
+
+afterEach(() => {
+  // Keep the document-lifetime fallback from leaking between cases.
+  delete (globalThis as { __oneCipherUuidFallback?: string }).__oneCipherUuidFallback;
+});
 import {
   consentBadges,
   normalizeAddress,
@@ -190,5 +197,60 @@ describe('consentBadges', () => {
 describe('normalizeAddress', () => {
   it('lowercases and trims', () => {
     expect(normalizeAddress('  0xAbCdef ')).toBe('0xabcdef');
+  });
+});
+
+describe('EIP-6963 provider identity (design §4.3)', () => {
+  const published = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
+  const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  function storageWith(value: unknown = undefined) {
+    const stored: Record<string, unknown> =
+      value === undefined ? {} : { 'oc:eip6963:uuid': value };
+    return {
+      stored,
+      local: {
+        get: async (key: string) => (key in stored ? { [key]: stored[key] } : {}),
+        set: async (patch: Record<string, unknown>) => {
+          Object.assign(stored, patch);
+        },
+      },
+    };
+  }
+
+  it('persists one uuid per install', async () => {
+    const storage = storageWith();
+    const first = await providerUuid(storage);
+    const second = await providerUuid(storage);
+    // A fresh uuid per call would hand a dApp two entries for one wallet and
+    // defeat the deduplication EIP-6963 exists to provide.
+    expect(second).toBe(first);
+    expect(UUID_PATTERN.test(first)).toBe(true);
+    expect(Object.keys(storage.stored)).toEqual(['oc:eip6963:uuid']);
+  });
+
+  it('replaces a malformed stored uuid rather than trusting it', async () => {
+    const storage = storageWith('not-a-uuid');
+    const uuid = await providerUuid(storage);
+    expect(UUID_PATTERN.test(uuid)).toBe(true);
+    expect(storage.stored['oc:eip6963:uuid']).toBe(uuid);
+  });
+
+  it('uses the uuid the content script published, not a fresh one', async () => {
+    // The page realm cannot reach chrome.storage, so the content script
+    // publishes the persisted uuid via `window` before injecting the provider.
+    (globalThis as { __oneCipherUuid?: string }).__oneCipherUuid = published;
+    try {
+      expect(pageUuid()).toBe(published);
+    } finally {
+      delete (globalThis as { __oneCipherUuid?: string }).__oneCipherUuid;
+    }
+  });
+
+  it('keeps a stable fallback for the document lifetime', () => {
+    const page = pageUuid();
+    expect(UUID_PATTERN.test(page)).toBe(true);
+    // Re-rolled per call, a dApp would see a new identity each time.
+    expect(pageUuid()).toBe(page);
   });
 });

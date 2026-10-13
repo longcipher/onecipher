@@ -8,6 +8,18 @@ const EXTENSION_ORIGIN_PREFIX = 'chrome-extension://';
 const FIXTURE_ADDRESS = '0xaaaabbbbccccddddeeeeffff0000111122223333';
 // Deterministic 65-byte (r||s||v) fixture signature — NOT a real signature.
 const FIXTURE_SIGNATURE = '0x' + '42'.repeat(65);
+/// A structurally valid EIP-191 signature: r and s non-zero and below the
+/// secp256k1 curve order, v a valid parity. The e2e asserts this *shape*
+/// because mangling a signature in the extension's own plumbing (transport,
+/// hex round-trip, result unwrapping) is the real extension-side failure mode.
+/// Signer-vs-signature correctness is a Rust-side property — see §9.5.
+const KNOWN_ANSWER_SIGNATURE =
+  '0x' +
+  [
+    '8f5b1c0d2e3a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4',
+    '1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809',
+    '1b',
+  ].join('');
 
 const state = {
   unlocked: false,
@@ -82,7 +94,7 @@ function handleOcwp(method, params) {
     case 'oc_policy_preview':
       return { decision: 'allow', reasons: [], matched_policy_ids: [] };
     case 'oc_sign_message':
-      return { signature: FIXTURE_SIGNATURE, public_key: '0x' + '11'.repeat(33), recovery_id: 0 };
+      return { signature: KNOWN_ANSWER_SIGNATURE, public_key: '0x' + '11'.repeat(33), recovery_id: 0 };
     case 'oc_sign_typed_data':
       return { signature: FIXTURE_SIGNATURE, public_key: '0x' + '11'.repeat(33) };
     case 'oc_sign_transaction':

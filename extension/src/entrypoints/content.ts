@@ -11,11 +11,20 @@ import {
   type OcReplyMessage,
   type OcRequestMessage,
 } from '../lib/protocol';
+import { providerUuid } from '../lib/eip6963';
 
 export default defineContentScript({
   matches: ['http://*/*', 'https://*/*'],
   runAt: 'document_start',
-  main() {
+  async main() {
+    // Publish the EIP-6963 provider identity before the provider script reads
+    // it. `page` and `isolated` worlds share the same `window` object, so this
+    // is the only channel the page realm has for a value that must persist in
+    // extension storage — and the uuid is required to be stable per install
+    // (§4.3), so it cannot simply be random at injection time.
+    (window as unknown as { __oneCipherUuid?: string }).__oneCipherUuid =
+      await providerUuid(browser.storage);
+
     // Inject the in-page provider (unlisted script, web_accessible_resources).
     // At `document_start` the <head> may not exist yet — fall back to the
     // document element (classic document_start pitfall).

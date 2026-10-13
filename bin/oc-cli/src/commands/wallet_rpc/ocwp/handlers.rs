@@ -1224,29 +1224,42 @@ pub(crate) fn handle_sign_authorization(
     }))
 }
 
-/// `oc_rpc` — read-only JSON-RPC proxy (design §5.2).
+/// `oc_rpc` — read-only JSON-RPC proxy (design §5.2/§3.4).
+///
+/// `origin` in the params is the **dApp** origin, supplied by the client and
+/// therefore untrusted. It is accepted for attribution only and MUST NOT be
+/// used as a rate-limit bucket key: a client could pass any string there and
+/// mint itself a fresh budget. The enforcement buckets are the two values the
+/// daemon can actually vouch for — the validated `chrome-extension://` origin
+/// from the connection header (unforgeable) and the session.
 pub(crate) fn handle_rpc(
     state: &super::AppState,
     params: &Value,
     origin: &str,
 ) -> Result<Value, OcwpError> {
-    require_session(&state.sessions, params, origin)?;
-    let origin = require_str(params, "origin")?;
+    let session = require_session(&state.sessions, params, origin)?;
+    // Attribution only; never a security input.
+    let reported_origin = opt_str(params, "origin");
     let chain_id = require_str(params, "chain_id")?;
     let method = require_str(params, "method")?;
     let rpc_params = params.get("params").cloned().unwrap_or(json!([]));
     if !rpc_params.is_array() {
         return Err(OcwpError::invalid_params("'params' must be an array"));
     }
-    let result = rpc_proxy::proxy(
-        &state.chains,
-        &state.config,
-        &state.rate_limiter,
-        &origin,
-        &chain_id,
-        &method,
-        &rpc_params,
-    )?;
+    // §3.4: limits apply per-extension-origin AND per-session, so one dApp
+    // cannot spend the whole session's budget either.
+    let buckets = rpc_proxy::RateBuckets::new(origin, &session.session_id, &state.rate_limiter);
+    let result =
+        rpc_proxy::proxy(&state.chains, &state.config, &buckets, &chain_id, &method, &rpc_params)?;
+    if let Some(reported) = reported_origin {
+        tracing::debug!(
+            extension_origin = %origin,
+            dapp_origin = %reported,
+            chain_id = %chain_id,
+            method = %method,
+            "ocwp: proxied rpc call"
+        );
+    }
     Ok(json!({ "result": result }))
 }
 
@@ -1389,19 +1402,33 @@ pub(crate) fn handle_audit_tail(
     Ok(json!({ "events": events }))
 }
 
-/// `oc_passkey_challenge` — mint a step-up challenge (design §6.7).
+/// `oc_passkey_challenge` — mint a step-up challenge (design §5.2/§6.7).
+///
+/// `credential_id` is optional (§5.2): when it is absent the daemon mints for
+/// the passkey the session's wallet owns. Requiring it forced the client to
+/// know an id it could only have learned from a previous registration, which
+/// makes the step-up unusable after a browser restart — exactly when it is
+/// needed.
+///
+/// The challenge is recorded against this session so a proof minted for one
+/// session cannot authorize another's request (see `verify_step_up`).
 pub(crate) fn handle_passkey_challenge(
     state: &super::AppState,
     params: &Value,
     origin: &str,
 ) -> Result<Value, OcwpError> {
     let session = require_session(&state.sessions, params, origin)?;
-    let credential_id = require_str(params, "credential_id")?;
+    let store = oc_keyagent::passkey::PasskeyPubkeyStore::open_default()
+        .map_err(|_| OcwpError::internal("passkey store unavailable"))?;
+    let credential_id = match opt_str(params, "credential_id") {
+        Some(id) if !id.trim().is_empty() => id,
+        _ => resolve_wallet_credential(&store, &session.wallet_id)?,
+    };
     let challenge = oc_keyagent::handler::generate_passkey_challenge(&credential_id)
         .map_err(|_| OcwpError::internal("challenge generation failed"))?;
-    let rp_id = oc_keyagent::passkey::PasskeyPubkeyStore::open_default()
-        .ok()
-        .and_then(|store| store.get(&credential_id).ok().flatten())
+    let rp_id = store
+        .get(&credential_id)
+        .map_err(|_| OcwpError::internal("passkey store unavailable"))?
         .map_or_else(oc_keyagent::passkey::StoredPasskeyPubkey::default_rp_id, |stored| {
             stored.rp_id
         });
@@ -1412,8 +1439,28 @@ pub(crate) fn handle_passkey_challenge(
     Ok(json!({
         "challenge_hex": challenge_hex,
         "rp_id": rp_id,
+        "credential_id": credential_id,
         "timeout_ms": super::STEP_UP_TTL_SECS * 1000,
     }))
+}
+
+/// The credential registered to `wallet_id`, for an omitted `credential_id`.
+/// Absent and ambiguous both fail closed: guessing which credential a user
+/// meant is worse than an error.
+fn resolve_wallet_credential(
+    store: &oc_keyagent::passkey::PasskeyPubkeyStore,
+    wallet_id: &str,
+) -> Result<String, OcwpError> {
+    let ids = store.credential_ids_for_wallet(wallet_id);
+    match ids.as_slice() {
+        [] => Err(OcwpError::unauthorized(
+            "no passkey is registered for this wallet — register one first",
+        )),
+        [only] => Ok(only.clone()),
+        [..] => Err(OcwpError::invalid_params(
+            "multiple passkeys are registered for this wallet; specify 'credential_id'",
+        )),
+    }
 }
 
 /// `oc_passkey_register` — register a passkey public key for step-up.

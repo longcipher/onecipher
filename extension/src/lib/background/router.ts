@@ -172,9 +172,13 @@ async function buildConsent(
       } catch {
         throw rpcError(-32602, 'signTypedData payload is not valid JSON');
       }
+      const config = await ctx.stores.config.load();
       return {
         kind: 'sign_typed_data',
-        view: buildTypedDataView(typedData),
+        // The verified-contract list decides whether the domain raises a
+        // warning (§4.8): an unverified verifyingContract is the classic
+        // EIP-712 phishing shape.
+        view: buildTypedDataView(typedData, config.verifiedContracts),
         ocwp: { method: 'oc_sign_typed_data', params: { account_id: siteChain, typed_data: typedData } },
       };
     }

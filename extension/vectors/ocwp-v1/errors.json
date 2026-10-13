@@ -17,100 +17,178 @@
     "name": "unknown session is unauthorized",
     "method": "oc_accounts",
     "session": "none",
-    "params": { "session_id": "deadbeef" },
+    "params": {
+      "session_id": "deadbeef"
+    },
     "expected_error_code": 4100
   },
   {
     "name": "unlock rejects API tokens",
     "method": "oc_unlock",
     "session": "none",
-    "params": { "wallet": "test", "passphrase": "oc_key_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" },
+    "params": {
+      "wallet": "test",
+      "passphrase": "oc_key_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
     "expected_error_code": 4100
   },
   {
     "name": "unlock rejects unknown wallet",
     "method": "oc_unlock",
     "session": "none",
-    "params": { "wallet": "no-such-wallet", "passphrase": "whatever" },
+    "params": {
+      "wallet": "no-such-wallet",
+      "passphrase": "whatever"
+    },
     "expected_error_code": 4100
   },
   {
     "name": "unlock rejects wrong passphrase",
     "method": "oc_unlock",
     "session": "none",
-    "params": { "wallet": "test", "passphrase": "definitely-wrong" },
+    "params": {
+      "wallet": "test",
+      "passphrase": "definitely-wrong"
+    },
     "expected_error_code": 4100
   },
   {
     "name": "connect_site with unknown session is unauthorized",
     "method": "oc_connect_site",
     "session": "none",
-    "params": { "session_id": "deadbeef", "origin": "https://dapp.example", "account_id": "eip155:1" },
+    "params": {
+      "session_id": "deadbeef",
+      "origin": "https://dapp.example",
+      "account_id": "eip155:1"
+    },
     "expected_error_code": 4100
   },
   {
     "name": "connect_site validates account_id",
     "method": "oc_connect_site",
     "session": "valid",
-    "params": { "origin": "https://dapp.example", "account_id": "not-a-chain" },
+    "params": {
+      "origin": "https://dapp.example",
+      "account_id": "not-a-chain"
+    },
     "expected_error_code": -32602
   },
   {
     "name": "connect_site validates origin",
     "method": "oc_connect_site",
     "session": "valid",
-    "params": { "origin": "javascript:alert(1)", "account_id": "eip155:1" },
+    "params": {
+      "origin": "javascript:alert(1)",
+      "account_id": "eip155:1"
+    },
     "expected_error_code": -32602
   },
   {
     "name": "sign_message validates account_id",
     "method": "oc_sign_message",
     "session": "valid",
-    "params": { "account_id": "bogus", "message": "aGVsbG8=" },
+    "params": {
+      "account_id": "bogus",
+      "message": "aGVsbG8="
+    },
     "expected_error_code": -32602
   },
   {
     "name": "sign_typed_data requires typed_data object",
     "method": "oc_sign_typed_data",
     "session": "valid",
-    "params": { "account_id": "eip155:1" },
+    "params": {
+      "account_id": "eip155:1"
+    },
     "expected_error_code": -32602
   },
   {
     "name": "sign_typed_data rejects non-EVM account",
     "method": "oc_sign_typed_data",
     "session": "valid",
-    "params": { "account_id": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "typed_data": {} },
+    "params": {
+      "account_id": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "typed_data": {}
+    },
     "expected_error_code": -32602
   },
   {
     "name": "sign_authorization requires EVM account",
     "method": "oc_sign_authorization",
     "session": "valid",
-    "params": { "account_id": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "address": "0x1111111111111111111111111111111111111111", "nonce": "0" },
+    "params": {
+      "account_id": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "address": "0x1111111111111111111111111111111111111111",
+      "nonce": "0"
+    },
     "expected_error_code": -32602
   },
   {
     "name": "sign_authorization requires passkey step-up",
     "method": "oc_sign_authorization",
     "session": "valid",
-    "params": { "account_id": "eip155:1", "address": "0x1111111111111111111111111111111111111111", "nonce": "0" },
+    "params": {
+      "account_id": "eip155:1",
+      "address": "0x1111111111111111111111111111111111111111",
+      "nonce": "0"
+    },
     "expected_error_code": 4100,
-    "expected_error_data": { "require_passkey": true }
+    "expected_error_data": {
+      "require_passkey": true
+    }
   },
   {
     "name": "oc_rpc rejects non-allowlisted methods",
     "method": "oc_rpc",
     "session": "valid",
-    "params": { "origin": "https://dapp.example", "chain_id": "eip155:1", "method": "eth_sendRawTransaction", "params": [] },
+    "params": {
+      "origin": "https://dapp.example",
+      "chain_id": "eip155:1",
+      "method": "eth_sendRawTransaction",
+      "params": []
+    },
     "expected_error_code": 4200
   },
   {
-    "name": "oc_rpc requires origin",
+    "name": "oc_rpc requires method",
     "method": "oc_rpc",
     "session": "valid",
-    "params": { "chain_id": "eip155:1", "method": "eth_chainId", "params": [] },
+    "params": {
+      "origin": "https://dapp.example",
+      "chain_id": "eip155:1",
+      "params": []
+    },
     "expected_error_code": -32602
+  },
+  {
+    "name": "oc_rpc requires an array of params",
+    "method": "oc_rpc",
+    "session": "valid",
+    "params": {
+      "origin": "https://dapp.example",
+      "chain_id": "eip155:1",
+      "method": "eth_chainId",
+      "params": {}
+    },
+    "expected_error_code": -32602
+  },
+  {
+    "name": "oc_rpc accepts an omitted dApp origin",
+    "method": "oc_rpc",
+    "session": "valid",
+    "params": {
+      "chain_id": "eip155:1",
+      "method": "eth_sendRawTransaction",
+      "params": []
+    },
+    "expected_error_code": 4200
+  },
+  {
+    "name": "passkey_challenge requires a registered passkey for the wallet",
+    "method": "oc_passkey_challenge",
+    "session": "valid",
+    "params": {},
+    "expected_error_code": 4100
   },
   {
     "name": "sign_transaction rejects a chain that is not the signing account's",
@@ -163,7 +241,11 @@
     "session": "valid",
     "params": {
       "account_id": "eip155:1",
-      "transaction": { "type": "0x3", "to": "0x1111111111111111111111111111111111111111", "nonce": "0x0" }
+      "transaction": {
+        "type": "0x3",
+        "to": "0x1111111111111111111111111111111111111111",
+        "nonce": "0x0"
+      }
     },
     "expected_error_code": -32602
   },
@@ -173,7 +255,11 @@
     "session": "valid",
     "params": {
       "account_id": "eip155:1",
-      "transaction": { "type": "0x4", "to": "0x1111111111111111111111111111111111111111", "nonce": "0x0" }
+      "transaction": {
+        "type": "0x4",
+        "to": "0x1111111111111111111111111111111111111111",
+        "nonce": "0x0"
+      }
     },
     "expected_error_code": -32602
   },
@@ -186,7 +272,11 @@
       "transaction": {
         "type": "0x4",
         "nonce": "0x0",
-        "authorizationList": [{ "address": "0xdead" }]
+        "authorizationList": [
+          {
+            "address": "0xdead"
+          }
+        ]
       }
     },
     "expected_error_code": -32602
@@ -195,7 +285,9 @@
     "name": "policy_preview requires chain_id",
     "method": "oc_policy_preview",
     "session": "valid",
-    "params": { "to": "0x1111111111111111111111111111111111111111" },
+    "params": {
+      "to": "0x1111111111111111111111111111111111111111"
+    },
     "expected_error_code": -32602
   },
   {
@@ -205,7 +297,10 @@
     "params": {
       "account_id": "eip155:1",
       "from": "0xnothex",
-      "transaction": { "to": "0x1111111111111111111111111111111111111111", "nonce": "0x0" }
+      "transaction": {
+        "to": "0x1111111111111111111111111111111111111111",
+        "nonce": "0x0"
+      }
     },
     "expected_error_code": -32602
   },
@@ -217,7 +312,11 @@
       "account_id": "eip155:1",
       "address": "0x1111111111111111111111111111111111111111",
       "nonce": "0",
-      "passkey": { "challenge_hex": "00", "signature_hex": "00", "credential_id": "c" }
+      "passkey": {
+        "challenge_hex": "00",
+        "signature_hex": "00",
+        "credential_id": "c"
+      }
     },
     "expected_error_code": 4100
   },
@@ -229,22 +328,25 @@
       "account_id": "eip155:1",
       "address": "0x1111111111111111111111111111111111111111",
       "nonce": "0",
-      "passkey": { "challenge_hex": "nothex", "signature_hex": "00", "credential_id": "c" }
+      "passkey": {
+        "challenge_hex": "nothex",
+        "signature_hex": "00",
+        "credential_id": "c"
+      }
     },
-    "expected_error_code": -32602
-  },
-  {
-    "name": "passkey_challenge requires credential_id",
-    "method": "oc_passkey_challenge",
-    "session": "valid",
-    "params": {},
     "expected_error_code": -32602
   },
   {
     "name": "add_custom_chain rejects a non-EVM chain id",
     "method": "oc_add_custom_chain",
     "session": "valid",
-    "params": { "chain": { "chain_id": "solana:mainnet", "name": "sol", "native_currency": "SOL" } },
+    "params": {
+      "chain": {
+        "chain_id": "solana:mainnet",
+        "name": "sol",
+        "native_currency": "SOL"
+      }
+    },
     "expected_error_code": -32602
   }
 ]

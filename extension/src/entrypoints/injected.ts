@@ -15,6 +15,7 @@ import {
   type OcEventMessage,
   type OcReplyMessage,
 } from '../lib/protocol';
+import { pageUuid } from '../lib/eip6963';
 
 export default defineUnlistedScript(() => {
   if (window.__oneCipherInjected) return;
@@ -90,22 +91,21 @@ export default defineUnlistedScript(() => {
     }
   });
 
-  // EIP-6963 multi-provider discovery: announce without fighting over
-  // window.ethereum.
+  // EIP-6963 multi-provider discovery: publish a per-install uuid, then
+  // announce. Announcing before the uuid is available would hand dApps an id
+  // that changes on the next discovery round.
   const providerInfo = {
-    uuid: crypto.randomUUID(),
+    uuid: pageUuid(),
     name: EIP6963_PROVIDER_NAME,
     icon: ICON_SVG_URI,
     rdns: EIP6963_RDNS,
   };
-  window.dispatchEvent(
-    new CustomEvent(EIP6963_ANNOUNCE, { detail: Object.freeze({ info: providerInfo, provider }) }),
-  );
-  window.addEventListener(EIP6963_REQUEST, () => {
-    window.dispatchEvent(
-      new CustomEvent(EIP6963_ANNOUNCE, { detail: Object.freeze({ info: providerInfo, provider }) }),
-    );
-  });
+  const detail = Object.freeze({ info: providerInfo, provider });
+  const announce = () => {
+    window.dispatchEvent(new CustomEvent(EIP6963_ANNOUNCE, { detail }));
+  };
+  announce();
+  window.addEventListener(EIP6963_REQUEST, announce);
 
   // Legacy window.ethereum: only claim it when no other wallet is present.
   // `writable: false` prevents page scripts from swapping the reference.

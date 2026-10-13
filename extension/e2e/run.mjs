@@ -28,6 +28,36 @@ const results = {
   daemonCalls: 0,
 };
 
+/// secp256k1 group order. `r`/`s` must be non-zero and below it.
+const SECP256K1_ORDER = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
+
+/**
+ * Assert a string is a well-formed 65-byte EIP-191 signature.
+ *
+ * This is deliberately a *shape* check, not a recovery check: the e2e runs
+ * against a stub daemon, so recovering a signer from a fixture signature would
+ * only prove the stub returns its own constant. What this does catch is the
+ * extension mangling a signature it was handed — the failure mode that belongs
+ * to this layer. Design §9.5's recovery requirement is met by the Rust
+ * signer's own sign/recover round-trip tests.
+ */
+function expectValidEip191Signature(value, label) {
+  if (typeof value !== 'string' || !value.startsWith('0x')) {
+    throw new Error(`${label}: expected a 0x-prefixed signature, got ${String(value)}`);
+  }
+  const body = value.slice(2);
+  if (!/^[0-9a-f]+$/i.test(body)) throw new Error(`${label}: signature is not hex`);
+  if (body.length !== 130) throw new Error(`${label}: expected 65 bytes, got ${body.length / 2}`);
+  const r = BigInt(`0x${body.slice(0, 64)}`);
+  const s = BigInt(`0x${body.slice(64, 128)}`);
+  const v = Number.parseInt(body.slice(128, 130), 16);
+  if (r === 0n) throw new Error(`${label}: r must be non-zero`);
+  if (s === 0n) throw new Error(`${label}: s must be non-zero`);
+  if (r >= SECP256K1_ORDER) throw new Error(`${label}: r must be below the curve order`);
+  if (s >= SECP256K1_ORDER) throw new Error(`${label}: s must be below the curve order`);
+  if (v !== 27 && v !== 28) throw new Error(`${label}: v must be 27 or 28, got ${v}`);
+}
+
 async function main() {
   const daemon = await startStubDaemon(18080);
   console.log(`stub daemon on http://127.0.0.1:${daemon.port}`);
@@ -164,12 +194,22 @@ async function main() {
     await page.getByRole('button', { name: 'personal_sign', exact: true }).click();
     await approveInNotification();
     await page.waitForFunction(
-      () => document.getElementById('out')?.textContent?.includes('0x4242'),
+      () => document.getElementById('out')?.textContent?.includes('0x8f5b1c0d'),
       undefined,
       { timeout: 10_000 },
     );
     console.log('personal_sign approve: OK');
     await waitForNotificationClosed();
+
+    // --- 2b. the signature is structurally valid (design §9.5) --------------
+    // Full signer-vs-signature recovery is a Rust-side property — the daemon
+    // signs, and a stub daemon has nothing to recover from. What the extension
+    // CAN be caught breaking is the plumbing: truncation, a dropped 0x, a
+    // result unwrapped into an object. So assert the EIP-191 shape a dApp
+    // itself would validate.
+    const signature = await page.evaluate(() => document.getElementById('out')?.textContent ?? '');
+    expectValidEip191Signature(signature, 'personal_sign result');
+    console.log('signature shape valid: OK');
 
     // --- 3. personal_sign reject → 4001 --------------------------------------
     await page.getByRole('button', { name: 'sign to reject' }).click();

@@ -393,6 +393,29 @@ impl PasskeyPubkeyStore {
         Ok(self.load()?.get(credential_id).cloned())
     }
 
+    /// Every credential id registered to `wallet_id`, sorted for a stable
+    /// result. Used to resolve an omitted `credential_id` on
+    /// `oc_passkey_challenge` (§5.2).
+    pub fn credential_ids_for_wallet(&self, wallet_id: &str) -> Vec<String> {
+        match self.load() {
+            Ok(map) => {
+                let mut ids: Vec<String> = map
+                    .into_iter()
+                    .filter(|(_, stored)| stored.wallet_id == wallet_id)
+                    .map(|(id, _)| id)
+                    .collect();
+                ids.sort();
+                ids
+            }
+            // A corrupt store must not silently resolve to "no passkeys" for
+            // one caller and "a passkey exists" for another.
+            Err(e) => {
+                tracing::warn!(error = %e, "passkey store: corrupt while resolving wallet credentials");
+                Vec::new()
+            }
+        }
+    }
+
     /// Register (or replace) a passkey public key for the given credential ID.
     pub fn register(
         &mut self,

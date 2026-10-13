@@ -177,29 +177,58 @@ export default defineBackground(() => {
   // Seed the daemon client with the persisted URL.
   void configStore.load().then((config) => {
     ctx.setDaemon(new OcwpClient(config.daemonUrl));
+    // Design §4.7: probe `oc_hello` on SW startup as well as on popup open.
+    // The SW is suspended and resumed constantly; waiting for the first popup
+    // open means the daemon-offline screen is wrong until then.
+    void probeDaemon(ctx);
   });
+
+  // Probe again on every resume: the daemon may have died or started while the
+  // SW was suspended, and the popup reads this without its own round trip.
+  browser.runtime.onStartup?.addListener?.(() => void probeDaemon(ctx));
 
   // ------------------------------------------------------------------
   // Message routing — strict envelope allowlist, fail-closed (F10/INV-7).
   // The promise-returning listener is supported by both the polyfill-based
   // `browser` API and FakeBrowser.
   // ------------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // Daemon health (design §4.7). The SW is suspended and resumed constantly,
+  // so the probe runs at startup and after every URL change rather than only
+  // when a popup happens to open. The outcome is cached without a round trip:
+  // a popup opening on resume reads it immediately.
+  // ------------------------------------------------------------------
+  let lastProbe: { ok: boolean; error?: string } = { ok: false, error: 'not yet probed' };
+
+  async function probeDaemon(ctx: RouterContext): Promise<void> {
+    try {
+      await ctx.daemon.hello();
+      lastProbe = { ok: true };
+    } catch (error) {
+      lastProbe = {
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   // Test/diagnostic hook (e2e evidence): queue size, window id, request log.
-  const requestLog: string[] = [];
-  const debugHost = globalThis as unknown as {
+  const requestLog: string[] = [];  const debugHost = globalThis as unknown as {
     __ocDebug?: {
       queueSize(): number;
       notificationWindowId(): number | null;
       requestLog(): string[];
+      /// Whether the last `oc_hello` probe reached the daemon.
+      daemonReachable(): boolean;
     };
   };
   debugHost.__ocDebug = {
     queueSize: () => queue.size,
     notificationWindowId: () => notificationWindowId,
     requestLog: () => [...requestLog],
+    daemonReachable: () => lastProbe.ok,
   };
-  browser.runtime.onMessage.addListener((message: unknown, sender) => {
-    requestLog.push(
+  browser.runtime.onMessage.addListener((message: unknown, sender) => {    requestLog.push(
       `${Math.floor(Date.now() / 1000)} ${String((message as { type?: string })?.type)}:${
         String((message as { method?: string })?.method ?? '')
       }`,

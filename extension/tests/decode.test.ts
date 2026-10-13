@@ -163,6 +163,28 @@ describe('message views', () => {
     expect(view.fields.find((field) => field.label === 'Chain')?.value).toBe('eip155:8453');
     expect(view.warnings.length).toBeGreaterThan(0);
   });
+
+  it('warns on an unverified verifyingContract (design §4.8)', () => {
+    const verifyingContract = `0x${'ab'.repeat(20)}`;
+    const typed = {
+      domain: { name: 'Permit2', verifyingContract },
+      primaryType: 'PermitSingle',
+      message: {},
+    };
+    // The classic EIP-712 phishing shape: a well-formed-looking Permit that
+    // drains an allowance. The selector table cannot help here, so the warning
+    // has to come from the user's verified-contract list.
+    const unverified = buildTypedDataView(typed, []);
+    expect(
+      unverified.warnings.some((warning) => warning.startsWith('Unverified contract')),
+    ).toBe(true);
+
+    // Listed, in a different case — checksums are not identity.
+    const verified = buildTypedDataView(typed, [verifyingContract.toLowerCase()]);
+    expect(
+      verified.warnings.some((warning) => warning.startsWith('Unverified contract')),
+    ).toBe(false);
+  });
 });
 
 describe('formatWei', () => {

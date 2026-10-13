@@ -236,6 +236,78 @@ fn policy_preview_projects_the_transaction_it_is_given() {
 
 /// §5.2: `oc_passkey_challenge` records a session binding, so a challenge
 /// minted for one session cannot authorize another's request.
+/// §5.2: `credential_id` is OPTIONAL. A client that must supply one it can
+/// only have learned from a previous registration cannot complete a step-up
+/// after a browser restart — exactly when the step-up is needed. With it
+/// omitted, the daemon resolves the session's wallet-bound credential.
+#[test]
+fn passkey_challenge_resolves_an_omitted_credential_id() {
+    let _home = HomeGuard::new();
+    let (app, _state_dir) = test_app(&_home);
+    let unlock = super::handlers::handle_unlock(
+        &app,
+        &serde_json::json!({ "wallet": "test", "passphrase": TEST_PASSPHRASE }),
+        EXT_ORIGIN,
+    )
+    .expect("unlock");
+    let session_id = unlock["session_id"].as_str().expect("session id").to_string();
+    let wallet_id = unlock["wallet_id"].as_str().expect("wallet id").to_string();
+
+    // Nothing registered for this wallet yet: fail closed rather than guess.
+    let err = super::handlers::dispatch(
+        &app,
+        "oc_passkey_challenge",
+        &serde_json::json!({ "session_id": session_id }),
+        EXT_ORIGIN,
+    )
+    .expect_err("no registered passkey must be an explicit error");
+    assert_eq!(err.code, super::errors::CODE_UNAUTHORIZED);
+
+    // Register exactly one credential for this wallet.
+    let credential_id = "cred-omitted-resolution";
+    super::handlers::dispatch(
+        &app,
+        "oc_passkey_register",
+        &serde_json::json!({
+            "session_id": session_id,
+            "credential_id": credential_id,
+            "algorithm": "p256",
+            // The P-256 generator point G, a canonical valid SEC1 encoding.
+            "public_key": base64_std(&P256_GENERATOR),
+        }),
+        EXT_ORIGIN,
+    )
+    .expect("register");
+
+    // The omission now resolves, and the response echoes what it picked.
+    let result = super::handlers::dispatch(
+        &app,
+        "oc_passkey_challenge",
+        &serde_json::json!({ "session_id": session_id }),
+        EXT_ORIGIN,
+    )
+    .expect("an omitted credential_id must resolve");
+    assert_eq!(result["credential_id"], credential_id);
+    // And the challenge is still bound to the session that asked for it.
+    let challenge_hex = result["challenge_hex"].as_str().expect("challenge");
+    assert!(app.step_up.consume(challenge_hex, &session_id).is_some());
+    assert!(app.step_up.consume(challenge_hex, "some-other-session").is_none());
+
+    // `credential_ids_for_wallet` must not leak another wallet's credentials.
+    let store = oc_keyagent::passkey::PasskeyPubkeyStore::open_default().expect("store");
+    assert_eq!(store.credential_ids_for_wallet(&wallet_id), vec![credential_id.to_string()]);
+    assert!(store.credential_ids_for_wallet("a-different-wallet").is_empty());
+}
+
+/// The P-256 generator point G, an uncompressed SEC1 encoding.
+const P256_GENERATOR: [u8; 65] = [
+    0x04, 0x6b, 0x17, 0xd1, 0xf2, 0xe1, 0x2c, 0x42, 0x47, 0xf8, 0xbc, 0xe6, 0xe5, 0x63, 0xa4, 0x40,
+    0xf2, 0x77, 0x03, 0x7d, 0x81, 0x2d, 0xeb, 0x33, 0xa0, 0xf4, 0xa1, 0x39, 0x45, 0xd8, 0x98, 0xc2,
+    0x96, 0x4f, 0xe3, 0x42, 0xe2, 0xfe, 0x1a, 0x7f, 0x9b, 0x8e, 0xe7, 0xeb, 0x4a, 0x7c, 0x0f, 0x9e,
+    0x16, 0x2b, 0xce, 0x33, 0x57, 0x6b, 0x31, 0x5e, 0xce, 0xcb, 0xb6, 0x40, 0x68, 0x37, 0xbf, 0x51,
+    0xf5,
+];
+
 #[test]
 fn step_up_challenges_are_bound_to_their_session() {
     let _home = HomeGuard::new();
