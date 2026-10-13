@@ -30,6 +30,8 @@ OneCipher daemon (oc-vault · oc-policy · oc-signer · audit)
   approval-time re-validation (INV-2/3/4).
 - `src/lib/request-policy.ts` — Chrome-sender authentication (INV-5/6).
 - `src/lib/consent/decode.ts` — display-only tx/message/EIP-712 decoding.
+- `src/lib/consent/policy-view.ts` — policy verdict → risk badges: first-time
+  recipient, value over the user's warn threshold, unverified contract.
 
 ## Setup
 
@@ -64,7 +66,7 @@ OneCipher daemon (oc-vault · oc-policy · oc-signer · audit)
 
 ```bash
 npm run typecheck    # tsc --noEmit
-npm run test         # vitest unit + sentinel suite (124 tests, 9 files)
+npm run test         # vitest unit + sentinel suite (157 tests, 10 files)
 npm run build        # wxt build → .output/chrome-mv3
 npm run test:e2e     # Playwright consent flow vs scripts/stub-daemon.mjs
 npm run zip          # store-ready zip

@@ -91,7 +91,6 @@ ext-conformance:
 # Store-ready zip of the extension.
 ext-pack:
     cd extension && npm run zip
-
 # ============================================================
 # Build
 # ============================================================
@@ -121,7 +120,7 @@ docs:
     cargo doc --no-deps --open
 
 # Full CI check (lint + test + build + extension suite incl. e2e + conformance).
-ci: lint test build ext-build ext-test ext-conformance ext-e2e
+ci: lint test build ext-build ext-test ext-conformance ext-e2e ext-pack
 
 # Install all required development tools.
 setup:

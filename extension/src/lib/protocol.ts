@@ -162,11 +162,26 @@ export interface SimulationSummary {
   revertReason?: string;
 }
 
-/// What the daemon says about a pending request: the policy verdict and the
-/// simulation result. Both are shown to the user; neither is an authorization.
+/// A risk badge on a consent card (design §4.1 `policy-view.ts`).
+export interface RiskBadge {
+  /// `danger` = can move funds or rights; `warn` = look before you click;
+  /// `info` = neutral context.
+  level: 'info' | 'warn' | 'danger';
+  label: string;
+}
+
+/// What the daemon says about a pending request: the policy verdict, the
+/// dry-run result, and the request's own risk badges. All three are shown to
+/// the user; none is an authorization.
 export interface ConsentAssessment {
   policy: PolicyPreview | null;
   simulation: SimulationSummary | null;
+  /// Risk badges from `lib/consent/policy-view.ts` (first-time recipient,
+  /// value over the warn threshold, unverified contract, ...). Optional so a
+  /// partial stub still compiles; the executor always fills it in.
+  riskBadges?: RiskBadge[];
+  /// Populated only for a transaction send.
+  tx?: Record<string, unknown> | null;
 }
 
 /// Policy preview shape returned by `oc_policy_preview` (design §4.9).
@@ -244,4 +259,12 @@ export interface PopupState {
   sites: SiteEntry[];
   /// Each pending action carries its own `assessment` (policy + simulation).
   pendingActions: PendingActionView[];
+  /// Chain ids the popup may present (design §4.8 "chain selector").
+  chains: string[];
+  /// Native balance per chain, `wei === null` when the read failed.
+  balances: Array<{ chainId: string; wei: string | null }>;
+  /// Value above which a transfer is flagged, from `oc:config`.
+  warnThresholdWei?: string;
+  /// Contracts the user has marked verified, from `oc:config`.
+  verifiedContracts?: string[];
 }

@@ -88,7 +88,7 @@ describe('ConsentQueue', () => {
     });
     // A failed preview must not hide the request; the approve-time check is
     // the authoritative one.
-    expect(action.assessment).toEqual({ policy: null, simulation: null });
+    expect(action.assessment).toEqual({ policy: null, simulation: null, riskBadges: [] });
     queue.decline(action.id);
   });
 

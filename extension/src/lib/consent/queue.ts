@@ -101,7 +101,7 @@ export class ConsentQueue {
     } catch {
       // A failed preview must not hide the request; the approve-time check
       // is the authoritative one.
-      assessment = { policy: null, simulation: null };
+      assessment = { policy: null, simulation: null, riskBadges: [] };
     }
     if (this.pending.get(id) === action) action.assessment = assessment;
     return assessment;

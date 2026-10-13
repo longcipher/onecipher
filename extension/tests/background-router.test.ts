@@ -519,6 +519,89 @@ describe('consent assessment (policy badge + simulation)', () => {
     expect(response.error?.code).toBe(4300);
     expect(response.error?.data).toMatchObject({ decision: 'deny' });
   });
+
+  it('raises risk badges the user cannot infer from the parameters (§4.8)', async () => {
+    const h = makeHarness();
+    h.config.warnThresholdWei = '1000';
+    h.config.knownRecipients = [];
+    h.config.verifiedContracts = [];
+    h.session = { sessionId: 'sess-1', walletId: 'w-1', wallet: 'default', expiresAtUnix: 9999999999 };
+    void providerRequest(h, 'eth_sendTransaction', [
+      { to: '0x1111111111111111111111111111111111111111', value: '0x2710', nonce: '0x1', data: '0xdeadbeef' },
+    ]);
+    await vi.waitFor(() => expect(h.ctx.queue.size).toBe(1));
+    const action = await vi.waitFor(() => {
+      const current = h.ctx.queue.list()[0]!;
+      expect(current.assessment).not.toBeUndefined();
+      return current;
+    });
+    const labels = (action.assessment?.riskBadges ?? []).map((badge) => badge.label);
+    // First-time recipient AND a value above the user's own threshold AND an
+    // unverified contract — none inferable from looking at a 20-byte address.
+    expect(labels).toContain('First time sending value to this recipient');
+    expect(labels.some((label) => label.includes('warn threshold'))).toBe(true);
+    expect(labels.some((label) => label.startsWith('Unverified contract'))).toBe(true);
+    // A known, verified, below-threshold recipient raises none of them.
+    h.config.knownRecipients = ['0x1111111111111111111111111111111111111111'];
+    h.config.verifiedContracts = ['0x1111111111111111111111111111111111111111'];
+    h.config.warnThresholdWei = '100000000000000000000';
+    h.ctx.queue.decline(action.id);
+    void providerRequest(h, 'eth_sendTransaction', [
+      { to: '0x1111111111111111111111111111111111111111', value: '0x2710', nonce: '0x1', data: '0xdeadbeef' },
+    ]);
+    await vi.waitFor(() => expect(h.ctx.queue.size).toBe(1));
+    const quiet = await vi.waitFor(() => {
+      const current = h.ctx.queue.list()[0]!;
+      expect(current.assessment).not.toBeUndefined();
+      return current;
+    });
+    expect(quiet.assessment?.riskBadges).toEqual([]);
+    h.ctx.queue.decline(quiet.id);
+  });
+
+  it('records a recipient only after a successful broadcast', async () => {
+    const h = makeHarness();
+    h.session = { sessionId: 'sess-1', walletId: 'w-1', wallet: 'default', expiresAtUnix: 9999999999 };
+    void providerRequest(h, 'eth_sendTransaction', [
+      { to: '0x1111111111111111111111111111111111111111', value: '0x1', nonce: '0x1' },
+    ]);
+    await vi.waitFor(() => expect(h.ctx.queue.size).toBe(1));
+    await h.ctx.queue.approve(h.ctx.queue.list()[0]!.id);
+    await vi.waitFor(() => expect(h.config.knownRecipients).toEqual([
+      '0x1111111111111111111111111111111111111111',
+    ]));
+  });
+
+  it('popup_getState reports the chain list and balances from the daemon (§4.8/§4.10)', async () => {
+    const h = makeHarness();
+    h.session = { sessionId: 'sess-1', walletId: 'w-1', wallet: 'default', expiresAtUnix: 9999999999 };
+    const state = (await handleRuntimeMessage(
+      h.ctx,
+      { type: 'popup:request', method: 'popup_getState' },
+      popupSender,
+    )) as PopupState;
+    // The wallet's EVM chains plus the active chain — not a hardcoded table.
+    expect(state.chains).toContain('eip155:1');
+    expect(state.chains).toContain('eip155:8453');
+    expect(state.balances.map((entry) => entry.chainId)).toEqual(state.chains);
+    // A failed balance read yields null, never a wrong number.
+    expect(state.balances[0]?.wei).toBe('0x1');
+    expect(state.warnThresholdWei).toBe(DEFAULT_CONFIG.warnThresholdWei);
+  });
+
+  it('a failed balance read does not break the popup', async () => {
+    const h = makeHarness();
+    (h.ctx.daemon as unknown as { rpc: unknown }).rpc = async () => {
+      throw { code: 4900, message: 'daemon unreachable' };
+    };
+    h.session = { sessionId: 'sess-1', walletId: 'w-1', wallet: 'default', expiresAtUnix: 9999999999 };
+    const state = (await handleRuntimeMessage(
+      h.ctx,
+      { type: 'popup:request', method: 'popup_getState' },
+      popupSender,
+    )) as PopupState;
+    expect(state.balances.every((entry) => entry.wei === null)).toBe(true);
+  });
 });
 
 describe('passkey step-up (D-10)', () => {

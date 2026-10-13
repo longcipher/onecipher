@@ -304,3 +304,111 @@ fn base64_std(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
+
+/// The success-direction half of the vector set: `results.json` asserts the
+/// *shape and content* of a successful response, so a handler that starts
+/// dropping a field (or renames one) fails here rather than in a dApp.
+#[test]
+fn result_vectors_carry_the_documented_shape() {
+    let _home = HomeGuard::new();
+    let (app, _state_dir) = test_app(&_home);
+    let unlock = super::handlers::handle_unlock(
+        &app,
+        &serde_json::json!({ "wallet": "test", "passphrase": TEST_PASSPHRASE }),
+        EXT_ORIGIN,
+    )
+    .expect("unlock");
+    let session_id = unlock["session_id"].as_str().expect("session id").to_string();
+
+    // A connected site, so `list_sites` has something to report.
+    super::handlers::dispatch(
+        &app,
+        "oc_connect_site",
+        &serde_json::json!({ "session_id": session_id, "origin": "https://dapp.example", "account_id": "eip155:1" }),
+        EXT_ORIGIN,
+    )
+    .expect("connect site");
+
+    let vectors = load_vectors("results.json");
+    let vectors = vectors.as_array().expect("results.json must be an array");
+    assert!(vectors.len() >= 8, "expected a substantial success vector set");
+
+    for vector in vectors {
+        let name = vector["name"].as_str().expect("vector name");
+        let method = vector["method"].as_str().expect("vector method");
+        let mut params = vector["params"].clone();
+        // A vector may pin the origin it is dispatched from: the default is
+        // the unlocking extension, and the foreign-origin case proves the
+        // session binding from the other end.
+        let origin = match vector.get("origin").and_then(Value::as_str) {
+            Some("other") => OTHER_ORIGIN,
+            _ => EXT_ORIGIN,
+        };
+        if method == "oc_lock" || method == "oc_audit_tail" {
+            // `oc_lock` consumes its session; give it a throwaway so the
+            // remaining vectors still have one.
+            let spare = super::handlers::handle_unlock(
+                &app,
+                &serde_json::json!({ "wallet": "test", "passphrase": TEST_PASSPHRASE }),
+                EXT_ORIGIN,
+            )
+            .expect("spare session");
+            params["session_id"] = Value::String(spare["session_id"].as_str().unwrap().to_string());
+        } else if vector["session"].as_str() == Some("valid") {
+            params["session_id"] = Value::String(session_id.clone());
+        }
+
+        let result = super::handlers::dispatch(&app, method, &params, origin)
+            .unwrap_or_else(|e| panic!("vector '{name}' must succeed, got {e:?}"));
+
+        for key in vector["expected_result_keys"].as_array().into_iter().flatten() {
+            let key = key.as_str().expect("key string");
+            assert!(result.get(key).is_some(), "vector '{name}': result missing '{key}'");
+        }
+        if let Some(expected) = vector.get("expected_result") {
+            assert_eq!(&result, expected, "vector '{name}': exact result");
+        }
+        // Each of these maps "expected_*" to the result field it names.
+        let projections: [(&str, &dyn Fn(&Value) -> Value); 6] = [
+            ("expected_decision", &|v: &Value| v["decision"].clone()),
+            ("expected_to", &|v: &Value| v["to"].clone()),
+            ("expected_value", &|v: &Value| v["value"].clone()),
+            ("expected_data", &|v: &Value| v["data"].clone()),
+            ("expected_tx_type", &|v: &Value| v["tx_type"].clone()),
+            ("expected_unlocked", &|v: &Value| v["unlocked"].clone()),
+        ];
+        for (field, getter) in projections {
+            if let Some(expected) = vector.get(field) {
+                assert_eq!(getter(&result), *expected, "vector '{name}': {field}");
+            }
+        }
+        if let Some(length) = vector["expected_session_id_length"].as_u64() {
+            assert_eq!(
+                result["session_id"].as_str().unwrap_or_default().len() as u64,
+                length,
+                "vector '{name}': session_id length"
+            );
+        }
+        if let Some(prefix) = vector["expected_origin_prefix"].as_str() {
+            assert!(
+                result["origin"].as_str().unwrap_or_default().starts_with(prefix),
+                "vector '{name}': origin must be a pinned chrome-extension:// origin"
+            );
+        }
+        if vector["expected_accounts_non_empty"].as_bool() == Some(true) {
+            assert!(
+                result["accounts"].as_array().is_some_and(|a| !a.is_empty()),
+                "vector '{name}': accounts must be non-empty"
+            );
+        }
+    }
+
+    // The vectors left the wallet's session live; `oc_lock` took only its
+    // own, so the pinned session must still be usable.
+    super::handlers::dispatch(&app, "oc_accounts", &params_of(&session_id), EXT_ORIGIN)
+        .expect("unlock session must survive the vector run");
+}
+
+fn params_of(session_id: &str) -> Value {
+    serde_json::json!({ "session_id": session_id })
+}

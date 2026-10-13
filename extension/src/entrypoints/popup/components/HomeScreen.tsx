@@ -1,17 +1,14 @@
-// Wallet home: accounts + chain selector + connected sites + recent activity.
+// Wallet home: accounts + balances + chain selector + connected sites + recent
+// activity (design §4.8).
+//
+// The chain selector is driven by the `chains` list the daemon reported, not a
+// hardcoded table — otherwise a chain added via `wallet_addEthereumChain` or a
+// custom `chains.json` entry would be unreachable from the UI (design §4.10).
 
 import { useEffect, useState } from 'react';
 import type { PopupState } from '../../../lib/protocol';
+import { formatWei } from '../../../lib/consent/decode';
 import { activity, lock, revokeSite, switchChain } from '../api';
-
-const CHAIN_CHOICES = [
-  { chain_id: 'eip155:1', name: 'Ethereum' },
-  { chain_id: 'eip155:8453', name: 'Base' },
-  { chain_id: 'eip155:56', name: 'BSC' },
-  { chain_id: 'eip155:42161', name: 'Arbitrum' },
-  { chain_id: 'eip155:10', name: 'OP Mainnet' },
-  { chain_id: 'eip155:137', name: 'Polygon' },
-];
 
 export function HomeScreen(props: {
   state: PopupState;
@@ -33,6 +30,12 @@ export function HomeScreen(props: {
   }, [tab, onError]);
 
   const expiresIn = Math.max(0, session.expiresAtUnix - Math.floor(Date.now() / 1000));
+  const chains = state.chains.length > 0 ? state.chains : ['eip155:1'];
+  const balanceFor = (chainId: string): string | null =>
+    state.balances.find((entry) => entry.chainId === chainId)?.wei ?? null;
+  // Policy summary for the active wallet (design §4.8): what the user's own
+  // thresholds are, so a consent badge is never the first they hear of them.
+  const threshold = state.warnThresholdWei ?? '';
 
   return (
     <section>
@@ -56,9 +59,9 @@ export function HomeScreen(props: {
       {tab === 'accounts' && (
         <>
           <label className="field">
-            <span>Chain</span>
+            <span>Default chain</span>
             <select
-              value={state.activeChainId}
+              value={chains.includes(state.activeChainId) ? state.activeChainId : ''}
               onChange={(event) => {
                 void switchChain(event.target.value)
                   .then(onRefresh)
@@ -67,28 +70,38 @@ export function HomeScreen(props: {
                   );
               }}
             >
-              {CHAIN_CHOICES.map((chain) => (
-                <option key={chain.chain_id} value={chain.chain_id}>
-                  {chain.name}
+              {/* Keep an option for a chain the daemon did not report, so a
+                  stored value never renders as a blank selector. */}
+              {!chains.includes(state.activeChainId) && (
+                <option value={state.activeChainId}>{state.activeChainId}</option>
+              )}
+              {chains.map((chainId) => (
+                <option key={chainId} value={chainId}>
+                  {chainId}
                 </option>
               ))}
-              {state.accounts
-                .filter((account) => !CHAIN_CHOICES.some((choice) => choice.chain_id === account.chain_id))
-                .map((account) => (
-                  <option key={account.chain_id} value={account.chain_id}>
-                    {account.chain_id}
-                  </option>
-                ))}
             </select>
           </label>
           <ul className="accounts">
-            {state.accounts.map((account) => (
-              <li key={`${account.chain_id}:${account.address}`}>
-                <span className="code">{shorten(account.address)}</span>
-                <span className="muted">{account.chain_id}</span>
-              </li>
-            ))}
+            {state.accounts.map((account) => {
+              const balance = balanceFor(account.chain_id);
+              return (
+                <li key={`${account.chain_id}:${account.address}`}>
+                  <span className="code">{shorten(account.address)}</span>
+                  <span className="muted">
+                    {account.chain_id} · {balance === null ? '—' : formatWei(balance)}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
+          {threshold !== '' && (
+            <p className="muted policy-summary">
+              Warns above {formatWei(threshold)} to a first-time recipient
+              {state.verifiedContracts !== undefined &&
+                ` · ${state.verifiedContracts.length} verified contract(s)`}
+            </p>
+          )}
           <button
             className="ghost"
             onClick={() => {

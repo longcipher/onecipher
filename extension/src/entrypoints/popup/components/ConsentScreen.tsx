@@ -7,7 +7,13 @@
 //    unlock form mid-interaction.
 
 import { useCallback, useEffect, useState } from 'react';
-import type { ConsentAssessment, PendingActionView, PopupState } from '../../../lib/protocol';
+import type {
+  ConsentAssessment,
+  PendingActionView,
+  PopupState,
+  RiskBadge,
+} from '../../../lib/protocol';
+import { consentBadges } from '../../../lib/consent/policy-view';
 import { approveAction, declineAction, getState, unlock } from '../api';
 
 export function ConsentScreen(props: {
@@ -150,30 +156,26 @@ export function ConsentScreen(props: {
 /// The badge is ADVISORY. A green badge never authorizes anything (INV-2) and
 /// a red one does not bypass the user: the daemon re-evaluates at approve time
 /// and that is what actually gates (INV-4).
-function PolicyBadge(props: { assessment?: ConsentAssessment | null }) {
+function AssessmentBadges(props: { assessment?: ConsentAssessment | null }) {
   const { assessment } = props;
   if (!assessment) {
     return <p className="badge muted">Checking policy…</p>;
   }
-  const { policy, simulation } = assessment;
+  // Order matters: the worst thing on the page should be the first thing read.
+  const badges: RiskBadge[] = [
+    ...consentBadges(assessment.policy, assessment.simulation, assessment.tx ?? null, null),
+    ...(assessment.riskBadges ?? []),
+  ];
+  if (badges.length === 0) {
+    return <p className="badge muted">No policy or simulation data available.</p>;
+  }
   return (
     <>
-      {policy ? (
-        <p className={`badge ${policy.decision === 'allow' ? 'allow' : 'deny'}`}>
-          {policy.decision === 'allow' ? '✓ Policy allows this request' : '✕ Blocked by policy'}
-          {policy.reasons.length > 0 && ` — ${policy.reasons[0]?.message}`}
-          {policy.matched_policy_ids.length > 0 && ` (${policy.matched_policy_ids.join(', ')})`}
+      {badges.map((badge, index) => (
+        <p className={`badge ${badge.level}`} key={index}>
+          {badge.label}
         </p>
-      ) : (
-        <p className="badge muted">Policy status unavailable — the daemon still enforces.</p>
-      )}
-      {simulation ? (
-        <p className={`badge ${simulation.ok ? 'sim-ok' : 'sim-fail'}`}>
-          {simulation.ok
-            ? `Simulation OK${simulation.gasUsed ? ` · gas ≈ ${simulation.gasUsed}` : ''}`
-            : `Simulation reverts${simulation.revertReason ? ` — ${simulation.revertReason}` : ''}`}
-        </p>
-      ) : null}
+      ))}
     </>
   );
 }
@@ -198,7 +200,7 @@ function ActionCard(props: {
       <h2>{action.view.title}</h2>
       <p className="origin">{action.origin}</p>
       <p>{action.view.summary}</p>
-      <PolicyBadge assessment={action.assessment} />
+      <AssessmentBadges assessment={action.assessment} />
       <dl className="fields">
         {action.view.fields.map((field, index) => (
           <div className="field-row" key={index}>

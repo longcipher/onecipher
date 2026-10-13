@@ -1,0 +1,114 @@
+[
+  {
+    "name": "hello reports the negotiated protocol version and chains",
+    "method": "oc_hello",
+    "session": "none",
+    "params": {},
+    "expected_result_keys": ["protocol_version", "daemon_version", "chains", "features", "extension_ids"],
+    "expected_protocol_version": 1,
+    "expected_features": [
+      "sessions",
+      "sites",
+      "chain-registry",
+      "policy-preview",
+      "rpc-proxy",
+      "passkey-step-up"
+    ]
+  },
+  {
+    "name": "unlock mints a session pinned to the calling origin",
+    "method": "oc_unlock",
+    "session": "none",
+    "params": { "wallet": "test", "passphrase": "test-passphrase" },
+    "expected_result_keys": ["session_id", "wallet_id", "index", "expires_at_unix", "accounts", "origin"],
+    "expected_session_id_length": 64,
+    "expected_origin_prefix": "chrome-extension://",
+    "expected_accounts_non_empty": true
+  },
+  {
+    "name": "accounts lists the wallet's accounts per chain family",
+    "method": "oc_accounts",
+    "session": "valid",
+    "params": {},
+    "expected_result_keys": ["accounts"],
+    "expected_accounts_non_empty": true
+  },
+  {
+    "name": "session_status reports an unlocked session",
+    "method": "oc_session_status",
+    "session": "valid",
+    "params": {},
+    "expected_result_keys": ["unlocked", "wallet_id", "expires_at_unix"],
+    "expected_unlocked": true
+  },
+  {
+    "name": "session_status reports a foreign origin's session as locked",
+    "method": "oc_session_status",
+    "session": "valid",
+    "origin": "other",
+    "params": {},
+    "expected_result": { "unlocked": false }
+  },
+  {
+    "name": "list_sites reports the connected origins",
+    "method": "oc_list_sites",
+    "session": "valid",
+    "params": {},
+    "expected_result_keys": ["sites"]
+  },
+  {
+    "name": "chain_registry serves built-in EVM chains with endpoints",
+    "method": "oc_chain_registry",
+    "session": "valid",
+    "params": {},
+    "expected_result_keys": ["chains"]
+  },
+  {
+    "name": "policy_preview projects the transaction it was given",
+    "method": "oc_policy_preview",
+    "session": "valid",
+    "params": {
+      "chain_id": "eip155:1",
+      "to": "0x1111111111111111111111111111111111111111",
+      "value": "1000",
+      "data": "0xdeadbeef"
+    },
+    "expected_result_keys": ["method", "decision", "reasons", "matched_policy_ids", "tx_type", "to", "value", "data"],
+    "expected_decision": "allow",
+    "expected_to": "0x1111111111111111111111111111111111111111",
+    "expected_value": "1000",
+    "expected_data": "0xdeadbeef"
+  },
+  {
+    "name": "policy_preview accepts CORS preflight-free flat and nested shapes alike",
+    "method": "oc_policy_preview",
+    "session": "valid",
+    "params": {
+      "chain_id": "eip155:1",
+      "transaction": {
+        "to": "0x2222222222222222222222222222222222222222",
+        "value": "0x3e8",
+        "data": "0xdeadbeef"
+      }
+    },
+    "expected_decision": "allow",
+    "expected_to": "0x2222222222222222222222222222222222222222",
+    "expected_value": "1000",
+    "expected_data": "0xdeadbeef",
+    "expected_tx_type": "0x02 (EIP-1559)"
+  },
+  {
+    "name": "lock destroys the session it was given",
+    "method": "oc_lock",
+    "session": "valid",
+    "params": {},
+    "expected_result": {}
+  },
+  {
+    "name": "audit_tail returns the requested event window",
+    "method": "oc_audit_tail",
+    "session": "valid",
+    "params": { "limit": 5 },
+    "expected_result_keys": ["events"]
+  }
+]

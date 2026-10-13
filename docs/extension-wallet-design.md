@@ -2,8 +2,9 @@
 
 > Design document for the OneCipher browser extension wallet (`extension/`) and the
 > multi-end architecture it belongs to (OneCipher Wallet Protocol, "OCWP").
-> Status: **implemented** (P0–P4 of §11; the extension lives in `extension/`,
-> WXT + React, with OCWP support in `bin/oc-cli/src/commands/wallet_rpc/ocwp/`).
+> Status: **implemented** (P0–P4 of §11, plus the §11.1 review pass; the
+> extension lives in `extension/`, WXT + React, with OCWP support in
+> `bin/oc-cli/src/commands/wallet_rpc/ocwp/`).
 
 ## 1. Purpose and Scope
 
@@ -272,48 +273,42 @@ compromise non-fatal for keys).
 
 ## 4. Extension Architecture (MV3)
 
-### 4.1 Directory Layout (planned)
+### 4.1 Directory Layout (as built)
+
+WXT + React, so the layout differs from the original plan below. The
+dependency-injected pure modules the design called for are all present and all
+unit-tested; what changed is that they live under `src/lib/` rather than a flat
+`src/`, and the test suite is Vitest + Playwright rather than bare `node:test`.
 
 ```text
 extension/
-├── package.json                 # npm manifest, zero runtime UI deps
-├── tsconfig.json                # strict, types: ["chrome"]
-├── vite.config.ts               # 4 rollup entries, flat [name].js outputs
-├── README.md
-├── SECURITY.md                  # posture + invariant list (mirrors F21)
-├── public/
-│   ├── manifest.json            # MV3, §4.2
-│   ├── popup.html               # dual-mode: action popup + ?view=notification
-│   └── icons/icon-{16,32,48,128}.png
+├── package.json                # react + react-dom at runtime; everything else dev-only
+├── tsconfig.json               # strict, extends the WXT base
+├── vitest.config.ts            # happy-dom, tests/**/*.test.ts
+├── wxt.config.ts               # MV3 manifest input
+├── README.md                   SECURITY.md
+├── public/icon/icon-{16,32,48,128}.png
 ├── src/
-│   ├── protocol.ts              # channels, method names, error codes, types
-│   ├── background.ts            # service worker: routing, consent queue, daemon client
-│   ├── content.ts               # postMessage bridge (constants inlined, F4)
-│   ├── injected.ts              # EIP-1193 + EIP-6963 provider (page realm)
-│   ├── popup.ts                 # dual-mode UI (consent queue + wallet home)
-│   ├── request-policy.ts        # providerOrigin() / requirePopupSender() (F8/F9)
-│   ├── daemon/
-│   │   ├── client.ts            # OCWP HTTP client (loopback validation, CORS, retries)
-│   │   ├── session.ts           # session state, unlock/lock, TTL countdown
-│   │   └── types.ts             # OCWP request/response types
+│   ├── protocol.ts             # channels, method names, error codes, types
+│   ├── evm-tx.ts               # EIP-1193 ⇄ OCWP tx normalization (§4.3/§4.11)
+│   ├── request-policy.ts       # providerOrigin() / requirePopupSender() (F8/F9)
+│   ├── passkey.ts              # software-authenticator step-up (§3.5, OQ-3)
+│   ├── background/router.ts    # testable routing / consent / executor core
 │   ├── consent/
-│   │   ├── queue.ts             # pendingActions Map, enqueue/approve/decline/expire
-│   │   ├── decode.ts            # tx / message / typed-data human rendering
-│   │   └── policy-view.ts       # policy verdict → risk badges
-│   ├── storage/
-│   │   ├── config.ts            # chrome.storage.local: daemon URL, prefs, custom chains
-│   │   ├── sites.ts             # authorized origins cache (mirror of daemon sites.json)
-│   │   └── session-store.ts     # chrome.storage.session: session handle only (F13)
-│   └── ui/                      # el() DOM factory, screens, formatters
-├── tests/
-│   ├── security.test.mjs        # vm sandbox over dist/ bundles (F20)
-│   ├── consent.test.mjs         # consent invariants per method (F20)
-│   └── e2e-consent.mjs          # Playwright, disposable profile (F20)
-├── scripts/
-│   ├── pack.mjs                 # build + zip (store-ready)
-│   └── zip-store.mjs            # zero-dependency zip writer
-└── vectors/                     # OCWP conformance vectors, shared with Rust tests (§9.4)
+│   │   ├── queue.ts            # pendingActions Map, enqueue/approve/decline/expire
+│   │   ├── decode.ts           # tx / message / typed-data human rendering
+│   │   └── policy-view.ts      # policy verdict + risk badges (§4.8)
+│   ├── daemon/client.ts        # OCWP HTTP client (loopback validation, version pin)
+│   ├── storage/{config,sites,session-store,passkey}.ts
+│   └── entrypoints/            # WXT entrypoints: background, content, injected, popup
+├── tests/                      # 10 Vitest files (157 tests) incl. §9.3 sentinels
+├── e2e/run.mjs                 # Playwright consent flow over the built bundle
+├── scripts/{gen-icons.mjs, stub-daemon.mjs}
+└── vectors/ocwp-v1/*.json      # shared with the Rust daemon tests (§5.4)
 ```
+
+The `just` recipes are `ext-build`, `ext-test`, `ext-e2e`, `ext-conformance`
+(the same vectors run by both ends), and `ext-pack` (store-ready zip).
 
 Runtime dependencies: **none** beyond Node/browser built-ins. Transaction and
 typed-data rendering is display-only (signing is remote), so a ~200-line
@@ -966,7 +961,7 @@ and re-signed on the target device.
 
 | Layer | Runner | What it covers |
 |---|---|---|
-| Unit | `vitest run` (happy-dom) — 124 tests, 9 files | routing/sender auth, tx normalization, consent invariants, decode, storage, protocol, conformance |
+| Unit | `vitest run` (happy-dom) — 157 tests, 10 files | routing/sender auth, tx normalization, consent invariants, decode, storage, protocol, conformance |
 | Sentinels | `tests/security.test.ts` | storage / network / capture / `fetch` sentinels (§9.3) |
 | E2E | `extension/e2e/run.mjs` — Playwright, disposable Chromium profile, stub OCWP daemon | the **built** bundle: connect → sign → reject, HTTP 402 passthrough |
 | Conformance | `extension/vectors/ocwp-v1/*.json`, run by both ends | wire-level parity (§9.4) |
@@ -1065,7 +1060,9 @@ alias compatibility, conformance vectors.
   e2e evidence (`extension/e2e/verification/e2e.json`) is uploaded on every run
   so a failure can be inspected rather than guessed at.
 - `just ci` / `make ci` run `lint test build ext-build ext-test ext-conformance
-  ext-e2e`. The Rust gates (`lint`, `test`, `build`) are unchanged.
+  ext-e2e ext-pack`. The Rust gates (`lint`, `test`, `build`) are unchanged.
+  `ext-pack` is part of the recipe because the store-ready zip is the shipped
+  artifact: a build that compiles but cannot be packaged is not a passing build.
 - **Versioning**: extension version is independent semver; `oc_hello`
   `protocol_version` governs client/server compatibility.
 
@@ -1076,13 +1073,43 @@ alias compatibility, conformance vectors.
 | Phase | Deliverable | Exit criteria | Status |
 |---|---|---|---|
 | P0 | This design document | Reviewed and approved | Done |
-| P1 | Daemon OCWP core: `oc_hello`, session store, per-request wallet/account selection, policy preview + enforcement on the sign path, error mapping, Origin/Host/CORS hardening, conformance vectors + Rust tests | `cargo test` green; `ledgerflow_*` aliases unchanged; vectors pass both ends | Done |
-| P2 | Extension skeleton: manifest, WXT build, `protocol.ts`, `request-policy.ts`, storage layer, daemon client, provider injection (EIP-1193 + EIP-6963), content bridge | `npm run build` + typecheck; sender-matrix tests green | Done |
-| P3 | Consent queue + notification UI + popup (unlock, accounts, sites, activity), decode/policy-view modules, `oc_rpc` proxy | Consent invariant tests green per method | Done |
-| P4 | Security + e2e suites, evidence JSON, `extension/README.md`, `extension/SECURITY.md`, CI + Justfile wiring | `just ci` green end-to-end | Done |
-| P5 | Multi-end completion: mobile pairing spec + server token flow documented; optional Solana provider module over the same queue | Design docs only for mobile (implementation tracked separately) | Open |
+| P1 | Daemon OCWP core | `cargo test` green; `ledgerflow_*` aliases unchanged; vectors pass both ends | Done |
+| P2 | Extension skeleton | `npm run build` + typecheck; sender-matrix tests green | Done |
+| P3 | Consent queue + notification UI + popup | Consent invariant tests green per method | Done |
+| P4 | Security + e2e suites, evidence JSON, README/SECURITY, CI + Justfile wiring | `just ci` green end-to-end | Done |
+| P5 | Multi-end completion: mobile pairing spec + server token flow documented; optional Solana provider | Design docs only for mobile | **Open** |
 
----
+### 11.1 Review pass (added after P4)
+
+A review of the document against the implementation found defects on both
+ends. All are closed; the notable ones and the rules that now pin them:
+
+| Finding | Resolution | Guard |
+|---|---|---|
+| dApp `chainId` dropped → signed on the wallet's active chain | `account_id` bound to the tx's chain; daemon rejects a mismatch | INV-14 / INV-17 |
+| EIP-1193 camelCase fee/gas/input fields ignored → fee ceiling discarded | Lossless mapping in `lib/evm-tx.ts`; both spellings accepted | INV-14 |
+| `oc_policy_preview` always evaluated an empty request → always "allow" | preview and enforcement share `project_tx()` | INV-15 |
+| OCWP signing wrote no audit entry (INV-12 was false) | every sign/send/authorization records to the strong channel | INV-12 |
+| step-up challenge not bound to its session | `StepUpStore`: single-use, 120 s TTL, session-scoped | INV-16 |
+| sessions usable from any allowlisted origin | session records the unlocking origin | INV-9 |
+| `personal_sign` returned an object, not a signature | returns the signature string | EIP-1193 |
+| non-EVM accounts surfaced in `eth_*` results | EVM-only filtering | v1 scope (§1.2) |
+| chain selection was global — one dApp moved every dApp's chain | per-origin chain binding | §4.3 / §4.10 |
+| step-up private JWK persisted in `chrome.storage.local` | `chrome.storage.session` only; §3.5 records the deviation | INV-1 |
+| consent UI had no policy badge and never called `oc_simulate` | badges + simulation computed at enqueue time | INV-15 |
+| "first-time recipient" / "value over threshold" / "unverified contract" badges absent | `lib/consent/policy-view.ts` | §4.8 |
+| popup offered a hardcoded chain list and no balances | chains and balances come from the daemon | §4.8 / §4.10 |
+| `accountsChanged` broadcast to every tab | addressed to connected sites only | §4.9 |
+| `protocol_version` checked only in `oc_hello` | a negotiated mismatch blocks every later method | §3.3 |
+| e2e / conformance / pack absent from CI; test suite leaked a rejection | all wired; unhandled rejection fixed | §10 |
+
+Three further defects were introduced *by* the fixes and caught by the tests
+written alongside them: CAIP-2 `eip155:` references were parsed as hex
+(`eip155:8453` read as chain 33875), `StepUpStore::consume` let a foreign
+session destroy another session's pending challenge, and `field()` stopped its
+null-search on the first key so a real `maxFeePerGas` could be hidden by a
+`null`. The guard against the last class is the rule that a request's field
+search continues past explicit `null`.
 
 ## 12. Decisions (ADR-style)
 

@@ -85,7 +85,7 @@ docs:
 	cargo doc --no-deps --open
 
 # Full CI check (lint + test + build + extension suite incl. e2e + conformance).
-ci: lint test build ext-build ext-test ext-conformance ext-e2e
+ci: lint test build ext-build ext-test ext-conformance ext-e2e ext-pack
 
 setup:
 	cargo install cargo-sort

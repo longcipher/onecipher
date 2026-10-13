@@ -19,6 +19,11 @@ import {
 } from '../protocol';
 import { toRpcError } from '../consent/queue';
 import type { ConsentQueue } from '../consent/queue';
+import {
+  normalizeAddress,
+  transactionRiskBadges,
+  type RiskContext,
+} from '../consent/policy-view';
 import { providerOrigin, requirePopupSender, type SenderLike } from '../request-policy';
 import type { OcwpClient } from '../daemon/client';
 import type { ExtensionConfig } from '../storage/config';
@@ -330,6 +335,60 @@ async function isSessionFresh(ctx: RouterContext, session: StoredSession): Promi
   }
 }
 
+/// Everything `policy-view.ts` needs that the request itself does not carry.
+/// Sourced from `oc:config`, which is user-editable and local-only.
+async function riskContext(ctx: RouterContext): Promise<RiskContext> {
+  const config = await ctx.stores.config.load();
+  return {
+    knownRecipients: config.knownRecipients.map(normalizeAddress),
+    warnThresholdWei: config.warnThresholdWei,
+    verifiedContracts: config.verifiedContracts.map(normalizeAddress),
+  };
+}
+
+/// Every chain the popup should offer: the wallet's EVM chains, the active
+/// chain (even without an account), and any user-added custom chain.
+function balanceChains(accounts: OcAccount[], activeChainId: string): string[] {
+  const ids = accounts.map((account) => account.chain_id);
+  for (const id of [activeChainId, ...DEFAULT_CHAIN_FALLBACKS]) {
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/// A short built-in list used only when the daemon chain registry is
+/// unreachable, so the popup is never an unselectable single option. The
+/// registry itself remains authoritative (design §4.10).
+const DEFAULT_CHAIN_FALLBACKS = ['eip155:1', 'eip155:8453'];
+
+/// Best-effort native balance for one chain. A daemon or RPC failure returns
+/// `null` rather than propagating: a broken balance read must not break the
+/// popup, and `null` renders as "—" instead of a wrong number.
+async function tryBalance(
+  ctx: RouterContext,
+  session: StoredSession,
+  chainId: string,
+  address: string,
+): Promise<{ chainId: string; wei: string | null }> {
+  try {
+    const wei = await ctx.daemon.rpc(
+      session.sessionId,
+      `chain:${chainId}`,
+      chainId,
+      'eth_getBalance',
+      [address, 'latest'],
+    );
+    return { chainId, wei: typeof wei === 'string' ? wei : null };
+  } catch {
+    return { chainId, wei: null };
+  }
+}
+
+function evmAddressOf(accounts: OcAccount[]): string {
+  const evm = accounts.find((account) => account.chain_id.startsWith('eip155:'));
+  return evm?.address ?? '0x0000000000000000000000000000000000000000';
+}
+
 /// Best-effort account list for UI snapshots: a daemon hiccup renders an
 /// empty list rather than breaking the popup. Never used on a signing path.
 async function trySessionEvmAccounts(
@@ -398,7 +457,7 @@ export function createConsentExecutor(ctx: RouterContext): import('../consent/qu
     },
     async assess(action: PendingActionView): Promise<ConsentAssessment> {
       const session = await ctx.stores.session.load();
-      if (!session) return { policy: null, simulation: null };
+      if (!session) return { policy: null, simulation: null, riskBadges: [] };
       const { method, params } = action.ocwp;
       const chainId = String(params['account_id'] ?? '');
 
@@ -443,7 +502,13 @@ export function createConsentExecutor(ctx: RouterContext): import('../consent/qu
           simulation = null;
         }
       }
-      return { policy, simulation };
+
+      // Risk badges (design §4.1 `policy-view.ts`, §4.8): first-time recipient,
+      // value above the user's warn threshold, unverified contract. Computed
+      // here so the card shows them before the user clicks, not afterwards.
+      const tx = (params['transaction'] ?? null) as Record<string, unknown> | null;
+      const riskBadges = transactionRiskBadges(tx, await riskContext(ctx));
+      return { policy, simulation, riskBadges, tx };
     },
     async execute(action: PendingActionView): Promise<unknown> {
       const session = await ctx.stores.session.load();
@@ -489,6 +554,20 @@ export function createConsentExecutor(ctx: RouterContext): import('../consent/qu
           method === 'oc_send_transaction'
             ? await ctx.daemon.sendTransaction(session.sessionId, String(params['account_id']), transaction)
             : await ctx.daemon.signTransaction(session.sessionId, String(params['account_id']), transaction);
+        // A successful broadcast makes the recipient known, so the NEXT
+        // transfer to it does not raise a first-time-recipient badge. Only
+        // successful sends are recorded — a failed one teaches nothing.
+        if (method === 'oc_send_transaction' && result.tx_hash !== undefined) {
+          const recipient = transaction['to'];
+          if (typeof recipient === 'string') {
+            const config = await ctx.stores.config.load();
+            const normalized = normalizeAddress(recipient);
+            if (!config.knownRecipients.includes(normalized)) {
+              config.knownRecipients = [...config.knownRecipients, normalized];
+              await ctx.stores.config.save(config);
+            }
+          }
+        }
         if (method === 'oc_send_transaction') return result.tx_hash ?? null;
         return result.raw_transaction ?? null;
       }
@@ -525,15 +604,38 @@ export async function handlePopupRequest(
             ? error.message
             : ((error as { message?: string }).message ?? String(error));
       }
+      // Balances and the chain list both come from the daemon (design §4.8
+      // "account list with balances", §4.10 "the daemon owns the chain
+      // registry"), so a custom chain added via wallet_addEthereumChain shows
+      // up instead of being dropped for want of a hardcoded entry.
+      const chains = balanceChains(accounts, config.activeChainId);
+      const balances = unlocked
+        ? await Promise.all(
+            chains.map((chainId) =>
+              tryBalance(ctx, session, chainId, evmAddressOf(accounts)),
+            ),
+          )
+        : [];
       const state: PopupState = {
         daemonReachable: hello !== null,
         daemonError,
         protocolVersion: hello?.protocol_version,
-        session: unlocked ? { sessionId: session.sessionId, walletId: session.walletId, wallet: session.wallet, expiresAtUnix: session.expiresAtUnix } : null,
+        session: unlocked
+          ? {
+              sessionId: session.sessionId,
+              walletId: session.walletId,
+              wallet: session.wallet,
+              expiresAtUnix: session.expiresAtUnix,
+            }
+          : null,
         accounts,
         activeChainId: config.activeChainId,
         sites: await ctx.stores.sites.list(),
         pendingActions: ctx.queue.list(),
+        chains,
+        balances,
+        warnThresholdWei: config.warnThresholdWei,
+        verifiedContracts: config.verifiedContracts,
       };
       return state;
     }
