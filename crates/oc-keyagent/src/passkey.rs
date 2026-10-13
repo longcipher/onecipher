@@ -300,6 +300,23 @@ pub struct StoredPasskeyPubkey {
     pub wallet_id: String,
     /// Unix timestamp (seconds) when the passkey was registered.
     pub registered_at: u64,
+    /// WebAuthn relying-party ID this credential belongs to.
+    ///
+    /// OneCipher's simplified passkey protocol (R30) verifies signatures over
+    /// `challenge || credential_id`, so the RP ID does not participate in
+    /// verification; it records which RP ID a client MUST use when creating
+    /// the credential (the Web UI uses `localhost`; the browser extension uses
+    /// its own extension ID). Records written before this field existed load
+    /// as `"localhost"`.
+    #[serde(default = "StoredPasskeyPubkey::default_rp_id")]
+    pub rp_id: String,
+}
+
+impl StoredPasskeyPubkey {
+    /// Default RP ID for records predating the field (the Web UI's RP ID).
+    pub fn default_rp_id() -> String {
+        "localhost".to_string()
+    }
 }
 
 /// Persistent, file-backed store for registered Passkey public keys.
@@ -430,6 +447,7 @@ mod tests {
             public_key: vec![0u8; 32],
             wallet_id: "w1".to_string(),
             registered_at: 0,
+            rp_id: StoredPasskeyPubkey::default_rp_id(),
         }
     }
 

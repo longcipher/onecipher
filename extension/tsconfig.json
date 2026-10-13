@@ -1,0 +1,11 @@
+{
+  "extends": "./.wxt/tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "jsx": "react-jsx",
+    "noUncheckedIndexedAccess": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": [".wxt/wxt.d.ts", "src", "tests", "e2e", "scripts", "*.ts", "*.mts"],
+  "exclude": ["node_modules", ".output"]
+}

@@ -154,6 +154,46 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
 
+  extension:
+    name: Browser Extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+        working-directory: extension
+      - run: npm run typecheck
+        working-directory: extension
+      - run: npm run test
+        working-directory: extension
+      - run: npm run build
+        working-directory: extension
+      # OCWP conformance vectors must hold on BOTH ends (design §9.4). The TS
+      # half re-runs under `npm run test`, so the daemon half is what this adds.
+      - name: OCWP conformance (Rust half)
+        run: cargo test -p oc-cli --bin onecipher vectors
+      # Playwright consent e2e: real Chromium, disposable profile, stub daemon.
+      # `channel: chromium` needs a browser fetched explicitly.
+      - name: Install Chromium for the consent e2e
+        run: npx playwright install --with-deps chromium
+        working-directory: extension
+      - name: Consent e2e
+        run: npm run test:e2e
+        working-directory: extension
+      # The e2e evidence file is the auditable record (design §9.5); upload it
+      # so a failed run can be inspected instead of guessed at.
+      - name: Upload consent e2e evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-e2e-evidence
+          path: extension/e2e/verification/e2e.json
+          if-no-files-found: warn
+
   build:
     name: Build
     runs-on: ubuntu-latest

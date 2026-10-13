@@ -349,6 +349,7 @@ pub(crate) fn run_daemon() -> Result<(), CliError> {
                                     credential_id: cred_id.to_string(),
                                     algorithm: algorithm.to_string(),
                                     public_key: pubkey.to_vec(),
+                                    rp_id: String::new(),
                                 },
                             )),
                         };
@@ -450,10 +451,12 @@ pub(crate) fn run_daemon() -> Result<(), CliError> {
             }
         };
 
-        // --- WalletSigner JSON-RPC server (LedgerFlow WalletSigner, daemon-resident) ---
+        // --- WalletSigner JSON-RPC server (LedgerFlow WalletSigner + OCWP, daemon-resident) ---
         // Disabled by default. When enabled via OC_WALLET_RPC_LISTEN, bind a
-        // loopback-only WalletSigner endpoint for a local LedgerFlow signer.
-        let (wallet_rpc_listen, wallet_rpc_wallet, wallet_rpc_index) =
+        // loopback-only WalletSigner endpoint for a local LedgerFlow signer and
+        // the OCWP browser-extension surface (extension IDs from
+        // OC_WALLET_RPC_EXTENSION_IDS).
+        let (wallet_rpc_listen, wallet_rpc_wallet, wallet_rpc_index, wallet_rpc_settings) =
             crate::commands::wallet_rpc::daemon_config();
         let wallet_rpc_handle: Option<tokio::task::JoinHandle<()>> = {
             const DISABLED: &str = "off";
@@ -467,8 +470,12 @@ pub(crate) fn run_daemon() -> Result<(), CliError> {
                             wallet_rpc_index,
                         );
                         Some(tokio::spawn(async move {
-                            if let Err(e) =
-                                crate::commands::wallet_rpc::serve_async(state, parsed).await
+                            if let Err(e) = crate::commands::wallet_rpc::serve_async(
+                                state,
+                                parsed,
+                                wallet_rpc_settings,
+                            )
+                            .await
                             {
                                 eprintln!("WalletSigner server error: {e}");
                             }

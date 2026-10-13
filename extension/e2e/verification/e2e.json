@@ -1,0 +1,11 @@
+{
+  "checkedAt": "2026-10-13T05:55:31.642Z",
+  "profile": "disposable and removed",
+  "installedInUserProfile": false,
+  "normalConnectionApproval": true,
+  "signingApprovalAndRejection": true,
+  "rejectReturns4001": true,
+  "http402Preserved": true,
+  "captures": 0,
+  "daemonCalls": 28
+}

@@ -1138,7 +1138,8 @@ pub(crate) enum WalletCommands {
 
 #[derive(Subcommand)]
 pub(crate) enum WalletRpcCommands {
-    /// Start the loopback JSON-RPC 2.0 server (WalletSigner for ledgerflow)
+    /// Start the loopback JSON-RPC 2.0 server (WalletSigner for ledgerflow +
+    /// OCWP for the browser extension)
     Serve {
         /// Bind address (default: 127.0.0.1:18080)
         #[arg(long, default_value = "127.0.0.1:18080")]
@@ -1149,6 +1150,19 @@ pub(crate) enum WalletRpcCommands {
         /// Account index for HD derivation (default: 0)
         #[arg(long, default_value = "0")]
         index: u32,
+        /// Browser extension ID allowed to call oc_* methods (repeatable;
+        /// default: none — OCWP is denied until an extension is allowlisted)
+        #[arg(long = "allow-extension")]
+        allow_extensions: Vec<String>,
+        /// OCWP session absolute TTL seconds (default 900)
+        #[arg(long)]
+        session_ttl_secs: Option<u64>,
+        /// OCWP session idle TTL seconds (default 300)
+        #[arg(long)]
+        session_idle_secs: Option<u64>,
+        /// Disable the passkey step-up requirement for EIP-7702 signing
+        #[arg(long, default_value_t = false)]
+        no_passkey_step_up: bool,
     },
 }
 

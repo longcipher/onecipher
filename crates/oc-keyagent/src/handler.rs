@@ -1866,6 +1866,11 @@ fn handle_register_passkey(
         public_key: req.public_key.clone(),
         wallet_id: req.wallet_id.clone(),
         registered_at: now_unix(),
+        rp_id: if req.rp_id.is_empty() {
+            StoredPasskeyPubkey::default_rp_id()
+        } else {
+            req.rp_id.clone()
+        },
     };
 
     if let Err(e) = store.register(&req.credential_id, stored) {

@@ -7,7 +7,7 @@
 # List targets:  make help
 # Run a target:  make <target>
 
-.PHONY: help format fix lint test test-all mutants mutants-incremental e2e build release check clean docs ci setup audit r12-check deps-duplicates deps-check no-std no-std-thumbv7m skill-check makefile-check deny security
+.PHONY: help format fix lint test test-all mutants mutants-incremental e2e ext-build ext-test ext-e2e ext-conformance ext-pack build release check clean docs ci setup audit r12-check deps-duplicates deps-check no-std no-std-thumbv7m skill-check makefile-check deny security
 
 help:
 	@echo "OneCipher make targets (mirror of Justfile):"
@@ -48,6 +48,27 @@ e2e:
 	cargo build --release --bin onecipher
 	./scripts/e2e.sh
 
+ext-build:
+	cd extension && npm run build
+
+# Typecheck + unit tests for the browser extension.
+ext-test:
+	cd extension && npm run typecheck
+	cd extension && npm run test
+
+# Playwright consent e2e against the stub daemon (disposable profile).
+ext-e2e:
+	cd extension && npm run test:e2e
+
+# OCWP conformance vectors — same JSON fixtures on both ends (design §9.4).
+ext-conformance:
+	cd extension && npx vitest run tests/conformance.test.ts
+	RUSTC_WRAPPER= cargo test -p oc-cli --bin onecipher vectors
+
+# Store-ready zip of the extension.
+ext-pack:
+	cd extension && npm run zip
+
 build:
 	cargo build --workspace
 
@@ -63,7 +84,8 @@ clean:
 docs:
 	cargo doc --no-deps --open
 
-ci: lint test build
+# Full CI check (lint + test + build + extension suite incl. e2e + conformance).
+ci: lint test build ext-build ext-test ext-conformance ext-e2e
 
 setup:
 	cargo install cargo-sort

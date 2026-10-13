@@ -2015,6 +2015,7 @@ fn test_keyagent_real_uds_session_key_roundtrip() {
             credential_id: "cred-b1".to_string(),
             algorithm: "ed25519".to_string(),
             public_key: vk_bytes,
+            rp_id: String::new(),
         })),
     };
     let resp = client.send_request(&reg_req).unwrap();
@@ -2562,8 +2563,7 @@ fn test_wc_probe_against_local_mock_ws_relay() {
         let key = req
             .lines()
             .find(|l| l.to_ascii_lowercase().starts_with("sec-websocket-key:"))
-            .map(|l| l.split(':').nth(1).unwrap_or("").trim().to_string())
-            .unwrap_or_default();
+            .map_or_default(|l| l.split(':').nth(1).unwrap_or("").trim().to_string());
         let accept = ws_accept_key(&key);
         let handshake = format!(
             "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"

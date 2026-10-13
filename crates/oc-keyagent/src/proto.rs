@@ -482,6 +482,10 @@ pub struct RegisterPasskeyRequest {
     /// Raw public key bytes.
     #[prost(bytes, tag = "4")]
     pub public_key: Vec<u8>,
+    /// WebAuthn relying-party ID this credential belongs to (empty = the
+    /// default `localhost`, used by the Web UI).
+    #[prost(string, tag = "5")]
+    pub rp_id: String,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]

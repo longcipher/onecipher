@@ -487,8 +487,22 @@ fn dispatch_agent_secret(subcommand: cli::AgentSecretCommands) -> Result<(), Cli
 
 fn dispatch_wallet_rpc(subcommand: cli::WalletRpcCommands) -> Result<(), CliError> {
     match subcommand {
-        cli::WalletRpcCommands::Serve { listen, wallet, index } => {
-            commands::wallet_rpc::serve(&listen, &wallet, index)
+        cli::WalletRpcCommands::Serve {
+            listen,
+            wallet,
+            index,
+            allow_extensions,
+            session_ttl_secs,
+            session_idle_secs,
+            no_passkey_step_up,
+        } => {
+            let settings = commands::wallet_rpc::ocwp::OcwpSettings {
+                extension_ids: allow_extensions,
+                session_ttl_secs,
+                session_idle_secs,
+                require_passkey_eip7702: !no_passkey_step_up,
+            };
+            commands::wallet_rpc::serve(&listen, &wallet, index, settings)
         }
     }
 }

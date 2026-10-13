@@ -70,6 +70,7 @@ impl TestPasskey {
             credential_id: self.credential_id.clone(),
             algorithm: "ed25519".to_string(),
             public_key: self.signing_key.verifying_key().to_bytes().to_vec(),
+            rp_id: String::new(),
         };
         let resp = dispatch(KeyAgentRequestKind::RegisterPasskey(reg));
         assert!(!resp.is_error(), "register failed: {resp:?}");
@@ -134,6 +135,7 @@ fn unbounded_wildcard_passkey_registration_is_rejected() {
         credential_id: pk.credential_id.clone(),
         algorithm: "ed25519".to_string(),
         public_key: pk.signing_key.verifying_key().to_bytes().to_vec(),
+        rp_id: String::new(),
     };
     let resp = dispatch(KeyAgentRequestKind::RegisterPasskey(reg));
     assert!(resp.is_error(), "empty wallet_id registration must be rejected");

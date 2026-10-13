@@ -62,6 +62,37 @@ e2e bin="onecipher":
     ./scripts/e2e.sh
 
 # ============================================================
+# Browser extension (extension/ — WXT + React, OCWP client)
+# ============================================================
+
+# Build the browser extension (WXT → extension/.output/chrome-mv3).
+ext-build:
+    cd extension && npm run build
+
+# Typecheck + unit tests for the browser extension.
+ext-test:
+    cd extension && npm run typecheck
+    cd extension && npm run test
+
+# Playwright consent e2e against the stub OCWP daemon (disposable profile).
+ext-e2e:
+    cd extension && npm run test:e2e
+
+# OCWP conformance vectors — same JSON fixtures on both ends.
+ext-conformance:
+    cd extension && npx vitest run tests/conformance.test.ts
+    RUSTC_WRAPPER= cargo test -p oc-cli --bin onecipher vectors
+
+# OCWP conformance vectors — same JSON fixtures on both ends (design §9.4).
+ext-conformance:
+    cd extension && npx vitest run tests/conformance.test.ts
+    RUSTC_WRAPPER= cargo test -p oc-cli --bin onecipher vectors
+
+# Store-ready zip of the extension.
+ext-pack:
+    cd extension && npm run zip
+
+# ============================================================
 # Build
 # ============================================================
 
@@ -89,8 +120,8 @@ clean:
 docs:
     cargo doc --no-deps --open
 
-# Full CI check (lint + test + build).
-ci: lint test build
+# Full CI check (lint + test + build + extension suite incl. e2e + conformance).
+ci: lint test build ext-build ext-test ext-conformance ext-e2e
 
 # Install all required development tools.
 setup:

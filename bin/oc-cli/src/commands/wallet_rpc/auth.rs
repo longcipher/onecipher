@@ -92,6 +92,7 @@ pub(crate) fn auth_params_for_wallet(binding_wallet_id: &str, credential_id: &st
                 public_key,
                 wallet_id: binding_wallet_id.to_string(),
                 registered_at: 0,
+                rp_id: oc_keyagent::passkey::StoredPasskeyPubkey::default_rp_id(),
             },
         )
         .expect("register passkey");

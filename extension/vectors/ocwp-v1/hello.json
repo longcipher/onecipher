@@ -1,0 +1,20 @@
+{
+  "name": "hello shape",
+  "method": "oc_hello",
+  "expected_result_keys": [
+    "protocol_version",
+    "daemon_version",
+    "chains",
+    "features",
+    "extension_ids"
+  ],
+  "expected_protocol_version": 1,
+  "expected_features": [
+    "sessions",
+    "sites",
+    "chain-registry",
+    "policy-preview",
+    "rpc-proxy",
+    "passkey-step-up"
+  ]
+}

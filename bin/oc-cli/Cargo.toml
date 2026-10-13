@@ -55,6 +55,7 @@ bs58 = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 clap_complete = { workspace = true }
 crossterm = { workspace = true }
+dashmap = { workspace = true }
 dirs = { workspace = true }
 ed25519-dalek = { workspace = true }
 eyre = { workspace = true }

@@ -62,7 +62,9 @@ impl Mnemonic {
     /// Get the mnemonic phrase as SecretBytes.
     pub fn phrase(&self) -> Result<SecretBytes, MnemonicError> {
         let phrase_str = self.inner.to_phrase();
-        SecretBytes::from_vec(phrase_str.into_bytes())
+        // `to_phrase` returns `Zeroizing<String>`; copy the bytes instead of
+        // moving out of the zeroizing guard so the original is wiped on drop.
+        SecretBytes::from_vec(phrase_str.as_bytes().to_vec())
             .map_err(|e| MnemonicError::MlockFailed(e.to_string()))
     }
 

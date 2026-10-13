@@ -29,6 +29,7 @@
 
 mod auth;
 mod handlers;
+pub(crate) mod ocwp;
 mod state;
 
 use std::net::SocketAddr;
@@ -36,7 +37,12 @@ use std::net::SocketAddr;
 use axum::{
     Json,
     extract::State,
-    http::StatusCode,
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+        },
+    },
     response::{IntoResponse, Response},
     routing::post,
 };
@@ -211,56 +217,122 @@ async fn generate_challenge_async(params: Value) -> Result<Value, state::RpcErro
     run_blocking(move || auth::handle_generate_challenge(&params)).await
 }
 
+/// CORS preflight (OPTIONS /): validate the connection like a POST, then let
+/// the middleware attach the Allow-Origin headers.
+async fn preflight(State(app): State<ocwp::AppState>, headers: HeaderMap) -> Response {
+    match app.validate_connection(&headers) {
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => StatusCode::FORBIDDEN.into_response(),
+    }
+}
+
+/// Attach CORS headers for allowlisted extension origins only. No wildcard:
+/// the origin is echoed verbatim after the allowlist check (design §3.4).
+async fn cors_middleware(
+    State(app): State<ocwp::AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let origin = req
+        .headers()
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let mut resp = next.run(req).await;
+    if let Some(origin) = origin &&
+        let Some(id) = origin
+            .strip_prefix("chrome-extension://")
+            .filter(|id| !id.is_empty() && !id.contains('/')) &&
+        app.extension_ids.iter().any(|allowed| allowed == id)
+    {
+        if let Ok(value) = HeaderValue::from_str(&origin) {
+            resp.headers_mut().insert(ACCESS_CONTROL_ALLOW_ORIGIN, value);
+        }
+        resp.headers_mut()
+            .insert(ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("content-type"));
+        resp.headers_mut()
+            .insert(ACCESS_CONTROL_ALLOW_METHODS, HeaderValue::from_static("POST, OPTIONS"));
+    }
+    resp
+}
+
 /// Single entry point: POST body is a JSON-RPC 2.0 request. Dispatches to the
-/// `ledgerflow_*` methods in [`handlers`], gating the stateful ones behind
-/// [`auth::require_authorization`].
-async fn rpc(State(state): State<SignerState>, Json(req): Json<state::RpcRequest>) -> Response {
+/// `ledgerflow_*` methods in [`handlers`] (per-request passkey authorization)
+/// and to the `oc_*` methods in [`ocwp::handlers`] (session + connection
+/// validation). Unknown methods fail closed.
+async fn rpc(
+    State(app): State<ocwp::AppState>,
+    headers: HeaderMap,
+    Json(req): Json<state::RpcRequest>,
+) -> Response {
     if req.jsonrpc() != "2.0" {
         return error_response(req.id(), state::RpcError::new(-32600, "invalid JSON-RPC version"));
     }
     let id = req.id().clone();
-    let result = match req.method() {
-        "ledgerflow_generate_challenge" => match auth::validate_params(req.params()) {
-            Ok(p) => generate_challenge_async(p).await,
-            Err(e) => Err(e),
-        },
-        "ledgerflow_keys" => match auth::validate_params(req.params()) {
-            Ok(p) => match authorize_async(&state, &p).await {
-                Ok(()) => keys_async(state.clone()).await,
+    // INV-9: the Host header must be loopback for EVERY method (anti
+    // DNS-rebinding), including the ledgerflow aliases.
+    if let Err(e) = ocwp::check_host(&headers) {
+        return error_response(&id, e.into());
+    }
+    let result = if req.method().starts_with("oc_") {
+        // OCWP surface: connection validation + session-scoped handlers.
+        match app.validate_connection(&headers) {
+            Ok(origin) => {
+                let params = req.params().clone().unwrap_or_else(|| json!({}));
+                let method = req.method().to_string();
+                let worker = app.clone();
+                run_blocking(move || {
+                    ocwp::handlers::dispatch(&worker, &method, &params, &origin)
+                        .map_err(state::RpcError::from)
+                })
+                .await
+            }
+            Err(e) => Err(e.into()),
+        }
+    } else {
+        match req.method() {
+            "ledgerflow_generate_challenge" => match auth::validate_params(req.params()) {
+                Ok(p) => generate_challenge_async(p).await,
                 Err(e) => Err(e),
             },
-            Err(e) => Err(e),
-        },
-        "ledgerflow_sign" => match auth::validate_params(req.params()) {
-            Ok(p) => match authorize_async(&state, &p).await {
-                Ok(()) => sign_async(state.clone(), p).await,
+            "ledgerflow_keys" => match auth::validate_params(req.params()) {
+                Ok(p) => match authorize_async(&app.signer, &p).await {
+                    Ok(()) => keys_async(app.signer.clone()).await,
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
             },
-            Err(e) => Err(e),
-        },
-        "ledgerflow_sign_payment" => match auth::validate_params(req.params()) {
-            Ok(p) => match authorize_async(&state, &p).await {
-                Ok(()) => sign_payment_async(state.clone(), p).await,
+            "ledgerflow_sign" => match auth::validate_params(req.params()) {
+                Ok(p) => match authorize_async(&app.signer, &p).await {
+                    Ok(()) => sign_async(app.signer.clone(), p).await,
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
             },
-            Err(e) => Err(e),
-        },
-        // Intent hot path (read-only pre-flight, no auth — same adapter as
-        // WC/HTTP-RPC; fail-closed without an RPC endpoint).
-        "ledgerflow_intentSimulate" => match auth::validate_params(req.params()) {
-            Ok(p) => intent_simulate_async(p).await,
-            Err(e) => Err(e),
-        },
-        // Intent execution (auth-gated, local loopback signing via the C13
-        // `IntentSigner` boundary).
-        "ledgerflow_intentExecute" => match auth::validate_params(req.params()) {
-            Ok(p) => match authorize_async(&state, &p).await {
-                Ok(()) => intent_execute_async(state.clone(), p).await,
+            "ledgerflow_sign_payment" => match auth::validate_params(req.params()) {
+                Ok(p) => match authorize_async(&app.signer, &p).await {
+                    Ok(()) => sign_payment_async(app.signer.clone(), p).await,
+                    Err(e) => Err(e),
+                },
                 Err(e) => Err(e),
             },
-            Err(e) => Err(e),
-        },
-        other => Err(state::RpcError::new(-32601, format!("method not found: {other}"))),
+            // Intent hot path (read-only pre-flight, no auth — same adapter as
+            // WC/HTTP-RPC; fail-closed without an RPC endpoint).
+            "ledgerflow_intentSimulate" => match auth::validate_params(req.params()) {
+                Ok(p) => intent_simulate_async(p).await,
+                Err(e) => Err(e),
+            },
+            // Intent execution (auth-gated, local loopback signing via the C13
+            // `IntentSigner` boundary).
+            "ledgerflow_intentExecute" => match auth::validate_params(req.params()) {
+                Ok(p) => match authorize_async(&app.signer, &p).await {
+                    Ok(()) => intent_execute_async(app.signer.clone(), p).await,
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            },
+            other => Err(state::RpcError::new(-32601, format!("method not found: {other}"))),
+        }
     };
 
     match result {
@@ -286,22 +358,27 @@ fn error_response(id: &Value, err: state::RpcError) -> Response {
 /// Disabled by default. When `OC_WALLET_RPC_LISTEN` is set to a loopback
 /// address, the daemon exposes the WalletSigner server there for wallet
 /// `default`, index 0 unless overridden with `OC_WALLET_RPC_WALLET` /
-/// `OC_WALLET_RPC_INDEX`.
-pub(crate) fn daemon_config() -> (String, String, u32) {
+/// `OC_WALLET_RPC_INDEX`. OCWP settings come from `ocwp::settings_from_env`.
+pub(crate) fn daemon_config() -> (String, String, u32, ocwp::OcwpSettings) {
     let listen = std::env::var("OC_WALLET_RPC_LISTEN").unwrap_or_else(|_| "off".into());
     let wallet = std::env::var("OC_WALLET_RPC_WALLET").unwrap_or_else(|_| "default".to_string());
     let index = std::env::var("OC_WALLET_RPC_INDEX").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-    (listen, wallet, index)
+    (listen, wallet, index, ocwp::settings_from_env())
 }
 
 /// Start the loopback WalletSigner JSON-RPC server and block until it exits.
 ///
 /// CLI entry point: validates the loopback bind address, builds the signer
 /// state, then drives the serving future on the shared runtime.
-pub(crate) fn serve(listen: &str, wallet: &str, index: u32) -> Result<(), CliError> {
+pub(crate) fn serve(
+    listen: &str,
+    wallet: &str,
+    index: u32,
+    ocwp_settings: ocwp::OcwpSettings,
+) -> Result<(), CliError> {
     let parsed = parse_loopback(listen)?;
     let state = SignerState::new(wallet, index);
-    crate::shared_runtime().block_on(serve_async(state, parsed))
+    crate::shared_runtime().block_on(serve_async(state, parsed, ocwp_settings))
 }
 
 /// Parse and validate a loopback-only bind address (R12c/R12e).
@@ -323,17 +400,27 @@ pub(crate) fn parse_loopback(listen: &str) -> Result<SocketAddr, CliError> {
 /// This is the daemon-reusable core: it binds the loopback socket and serves
 /// the axum router without driving its own runtime, so callers (the CLI
 /// `serve` command or the daemon's async task loop) can control its lifetime.
-pub(crate) async fn serve_async(state: SignerState, parsed: SocketAddr) -> Result<(), CliError> {
-    let app = axum::Router::new().route("/", post(rpc)).with_state(state.clone());
+pub(crate) async fn serve_async(
+    state: SignerState,
+    parsed: SocketAddr,
+    ocwp_settings: ocwp::OcwpSettings,
+) -> Result<(), CliError> {
+    let app_state = ocwp::AppState::new(state, ocwp_settings).map_err(CliError::InvalidArgs)?;
+    let allowlisted = app_state.extension_ids.len();
+    let router = axum::Router::new()
+        .route("/", post(rpc).options(preflight))
+        .layer(axum::middleware::from_fn_with_state(app_state.clone(), cors_middleware))
+        .with_state(app_state.clone());
 
     let listener = tokio::net::TcpListener::bind(parsed).await.map_err(CliError::Io)?;
     eprintln!(
-        "WalletSigner JSON-RPC server listening on http://{} (wallet '{}', index {})",
+        "WalletSigner JSON-RPC server listening on http://{} (wallet '{}', index {}, OCWP extensions allowlisted: {})",
         listener.local_addr().map_err(CliError::Io)?,
-        state.wallet(),
-        state.index()
+        app_state.signer.wallet(),
+        app_state.signer.index(),
+        allowlisted
     );
-    axum::serve(listener, app).await.map_err(CliError::Io)?;
+    axum::serve(listener, router).await.map_err(CliError::Io)?;
     Ok(())
 }
 

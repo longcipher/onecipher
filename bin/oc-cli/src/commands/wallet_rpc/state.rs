@@ -1,7 +1,10 @@
 //! [`SignerState`] (signing-key lifecycle) and the JSON-RPC 2.0 wire types for
 //! the loopback WalletSigner server.
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use oc_core::ChainType;
 use serde::{Deserialize, Serialize};
@@ -115,6 +118,12 @@ impl SignerState {
         &self.wallet
     }
 
+    /// Borrow the vault path override (test isolation only; `None` in
+    /// production, where the default `~/.onecipher` vault applies).
+    pub(crate) fn vault_path(&self) -> Option<&Path> {
+        self.vault_path.as_ref().map(|p| p.as_path())
+    }
+
     /// Borrow the configured HD key index (for diagnostics only).
     pub(crate) fn index(&self) -> u32 {
         self.index
@@ -171,11 +180,21 @@ impl RpcRequest {
 pub(crate) struct RpcError {
     code: i32,
     message: String,
+    /// Optional structured detail (e.g. `{"require_passkey": true}`). Omitted
+    /// from the wire when absent so existing `ledgerflow_*` responses are
+    /// byte-identical to before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
 }
 
 impl RpcError {
     pub(crate) fn new(code: i32, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self { code, message: message.into(), data: None }
+    }
+
+    /// Attach structured data to the error payload.
+    pub(crate) fn with_data(code: i32, message: impl Into<String>, data: Value) -> Self {
+        Self { code, message: message.into(), data: Some(data) }
     }
 
     /// JSON-RPC error code.
