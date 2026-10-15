@@ -83,6 +83,7 @@ export function ConsentScreen(props: {
 
   const submitUnlock = useCallback(async () => {
     if (unlockingFor === null) return;
+    setBusyId(unlockingFor);
     try {
       await unlock(wallet, passphrase);
       const actionId = unlockingFor;
@@ -96,6 +97,10 @@ export function ConsentScreen(props: {
       await onRefresh();
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : String(cause));
+      // Clear passphrase on unlock failure so the user re-types deliberately.
+      setPassphrase('');
+    } finally {
+      setBusyId(null);
     }
   }, [onRefresh, unlockingFor, passphrase, wallet]);
 
@@ -109,7 +114,7 @@ export function ConsentScreen(props: {
           <p className="muted">Unlock to approve the pending request.</p>
           <label className="field">
             <span>Wallet</span>
-            <input value={wallet} onChange={(event) => setWallet(event.target.value)} />
+            <input value={wallet} onChange={(event) => setWallet(event.target.value)} disabled={busyId !== null} />
           </label>
           <label className="field">
             <span>Passphrase</span>
@@ -118,13 +123,18 @@ export function ConsentScreen(props: {
               value={passphrase}
               onChange={(event) => setPassphrase(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === 'Enter') void submitUnlock();
+                if (event.key === 'Enter' && passphrase.length > 0) void submitUnlock();
               }}
+              disabled={busyId !== null}
+              autoFocus
             />
           </label>
-          <button onClick={() => void submitUnlock()}>Unlock &amp; approve</button>
+          <button className="approve" disabled={busyId !== null} onClick={() => void submitUnlock()}>
+            {busyId !== null ? 'Unlocking…' : 'Unlock & approve'}
+          </button>
           <button
             className="ghost"
+            disabled={busyId !== null}
             onClick={() => {
               const actionId = unlockingFor;
               setUnlockingFor(null);
@@ -173,6 +183,7 @@ function AssessmentBadges(props: { assessment?: ConsentAssessment | null }) {
     <>
       {badges.map((badge, index) => (
         <p className={`badge ${badge.level}`} key={index}>
+          {badge.level === 'danger' ? '⛔ ' : badge.level === 'warn' ? '⚠ ' : 'ℹ '}
           {badge.label}
         </p>
       ))}
@@ -209,18 +220,24 @@ function ActionCard(props: {
           </div>
         ))}
       </dl>
-      {action.view.warnings.map((warning, index) => (
-        <p className="warning" key={index}>
-          ⚠ {warning}
-        </p>
-      ))}
-      <p className="muted countdown">Expires in {Math.ceil(remaining / 1000)}s</p>
+      {action.view.warnings.length > 0 && (
+        <div className="warnings">
+          {action.view.warnings.map((warning, index) => (
+            <p className="warning" key={index}>
+              ⚠ {warning}
+            </p>
+          ))}
+        </div>
+      )}
+      <p className={`muted countdown ${remaining < 10000 ? 'countdown-urgent' : ''}`}>
+        Expires in {Math.ceil(remaining / 1000)}s
+      </p>
       <div className="actions">
         <button className="approve" disabled={busy} onClick={() => void onDecide(action, true)}>
-          Approve
+          {busy ? 'Approving…' : 'Approve'}
         </button>
         <button className="reject" disabled={busy} onClick={() => void onDecide(action, false)}>
-          Reject
+          {busy ? 'Rejecting…' : 'Reject'}
         </button>
       </div>
     </section>

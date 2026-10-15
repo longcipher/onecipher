@@ -126,6 +126,10 @@ const DAPP_PAGE = `<!doctype html>
     <button id="connect">connect</button>
     <button id="sign">personal_sign</button>
     <button id="rejectme">sign to reject</button>
+    <button id="sendtx">send transaction</button>
+    <button id="sendtx-reject">send tx to reject</button>
+    <button id="signtyped">sign typed data</button>
+    <button id="switchchain">switch chain</button>
     <a id="payment" href="/payment-required">402</a>
     <pre id="out"></pre>
     <script>
@@ -136,6 +140,10 @@ const DAPP_PAGE = `<!doctype html>
       document.getElementById('connect').onclick = () => request('eth_requestAccounts');
       document.getElementById('sign').onclick = () => request('personal_sign', ['0x48656c6c6f204f6e65436970686572']);
       document.getElementById('rejectme').onclick = () => request('personal_sign', ['0x72656a656374']);
+      document.getElementById('sendtx').onclick = () => request('eth_sendTransaction', [{ to: '0x1111111111111111111111111111111111111111', value: '0x1', nonce: '0x0' }]);
+      document.getElementById('sendtx-reject').onclick = () => request('eth_sendTransaction', [{ to: '0x2222222222222222222222222222222222222222', value: '0x2', nonce: '0x1' }]);
+      document.getElementById('signtyped').onclick = () => request('eth_signTypedData_v4', [JSON.stringify({ primaryType: 'Mail', domain: { name: 'Test', version: '1', chainId: 1 }, message: { from: '0x' + 'aa'.repeat(20), to: '0x' + 'bb'.repeat(20) } })]);
+      document.getElementById('switchchain').onclick = () => request('wallet_switchEthereumChain', [{ chainId: '0x1' }]);
     </script>
   </body>
 </html>

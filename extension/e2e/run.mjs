@@ -23,6 +23,10 @@ const results = {
   normalConnectionApproval: false,
   signingApprovalAndRejection: false,
   rejectReturns4001: false,
+  transactionApproval: false,
+  transactionReject: false,
+  typedDataApproval: false,
+  chainSwitch: false,
   http402Preserved: false,
   captures: 0,
   daemonCalls: 0,
@@ -224,7 +228,66 @@ async function main() {
     results.rejectReturns4001 = true;
     console.log('personal_sign reject (4001): OK');
 
-    // --- 4. HTTP 402 passthrough (INV-8) -------------------------------------
+    // --- 4. eth_sendTransaction approve → tx_hash -----------------------
+    await page.getByRole('button', { name: 'send transaction' }).click();
+    await approveInNotification();
+    await page.waitForFunction(
+      () => document.getElementById('out')?.textContent?.startsWith('0x') &&
+           (document.getElementById('out')?.textContent?.length ?? 0) === 66,
+      undefined,
+      { timeout: 10_000 },
+    );
+    await waitForNotificationClosed();
+    results.transactionApproval = true;
+    console.log('eth_sendTransaction approve: OK');
+
+    // --- 4b. eth_sendTransaction reject → 4001 -----------------------------
+    await page.getByRole('button', { name: 'send tx to reject' }).click();
+    await rejectInNotification();
+    await page.waitForFunction(
+      () => document.getElementById('out')?.textContent?.startsWith('ERR:4001'),
+      undefined,
+      { timeout: 10_000 },
+    );
+    await waitForNotificationClosed();
+    results.transactionReject = true;
+    console.log('eth_sendTransaction reject (4001): OK');
+
+    // --- 4c. eth_signTypedData_v4 approve ----------------------------------
+    await page.getByRole('button', { name: 'sign typed data' }).click();
+    await approveInNotification();
+    await page.waitForFunction(
+      () => {
+        const t = document.getElementById('out')?.textContent ?? '';
+        return t.startsWith('0x') && /^0x[0-9a-fA-F]{130}$/.test(t);
+      },
+      undefined,
+      { timeout: 10_000 },
+    );
+    await waitForNotificationClosed();
+    results.typedDataApproval = true;
+    console.log('eth_signTypedData_v4 approve: OK');
+
+    // --- 4d. wallet_switchEthereumChain (per-site binding) ----------------
+    // EIP-1193 exposes chainId via the `eth_chainId` RPC, not a property.
+    await page.getByRole('button', { name: 'switch chain' }).click();
+    const chainDeadline = Date.now() + 10_000;
+    let chainSwitched = false;
+    while (Date.now() < chainDeadline) {
+      const chain = await page
+        .evaluate(() => window.ethereum?.request({ method: 'eth_chainId' }).catch(() => null))
+        .catch(() => null);
+      if (chain === '0x1') {
+        chainSwitched = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    results.chainSwitch = chainSwitched;
+    if (!chainSwitched) throw new Error('wallet_switchEthereumChain: chain did not change to 0x1');
+    console.log('wallet_switchEthereumChain: OK');
+
+    // --- 5. HTTP 402 passthrough (INV-8) -------------------------------------
     const status = await page.evaluate(async (url) => {
       const response = await fetch(url);
       return response.status;
@@ -246,7 +309,8 @@ async function main() {
   console.log('evidence written to e2e/verification/e2e.json');
 
   const failed = !results.normalConnectionApproval || !results.signingApprovalAndRejection ||
-    !results.rejectReturns4001 || !results.http402Preserved || results.captures !== 0;
+    !results.rejectReturns4001 || !results.transactionApproval || !results.transactionReject ||
+    !results.typedDataApproval || !results.chainSwitch || !results.http402Preserved || results.captures !== 0;
   if (failed) {
     console.error('e2e FAILED:', results);
     process.exit(1);

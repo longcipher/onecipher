@@ -9,6 +9,7 @@ export function UnlockScreen(props: { onUnlocked: () => Promise<void>; onError: 
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
+    if (busy || passphrase.length === 0) return;
     setBusy(true);
     try {
       await unlock(wallet, passphrase);
@@ -16,6 +17,9 @@ export function UnlockScreen(props: { onUnlocked: () => Promise<void>; onError: 
       await props.onUnlocked();
     } catch (cause) {
       props.onError(cause instanceof Error ? cause.message : String(cause));
+      // Clear the passphrase on failure so re-typing is required —
+      // a failed unlock hint must never stay in the field for a shoulder-surfer.
+      setPassphrase('');
     } finally {
       setBusy(false);
     }
@@ -25,7 +29,7 @@ export function UnlockScreen(props: { onUnlocked: () => Promise<void>; onError: 
     <section>
       <label className="field">
         <span>Wallet</span>
-        <input value={wallet} onChange={(event) => setWallet(event.target.value)} />
+        <input value={wallet} onChange={(event) => setWallet(event.target.value)} disabled={busy} />
       </label>
       <label className="field">
         <span>Passphrase</span>
@@ -34,12 +38,14 @@ export function UnlockScreen(props: { onUnlocked: () => Promise<void>; onError: 
           value={passphrase}
           onChange={(event) => setPassphrase(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === 'Enter') void submit();
+            if (event.key === 'Enter' && passphrase.length > 0 && !busy) void submit();
           }}
+          disabled={busy}
+          autoFocus
         />
       </label>
       <button disabled={busy || passphrase.length === 0} onClick={() => void submit()}>
-        Unlock
+        {busy ? 'Unlocking…' : 'Unlock'}
       </button>
       <p className="muted">
         Keys never leave the OneCipher daemon — the extension only holds a

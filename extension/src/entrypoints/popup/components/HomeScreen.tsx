@@ -19,6 +19,7 @@ export function HomeScreen(props: {
   const { state, onRefresh, onOpenSettings, onError } = props;
   const [tab, setTab] = useState<'accounts' | 'sites' | 'activity'>('accounts');
   const [events, setEvents] = useState<unknown[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
   const session = state.session;
   if (!session) return null;
 
@@ -36,6 +37,18 @@ export function HomeScreen(props: {
   // Policy summary for the active wallet (design §4.8): what the user's own
   // thresholds are, so a consent badge is never the first they hear of them.
   const threshold = state.warnThresholdWei ?? '';
+
+  const call = async (label: string, fn: () => Promise<unknown>) => {
+    setBusy(label);
+    try {
+      await fn();
+      await onRefresh();
+    } catch (cause: unknown) {
+      onError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(null);
+    }
+  };
 
   return (
     <section>
@@ -62,12 +75,9 @@ export function HomeScreen(props: {
             <span>Default chain</span>
             <select
               value={chains.includes(state.activeChainId) ? state.activeChainId : ''}
+              disabled={busy !== null}
               onChange={(event) => {
-                void switchChain(event.target.value)
-                  .then(onRefresh)
-                  .catch((cause: unknown) =>
-                    onError(cause instanceof Error ? cause.message : String(cause)),
-                  );
+                void call('switch', () => switchChain(event.target.value));
               }}
             >
               {/* Keep an option for a chain the daemon did not report, so a
@@ -85,11 +95,13 @@ export function HomeScreen(props: {
           <ul className="accounts">
             {state.accounts.map((account) => {
               const balance = balanceFor(account.chain_id);
+              const isActive = account.chain_id === state.activeChainId;
               return (
                 <li key={`${account.chain_id}:${account.address}`}>
                   <span className="code">{shorten(account.address)}</span>
                   <span className="muted">
-                    {account.chain_id} · {balance === null ? '—' : formatWei(balance)}
+                    {account.chain_id}
+                    {isActive && <span className="badge-pill">active</span>} · {balance === null ? '—' : formatWei(balance)}
                   </span>
                 </li>
               );
@@ -104,13 +116,10 @@ export function HomeScreen(props: {
           )}
           <button
             className="ghost"
-            onClick={() => {
-              void lock()
-                .then(onRefresh)
-                .catch((cause: unknown) => onError(cause instanceof Error ? cause.message : String(cause)));
-            }}
+            disabled={busy !== null}
+            onClick={() => void call('lock', lock)}
           >
-            Lock
+            {busy === 'lock' ? 'Locking…' : 'Lock'}
           </button>
         </>
       )}
@@ -125,15 +134,10 @@ export function HomeScreen(props: {
                 <span className="muted">{site.chain_id}</span>
                 <button
                   className="ghost danger"
-                  onClick={() => {
-                    void revokeSite(site.origin)
-                      .then(onRefresh)
-                      .catch((cause: unknown) =>
-                        onError(cause instanceof Error ? cause.message : String(cause)),
-                      );
-                  }}
+                  disabled={busy !== null}
+                  onClick={() => void call(`revoke:${site.origin}`, () => revokeSite(site.origin))}
                 >
-                  Revoke
+                  {busy === `revoke:${site.origin}` ? '…' : 'Revoke'}
                 </button>
               </li>
             ))}
@@ -147,6 +151,7 @@ export function HomeScreen(props: {
           {events.slice(0, 20).map((event, index) => (
             <li key={index}>
               <span className="muted">{eventKind(event)}</span>
+              <span className="code event-detail">{eventDetail(event)}</span>
             </li>
           ))}
         </ul>
@@ -167,8 +172,18 @@ function eventKind(event: unknown): string {
   if (event !== null && typeof event === 'object') {
     const record = event as Record<string, unknown>;
     const kind = record['event_type'] ?? record['type'] ?? record['op'] ?? 'entry';
-    const detail = record['wallet_id'] ?? record['method'] ?? '';
-    return `${String(kind)} ${String(detail)}`.trim();
+    return String(kind);
   }
   return String(event);
+}
+
+function eventDetail(event: unknown): string {
+  if (event !== null && typeof event === 'object') {
+    const record = event as Record<string, unknown>;
+    const wallet = record['wallet_id'] ?? record['wallet'] ?? '';
+    const method = record['method'] ?? record['tx_hash'] ?? record['origin'] ?? '';
+    const parts = [wallet, method].filter((part) => part !== '');
+    return parts.join(' · ');
+  }
+  return '';
 }

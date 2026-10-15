@@ -179,6 +179,15 @@ button.danger {
   margin: 6px 0 0;
 }
 
+.countdown-urgent {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.warnings {
+  margin: 6px 0;
+}
+
 .field {
   display: block;
   margin: 10px 0;
@@ -237,6 +246,24 @@ select {
   word-break: break-all;
 }
 
+.badge-pill {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(74, 222, 128, 0.16);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.event-detail {
+  font-size: 10px;
+  max-width: 60%;
+  text-align: right;
+}
+
 .session-line {
   margin-top: 0;
 }
@@ -268,4 +295,9 @@ select {
 }
 .badge.muted {
   color: #98a2b3;
+}
+
+.badge.warn {
+  background: rgba(251, 191, 36, 0.12);
+  color: #fbbf24;
 }

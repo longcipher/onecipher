@@ -1,11 +1,15 @@
 {
-  "checkedAt": "2026-10-13T13:01:56.831Z",
+  "checkedAt": "2026-10-15T00:32:23.738Z",
   "profile": "disposable and removed",
   "installedInUserProfile": false,
   "normalConnectionApproval": true,
   "signingApprovalAndRejection": true,
   "rejectReturns4001": true,
+  "transactionApproval": true,
+  "transactionReject": true,
+  "typedDataApproval": true,
+  "chainSwitch": true,
   "http402Preserved": true,
   "captures": 0,
-  "daemonCalls": 37
+  "daemonCalls": 72
 }
