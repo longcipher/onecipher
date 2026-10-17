@@ -27,6 +27,7 @@ pub(crate) mod policy;
 pub(crate) mod render;
 pub(crate) mod sbom;
 pub(crate) mod secret;
+pub(crate) mod secret_menu;
 pub(crate) mod send;
 pub(crate) mod send_transaction;
 pub(crate) mod service;
@@ -37,6 +38,7 @@ pub(crate) mod sign_message;
 pub(crate) mod sign_transaction;
 pub(crate) mod status;
 pub(crate) mod totp;
+pub(crate) mod tui_edit;
 pub(crate) mod uninstall;
 pub(crate) mod update;
 pub(crate) mod vanity;
@@ -201,16 +203,89 @@ pub(crate) fn read_private_key() -> Result<Zeroizing<String>, CliError> {
     Ok(Zeroizing::new(trimmed))
 }
 
-/// Read a passphrase from ONECIPHER_PASSPHRASE env var (or OC_PASSPHRASE /
-/// OWS_PASSPHRASE / OWX_PASSPHRASE / LWS_PASSPHRASE fallback) or prompt
-/// interactively.
+/// Environment variable naming a readable file descriptor that supplies the
+/// passphrase, one line per prompt (the `PAGO_PASSPHRASE_FD` pattern).
 ///
-/// The env var is drained burn-after-reading via [`take_passphrase`].
+/// Useful for scripting and automation where an environment variable is too
+/// visible (`/proc/<pid>/environ`, child-process inheritance). The
+/// descriptor is re-opened through `/dev/fd` so no `unsafe` is required —
+/// per AGENTS.md, `unsafe` stays confined to the `oc-crypto` and
+/// `oc-keyagent` sandbox modules. A negative or unparseable value is
+/// ignored; an exhausted or unreadable descriptor falls through to the env
+/// var / prompt path.
+const PASSPHRASE_FD_ENV: &str = "ONECIPHER_PASSPHRASE_FD";
+
+/// Lazily-opened passphrase-fd reader; yields one line per
+/// [`read_passphrase`] call.
+///
+/// The file is opened once and kept in a process-wide `OnceLock` so
+/// successive prompts consume successive lines, matching the pago
+/// behaviour. `/dev/fd/<n>` re-opens the same description (pipe, regular
+/// file, or terminal) without taking ownership of the caller's descriptor.
+fn passphrase_fd_reader() -> Option<&'static std::sync::Mutex<std::io::BufReader<std::fs::File>>> {
+    static READER: std::sync::OnceLock<
+        Option<std::sync::Mutex<std::io::BufReader<std::fs::File>>>,
+    > = std::sync::OnceLock::new();
+
+    READER
+        .get_or_init(|| {
+            open_passphrase_fd(std::env::var(PASSPHRASE_FD_ENV).ok().as_deref())
+                .map(std::sync::Mutex::new)
+        })
+        .as_ref()
+}
+
+/// Open the descriptor named by `raw` (an fd number) through `/dev/fd`.
+///
+/// Pure apart from the filesystem access, so it is unit-testable without
+/// touching the process environment or the cached reader.
+fn open_passphrase_fd(raw: Option<&str>) -> Option<std::io::BufReader<std::fs::File>> {
+    let fd = raw.map(str::trim)?.parse::<i32>().ok()?;
+    if fd < 0 {
+        return None;
+    }
+    let file = std::fs::File::open(format!("/dev/fd/{fd}")).ok()?;
+    Some(std::io::BufReader::new(file))
+}
+
+/// Read one line from the descriptor named by [`PASSPHRASE_FD_ENV`].
+///
+/// Returns `None` when the variable is unset/invalid, the descriptor cannot
+/// be opened, or it is exhausted — callers then fall back to the env var or
+/// the interactive prompt. Only the line ending is stripped; interior and
+/// trailing spaces are preserved (they can be part of a passphrase).
+fn take_passphrase_fd() -> Option<String> {
+    let reader = passphrase_fd_reader()?;
+    // A poisoned lock means another thread panicked mid-read; treat the
+    // channel as unavailable rather than panicking here.
+    let mut guard = reader.lock().ok()?;
+    let mut line = String::new();
+    match guard.read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => {
+            while line.ends_with('\n') || line.ends_with('\r') {
+                line.pop();
+            }
+            Some(line)
+        }
+    }
+}
+
+/// Read a passphrase from `ONECIPHER_PASSPHRASE_FD` (one line per prompt),
+/// the ONECIPHER_PASSPHRASE env var (or OC_PASSPHRASE / OWS_PASSPHRASE /
+/// OWX_PASSPHRASE / LWS_PASSPHRASE fallback) or prompt interactively.
+///
+/// The fd is consulted first: it is the most explicit automation channel
+/// and less exposed than an environment variable. The env var is drained
+/// burn-after-reading via [`take_passphrase`].
 /// Under agent JSON mode ([`crate::output::is_json_mode`]) there is no
-/// prompt: a missing env var yields an empty passphrase here, and every
+/// prompt: a missing source yields an empty passphrase here, and every
 /// caller that needs a real secret refuses explicitly through
 /// [`is_interactive_stdin`] instead of blocking.
 pub(crate) fn read_passphrase() -> Zeroizing<String> {
+    if let Some(value) = take_passphrase_fd() {
+        return Zeroizing::new(value);
+    }
     if let Some(value) = take_passphrase() {
         return Zeroizing::new(value);
     }
@@ -289,12 +364,68 @@ pub(crate) fn onecipher_home() -> PathBuf {
     oc_core::paths::state_dir().unwrap_or_else(|_| PathBuf::from(oc_core::paths::STATE_DIR_NAME))
 }
 
-/// Secret store root directory: `<onecipher_home>/store/`.
+/// Environment variable naming the active secret store.
 ///
-/// The `SecretStore` creates `<root>/secrets/` (encrypted `.age` files) and
-/// `<root>/index.jsonl` (plaintext index) internally.
+/// Set from the global `--store` flag by `main` so every command — including
+/// children spawned by `onecipher env -- ...` — resolves the same store.
+/// Inspired by seniorpw's `-s/--store`, which makes one command operate on a
+/// named store instead of a single hardcoded directory.
+pub(crate) const STORE_ENV: &str = "ONECIPHER_STORE";
+
+/// Directory holding the named stores: `<onecipher_home>/stores/`.
+pub(crate) fn stores_dir() -> PathBuf {
+    onecipher_home().join("stores")
+}
+
+/// The active store name, if one is selected.
+pub(crate) fn active_store_name() -> Option<String> {
+    std::env::var(STORE_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Generate the current TOTP code from an `otpauth://` URI.
+///
+/// Shared by `secret get --field otp` and `secret menu` so both surfaces
+/// behave like seniorpw's `show -k otp`: print/type/clip the *code*, never
+/// the seed URI.
+pub(crate) fn totp_code_from_uri(uri: &str) -> Result<String, CliError> {
+    oc_secret::totp::generate_totp(uri.trim())
+        .map_err(|e| CliError::InvalidArgs(format!("TOTP generation failed: {e}")))
+}
+
+/// Validate a store name: a flat directory name, no traversal, not hidden.
+///
+/// Reuses [`oc_core::paths::validate_wallet_id`] so store names and wallet
+/// ids follow the same rules (`/`, `\`, `..`, leading `.`, NUL rejected).
+pub(crate) fn validate_store_name(name: &str) -> Result<(), CliError> {
+    oc_core::paths::validate_wallet_id(name)
+        .map_err(|e| CliError::InvalidArgs(format!("invalid store name '{name}': {e}")))
+}
+
+/// Secret store root directory.
+///
+/// - With a store selected (`--store <NAME>` / `ONECIPHER_STORE=NAME`):
+///   `<onecipher_home>/stores/<NAME>`.
+/// - Otherwise: `<onecipher_home>/store` — unchanged from earlier versions, so existing
+///   installations keep working.
+///
+/// An invalid name is never used to build a path: the default store is used
+/// instead and a warning is printed. The `SecretStore` creates
+/// `<root>/secrets/` (encrypted `.age` files) and `<root>/index.jsonl`
+/// (plaintext index) internally.
 pub(crate) fn secret_store_root() -> PathBuf {
-    onecipher_home().join("store")
+    match active_store_name() {
+        Some(name) => match validate_store_name(&name) {
+            Ok(()) => stores_dir().join(name),
+            Err(e) => {
+                eprintln!("warning: {e}; using the default store");
+                onecipher_home().join("store")
+            }
+        },
+        None => onecipher_home().join("store"),
+    }
 }
 
 /// Open the secret store, creating it if necessary.
@@ -598,6 +729,40 @@ mod qr_tests {
         assert!(print_qr(&huge).is_ok());
         assert!(print_qr("").is_ok());
         assert!(print_qr("hello-qr").is_ok());
+    }
+}
+
+#[cfg(test)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod passphrase_fd_tests {
+    use std::os::unix::io::AsRawFd;
+
+    use super::open_passphrase_fd;
+
+    #[test]
+    fn fd_reader_reads_one_line_from_the_descriptor() {
+        // A real, still-open descriptor: `/dev/fd/<n>` re-opens it by path.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("passphrase");
+        std::fs::write(&path, "first-line\nsecond-line\n").expect("write passphrase file");
+        let file = std::fs::File::open(&path).expect("open passphrase file");
+        let fd = file.as_raw_fd().to_string();
+
+        let mut reader = open_passphrase_fd(Some(&fd)).expect("must open /dev/fd/<n>");
+        use std::io::BufRead;
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read line");
+        assert_eq!(line.trim_end_matches(['\n', '\r']), "first-line");
+    }
+
+    #[test]
+    fn fd_reader_rejects_invalid_or_negative_values() {
+        assert!(open_passphrase_fd(None).is_none());
+        assert!(open_passphrase_fd(Some("")).is_none());
+        assert!(open_passphrase_fd(Some("not-a-number")).is_none());
+        assert!(open_passphrase_fd(Some("-1")).is_none());
+        // A descriptor that is not open: opening it must fail rather than panic.
+        assert!(open_passphrase_fd(Some("99999")).is_none());
     }
 }
 

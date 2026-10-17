@@ -96,6 +96,11 @@ zeroize = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
 oc-vault = { workspace = true, features = ["fast-kdf"] }
+# PTY-backed end-to-end tests: drives the real `onecipher` binary through a
+# pseudo-terminal so interactive prompts (passphrase, editors) and exit codes
+# are exercised at the process level, the way pago's `test/e2e_test.go` does
+# with `expect.Console`.
+portable-pty = "0.9"
 proptest = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 

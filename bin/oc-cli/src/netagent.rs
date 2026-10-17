@@ -95,16 +95,26 @@ impl UdsKeyAgentClient {
     /// This is the recommended entry point for the CLI. It follows the
     /// gpg-agent / 1Password pattern:
     ///
-    /// 1. Try to connect to the existing daemon socket.
+    /// 1. Verify the socket node is provably ours (R12) — ownership, type and permissions — then
+    ///    try to connect to the existing daemon.
     /// 2. If the socket file exists but connection is refused, clean up the stale socket.
     /// 3. Acquire a spawn lock file to prevent concurrent CLI instances from spawning multiple
     ///    daemons.
     /// 4. Fork/spawn `onecipher --daemon` in the background.
-    /// 5. Poll until the socket appears and accepts connections (max 3s).
+    /// 5. Poll until the socket appears and accepts connections (max 3s), verifying it again before
+    ///    each probe.
     /// 6. Connect and return.
     pub(crate) fn connect_or_spawn() -> Result<Self, String> {
         let client = FrameClient::connect_default().map_err(|e| e.to_string())?;
         let socket_path = client.socket_path();
+
+        // R12: a socket that is not provably ours (wrong owner, wrong type,
+        // group/other access, or a symlink) must never receive a signing
+        // request. Fail closed with a clear message instead of connecting
+        // or spawning behind a planted path.
+        if socket_path.exists() {
+            oc_keyagent::verify_socket_file(socket_path).map_err(|e| e.to_string())?;
+        }
 
         // Fast path: daemon already running.
         if UnixStream::connect(socket_path).is_ok() {
@@ -132,6 +142,9 @@ impl UdsKeyAgentClient {
 
         // Check if another CLI already spawned the daemon while we waited
         // for the lock.
+        if socket_path.exists() {
+            oc_keyagent::verify_socket_file(socket_path).map_err(|e| e.to_string())?;
+        }
         if UnixStream::connect(socket_path).is_ok() {
             return Ok(Self { client });
         }

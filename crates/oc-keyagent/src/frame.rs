@@ -230,10 +230,21 @@ impl FrameClient {
     }
 
     /// Send a request and receive a response. Opens a new connection per call.
+    ///
+    /// R12: before connecting, the socket path is verified to be a Unix
+    /// socket owned by the current user with no group/other access (see
+    /// [`crate::socket_guard`]). The check is skipped while the path does
+    /// not exist — a daemon that is still starting has no socket yet, and
+    /// `connect` then fails naturally so the caller can retry.
     pub fn send_request(
         &self,
         req: &KeyAgentRequest,
     ) -> Result<KeyAgentResponse, FrameClientError> {
+        if self.socket_path.exists() {
+            crate::socket_guard::verify_socket_file(&self.socket_path)
+                .map_err(|e| FrameClientError::InsecureSocket(e.to_string()))?;
+        }
+
         let mut stream = UnixStream::connect(&self.socket_path)
             .map_err(|e| FrameClientError::Connect(e.to_string()))?;
 
@@ -269,6 +280,11 @@ pub enum FrameClientError {
     Shutdown(String),
     #[error("decode failed: {0}")]
     Decode(String),
+    /// The socket path failed the ownership / type / permission check of
+    /// [`crate::socket_guard`]. Fail-closed: a socket that is not provably
+    /// ours must never carry a signing request.
+    #[error("insecure socket: {0}")]
+    InsecureSocket(String),
 }
 
 #[cfg(test)]

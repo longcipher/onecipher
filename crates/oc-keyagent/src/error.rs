@@ -24,4 +24,9 @@ pub enum KeyAgentError {
     /// T12 sandbox hardening failure (seccomp / capset / prctl).
     #[error("sandbox error: {0}")]
     Sandbox(String),
+    /// The Key-Agent socket path failed an ownership / type / permission
+    /// check (see [`crate::socket_guard`]). Always fail-closed: a socket
+    /// that is not provably ours must never carry signing requests.
+    #[error("insecure socket path: {0}")]
+    SocketSecurity(String),
 }

@@ -268,6 +268,93 @@ just mutants-incremental  # incremental mutation testing
   paths — the workspace lints allow them (for test code), but code review
   enforces this for non-test code.
 
+### Sharp edges
+
+Recurring failure shapes in this codebase.
+Walk the checklist when writing code that resembles them.
+
+**Atomic writes.**
+Anything that overwrites a secret-bearing file (keyfiles, secret entries,
+recipients, policies, index) goes through `oc_core::paths::write_atomic_private`.
+A crash between `create` and the final write would otherwise leave the file
+truncated and unrecoverable. Never `fs::write` a secret.
+
+**Symlinks.**
+`std::fs::metadata` and `Path::exists` follow symlinks.
+Use `symlink_metadata` (the `Lstat` equivalent) when verifying ownership or
+mode of a path that must not be a symlink.
+`oc_keyagent::socket_guard` is the reference pattern; `oc-secret`'s `get` /
+`delete` and `oc-vault`'s `delete_wallet_file` apply the same rule to entries.
+
+**Socket path verification.**
+The Key-Agent socket path is predictable.
+`create_dir_all` succeeds on a pre-existing directory and `chmod` cannot
+repair ownership, so creation alone proves nothing: verify the socket
+directory and node (type, owner, no group/other access) before binding
+(server) and before connecting (client).
+Do NOT weaken `oc_keyagent::socket_guard::verify_socket_file`.
+
+**Plaintext on disk.**
+Decrypted secret material must never be staged in the shared temp directory.
+`secret edit` prefers the built-in in-memory editor
+(`bin/oc-cli/src/commands/tui_edit.rs`); the external-editor path stages
+inside the 0700 state directory and zero-fills plus unlinks afterwards.
+New "edit a secret" flows must follow one of those two paths.
+
+**Error wrapping for exit codes.**
+Leaf failures carry a stable SCREAMING_SNAKE code so `main` can pick a
+distinct BSD sysexits status via `CliError::code` → `exit::exit_code_for`.
+Do NOT collapse distinguishable library variants into one bucket —
+`SecretStoreError::NotFound` (66) and `InvalidName` / `Tampered` (65) must
+stay separate so scripts can branch without parsing stderr.
+
+**Signal handling.**
+When entering a wait that may need a clean shutdown, register the handler
+*before* announcing the wait.
+A signal arriving in the window between the print and `signal::Notify` beats
+the cleanup.
+
+**Blocking accepts.**
+A blocking `accept()` ignores a cooperative stop flag until an unrelated
+connection arrives — the Key-Agent accept loop therefore keeps the listener
+non-blocking and polls (the daemon only escaped this via the EINTR from a
+signal, which the idle watchdog does not generate).
+Do NOT make that loop blocking again.
+
+**TTY assumptions.**
+Anything that prompts must check `is_interactive_stdin()` and either fall
+back to a non-interactive path or abort with a clear message.
+Raw mode on a non-TTY produces an obscure ioctl error.
+Under `cfg(test)` and with `OC_NONINTERACTIVE` set, `is_interactive_stdin()`
+returns `false` by design.
+
+**Agent staleness.**
+Operations that rotate recipients or identities must not leave a long-lived
+cache holding old material.
+The Key-Agent re-derives per request and its key cache has a 5s TTL, so no
+push is needed today — but any new in-memory identity cache needs the same
+refresh path pago implements with `pushIdentitiesToAgent`.
+
+**Store names.**
+`--store <NAME>` / `ONECIPHER_STORE` selects `<home>/stores/<NAME>`; with no
+store selected the root stays `<home>/store` (existing installs are
+untouched). The name is validated in `main` before it is exported to the
+environment, and `secret_store_root()` refuses to build a path from an
+invalid name — a store name must never reach the filesystem unvalidated.
+
+**Menu action sequences.**
+`secret menu` takes `(action, argument)` pairs and executes them against a
+focused window. A dangling or unknown action is a usage error (64): a
+half-typed sequence would otherwise type the wrong secret. Keys resolve
+through one helper (`secret_menu::resolve_key`) so `secret get --field otp`
+and `secret menu clip otp` never disagree about what `otp` means.
+
+**Threat model.**
+OneCipher does not protect against an attacker running code as the same UID.
+It does protect against co-resident users on a shared system: data dir, agent
+socket, and socket dir are `0o700` / `0o600` and verified before use.
+Do NOT add features that widen the latter without flagging it.
+
 ## Development Workflow
 
 Use test-driven development for behavior changes:

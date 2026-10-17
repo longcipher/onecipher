@@ -1,9 +1,15 @@
 //! Secure external editor (D4).
 //!
-//! Edits a secret value in `$EDITOR` (or `vi` fallback) using a temp file
-//! created 0600 inside a 0700 staging directory. After the editor exits the
-//! file is read back, then zero-filled before unlink so plaintext does not
-//! linger in freed blocks.
+//! Edits arbitrary text in `$EDITOR` (or `vi` fallback) using a temp file
+//! created 0600 inside a 0700 staging directory **under the OneCipher state
+//! directory**, never under the shared system temp directory: `/tmp` is
+//! world-traversable, and a plaintext secret staged there is exposed to
+//! co-resident users (the exact gap pago avoids by editing in memory). After
+//! the editor exits the file is read back, then zero-filled before unlink so
+//! plaintext does not linger in freed blocks.
+//!
+//! Callers that can avoid the filesystem entirely should prefer
+//! [`super::tui_edit::edit_in_memory`], which never creates a file.
 //!
 //! Honesty note for SSDs: overwriting a file in place cannot guarantee the
 //! old bytes are gone — wear-leveling, journaling, and copy-on-write
@@ -11,10 +17,7 @@
 //! is best-effort defense for HDD/page-cache; true erasure on SSD requires
 //! full-disk encryption.
 
-use std::{
-    io::{Read, Write},
-    path::PathBuf,
-};
+use std::{io::Write, path::PathBuf};
 
 use zeroize::{Zeroize, Zeroizing};
 
@@ -22,34 +25,43 @@ use crate::CliError;
 
 /// Edit `initial` in an external editor, returning the edited value.
 ///
-/// - staging dir: 0700, file: 0600 (created exclusively, never widen-then-narrow),
-/// - editor: `$VISUAL` > `$EDITOR` > `vi`,
+/// - staging dir: 0700 under the OneCipher state dir, file: 0600 (created exclusively, never
+///   widen-then-narrow),
+/// - editor: `editor` override > `$VISUAL` > `$EDITOR` > `vi`,
 /// - post-read: overwrite the file with zeros (best-effort, see module docs) then unlink it and
-///   remove the staging dir.
-///
-/// Currently exercised by unit tests; wiring into `secret edit` stays with
-/// that command's owner (its multi-field payload format is still evolving,
-/// and this helper edits a single value).
-#[allow(dead_code)]
-pub(crate) fn edit_secret(initial: &str) -> Result<Zeroizing<String>, CliError> {
+///   remove the staging dir. The cleanup runs even when the editor exits non-zero, so a failed edit
+///   never leaves plaintext on disk.
+pub(crate) fn edit_text(
+    initial: &str,
+    editor: Option<&str>,
+) -> Result<Zeroizing<String>, CliError> {
     let dir = staging_dir()?;
     let path = dir.join("secret.edit");
     write_private(&path, initial.as_bytes())?;
-    run_editor(&path)?;
-    let mut content = String::new();
-    std::fs::File::open(&path)
-        .map_err(CliError::Io)?
-        .read_to_string(&mut content)
-        .map_err(CliError::Io)?;
+
+    // Run the editor, but keep the cleanup unconditional: a failed edit must
+    // not leave the plaintext staging file behind.
+    let editor_result = run_editor(&path, editor);
+
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
     zero_fill_and_remove(&path, content.len() as u64);
-    let _ = std::fs::remove_dir(&dir);
-    Ok(Zeroizing::new(content.trim_end_matches(['\n', '\r']).to_string()))
+    let _ = std::fs::remove_dir_all(&dir);
+
+    match editor_result {
+        Ok(()) => Ok(Zeroizing::new(content.trim_end_matches(['\n', '\r']).to_string())),
+        Err(e) => Err(e),
+    }
 }
 
 /// Create a 0700 staging directory for the edit session.
+///
+/// The staging directory lives inside the OneCipher state directory
+/// (`~/.onecipher`, itself 0700) rather than `std::env::temp_dir()`: `/tmp`
+/// is world-traversable, so plaintext staged there is readable by
+/// co-resident users.
 fn staging_dir() -> Result<PathBuf, CliError> {
-    let mut dir = std::env::temp_dir();
-    dir.push(format!("onecipher-edit-{}-{}", std::process::id(), unique_suffix()));
+    let base = oc_core::paths::state_dir()?;
+    let dir = base.join(format!("edit-{}-{}", std::process::id(), unique_suffix()));
     std::fs::create_dir_all(&dir).map_err(CliError::Io)?;
     #[cfg(unix)]
     {
@@ -86,10 +98,16 @@ fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), CliError> {
     }
 }
 
-fn run_editor(path: &std::path::Path) -> Result<(), CliError> {
-    let editor = std::env::var("VISUAL")
-        .or_else(|_| std::env::var("EDITOR"))
-        .unwrap_or_else(|_| "vi".to_string());
+/// Launch the editor on `path`.
+///
+/// Precedence: the explicit `editor` argument (`--editor`), then `$VISUAL`,
+/// then `$EDITOR`, then `vi` as a last resort.
+fn run_editor(path: &std::path::Path, editor: Option<&str>) -> Result<(), CliError> {
+    let editor = editor
+        .map(str::to_owned)
+        .or_else(|| std::env::var("VISUAL").ok())
+        .or_else(|| std::env::var("EDITOR").ok())
+        .unwrap_or_else(|| "vi".to_string());
     let status = std::process::Command::new(&editor).arg(path).status().map_err(CliError::Io)?;
     if !status.success() {
         return Err(CliError::InvalidArgs(format!("editor '{editor}' exited with {status}")));
@@ -136,6 +154,37 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    /// Regression guard for the plaintext-on-disk gap: the staging directory
+    /// must live inside the 0700 OneCipher state directory (which is what
+    /// keeps it out of the world-traversable system temp dir), never in
+    /// `std::env::temp_dir()` directly.
+    #[test]
+    fn staging_dir_is_private_and_inside_the_state_dir() {
+        // HOME is process-global and other tests redirect it in parallel; the
+        // shared lock keeps both reads below observing the same value.
+        let _lock =
+            crate::test_util::HOME_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let Ok(dir) = staging_dir() else { return }; // HOME unset in this environment.
+        let Ok(state) = oc_core::paths::state_dir() else { return };
+
+        assert!(
+            dir.starts_with(&state) && dir != state,
+            "staging dir {} must live inside the state dir {}",
+            dir.display(),
+            state.display()
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "staging dir must be owner-only");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 use oc_core::{AuditOp, ItemType, SecretKind, SecretPayload};
 use oc_secret::{SecretEnvelope, SecretStoreError};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{CliError, audit};
 
@@ -127,9 +128,11 @@ pub(crate) fn get(
         let value = match field {
             Some("secret") | None => &payload.secret,
             Some("notes") => payload.notes.as_deref().unwrap_or(""),
+            // seniorpw's `show -c -k otp`: copy the *code*, not the URI.
+            Some("otp") => &totp_code(&payload)?,
             Some(other) => {
                 return Err(CliError::InvalidArgs(format!(
-                    "unknown field '{other}' (expected: secret, notes, metadata)"
+                    "unknown field '{other}' (expected: secret, notes, otp, metadata)"
                 )));
             }
         };
@@ -166,6 +169,9 @@ pub(crate) fn get(
 
     match field {
         Some("secret") => println!("{}", payload.reveal_for_json()),
+        // seniorpw's `show -k otp`: when the stored value is an otpauth URI,
+        // print the current code instead of the secret.
+        Some("otp") => println!("{}", totp_code(&payload)?),
         Some("notes") => match &payload.notes {
             Some(n) => println!("{n}"),
             None => println!(),
@@ -185,6 +191,171 @@ pub(crate) fn get(
     }
 
     audit::log_secret_event(AuditOp::SecretRead, name, None);
+    Ok(())
+}
+
+/// Resolve the `otp` field of a payload: generate a code when the secret
+/// value is an `otpauth://` URI (seniorpw's `show -k otp` behaviour).
+fn totp_code(payload: &SecretPayload) -> Result<String, CliError> {
+    let uri = payload.secret.trim();
+    if !uri.starts_with("otpauth://") {
+        return Err(CliError::InvalidArgs(
+            "field 'otp' requires an otpauth:// URI in the secret value".into(),
+        ));
+    }
+    super::totp_code_from_uri(uri)
+}
+
+/// Entry point for `onecipher secret cat [PREFIX] [--json]`.
+///
+/// Dumps the decrypted content of every secret (seniorpw's `senior cat`),
+/// optionally restricted to a name prefix, in a pipe-friendly form:
+///
+/// ```text
+/// github/personal
+/// ---------------
+/// hunter2
+/// user: alice
+/// ```
+///
+/// Pipe the output into `grep`, `fzf`, or `less` for ad-hoc searches; use
+/// `--json` for machine consumption.
+#[allow(dead_code)]
+pub(crate) fn cat(prefix: &str, json: bool) -> Result<(), CliError> {
+    let store = super::open_secret_store()?;
+    let identity = super::load_age_identity()?;
+    let entries = store.list().map_err(map_store_error)?;
+
+    let prefix = prefix.trim().trim_end_matches('/');
+    let mut dumped: Vec<serde_json::Value> = Vec::new();
+    let mut first = true;
+
+    for index_entry in &entries {
+        if !prefix.is_empty() &&
+            index_entry.name != prefix &&
+            !index_entry.name.starts_with(&format!("{prefix}/"))
+        {
+            continue;
+        }
+
+        let entry = store.get(&index_entry.name).map_err(map_store_error)?;
+        let mut payload = entry
+            .decrypt(&identity)
+            .map_err(|e| CliError::InvalidArgs(format!("decryption failed: {e}")))?;
+
+        if json {
+            dumped.push(serde_json::json!({
+                "name": index_entry.name,
+                "secret": payload.secret,
+                "notes": payload.notes,
+                "extra": payload.extra,
+            }));
+            payload.secret.zeroize();
+            continue;
+        }
+
+        if !first {
+            println!();
+        }
+        first = false;
+
+        // Name, an underline, then the payload — the `senior cat` layout, so
+        // the output reads well in a terminal and stays greppable.
+        println!("{}", index_entry.name);
+        println!("{}", "-".repeat(index_entry.name.chars().count()));
+        println!("{}", payload.secret);
+        if let Some(notes) = payload.notes.as_deref().filter(|n| !n.is_empty()) {
+            println!("{notes}");
+        }
+        if let Some(extra) = &payload.extra {
+            if let Ok(text) = serde_json::to_string(extra) {
+                println!("extra: {text}");
+            }
+        }
+        payload.secret.zeroize();
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&dumped)?);
+    }
+    Ok(())
+}
+
+/// Entry point for `onecipher secret dir [--json]`.
+///
+/// Prints the directory of the active store (seniorpw's `senior print-dir`)
+/// so scripts can locate it without hardcoding `~/.onecipher/store`.
+pub(crate) fn dir(json: bool) -> Result<(), CliError> {
+    let root = super::secret_store_root();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "dir": root,
+                "store": super::active_store_name(),
+            }))?
+        );
+    } else {
+        println!("{}", root.display());
+    }
+    Ok(())
+}
+
+/// Entry point for `onecipher secret stores [--json]`.
+///
+/// Lists the default store plus every named store under
+/// `<onecipher_home>/stores/`, marking the active one with `*`.
+pub(crate) fn stores(json: bool) -> Result<(), CliError> {
+    let home = super::onecipher_home();
+    let default = home.join("store");
+    let named_dir = super::stores_dir();
+    let active = super::active_store_name();
+
+    let mut names: Vec<String> = Vec::new();
+    if default.is_dir() {
+        names.push(String::from("(default)"));
+    }
+    if named_dir.is_dir() {
+        let mut named: Vec<String> = std::fs::read_dir(&named_dir)
+            .map_err(CliError::Io)?
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        named.sort();
+        names.extend(named);
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "active": active,
+                "dir": super::secret_store_root(),
+                "stores": names,
+            }))?
+        );
+        return Ok(());
+    }
+
+    if names.is_empty() {
+        println!("no stores yet; run `onecipher secret add` to create the default one");
+        return Ok(());
+    }
+
+    for name in &names {
+        let is_default = name == "(default)";
+        let marker = if is_default {
+            if active.is_none() { " *" } else { "  " }
+        } else if active.as_deref() == Some(name.as_str()) {
+            " *"
+        } else {
+            "  "
+        };
+        println!("{marker} {name}");
+    }
+    println!();
+    println!("select with `onecipher -s <NAME> ...` (stores live in {})", named_dir.display());
     Ok(())
 }
 
@@ -342,10 +513,20 @@ pub(crate) fn rename(old: &str, new: &str) -> Result<(), CliError> {
 
 /// Entry point for `onecipher secret edit <name> [--editor <cmd>]`.
 ///
-/// Decrypts the secret, writes the payload to a tempfile in a human-readable
-/// format, opens `$EDITOR` (or `--editor` flag) for the user to modify it,
+/// Decrypts the secret into a human-readable form, opens it for editing,
 /// then parses the edited content back into a `SecretPayload`, re-encrypts,
 /// and saves.
+///
+/// Editor selection (in order):
+/// 1. `--editor <cmd>` — an explicit external editor,
+/// 2. `$VISUAL` / `$EDITOR` — an external editor,
+/// 3. otherwise — the built-in in-memory TUI editor, which never writes the plaintext to disk (see
+///    [`super::tui_edit`]). This is the default on a TTY and matches pago's approach.
+///
+/// The external path stages the plaintext inside the 0700 OneCipher state
+/// directory and zero-fills + unlinks it afterwards (see
+/// [`super::editor`]); it is never staged in the shared temp directory.
+/// A discarded in-memory edit (`Ctrl+C`/`Esc`) leaves the entry untouched.
 ///
 /// Format (3 sections, each on its own line):
 /// ```text
@@ -375,41 +556,35 @@ pub(crate) fn edit(name: &str, editor: Option<&str>) -> Result<(), CliError> {
         }
         None => "Extra: ".to_string(),
     };
-    let initial_content = format!("{}\n{}\n{}\n", payload.secret, notes_line, extra_line);
+    // `Zeroizing` so the decrypted plaintext is wiped when this scope ends.
+    let initial_content =
+        Zeroizing::new(format!("{}\n{}\n{}\n", payload.secret, notes_line, extra_line));
 
-    // Write to a tempfile (in tmpfs on macOS/Linux).
-    let tmpfile = tempfile::NamedTempFile::new()
-        .map_err(|e| CliError::InvalidArgs(format!("tempfile: {e}")))?;
-    std::fs::write(tmpfile.path(), &initial_content)?;
-
-    // Determine editor command.
-    let editor_cmd = editor
-        .map(String::from)
-        .or_else(|| std::env::var("EDITOR").ok())
+    // Prefer the editor that never touches the filesystem: no `--editor`
+    // flag and no `$VISUAL`/`$EDITOR` means the built-in TUI on a TTY.
+    let configured_editor = editor
+        .map(str::to_owned)
         .or_else(|| std::env::var("VISUAL").ok())
-        .unwrap_or_else(|| "vi".to_string());
+        .or_else(|| std::env::var("EDITOR").ok());
 
-    // Open the editor and wait for it to exit.
-    let status =
-        std::process::Command::new(&editor_cmd).arg(tmpfile.path()).status().map_err(|e| {
-            CliError::InvalidArgs(format!("failed to launch editor '{editor_cmd}': {e}"))
-        })?;
-
-    if !status.success() {
-        return Err(CliError::InvalidArgs(format!("editor '{editor_cmd}' exited with {status}")));
-    }
-
-    // Read back the edited content.
-    let edited = std::fs::read_to_string(tmpfile.path())?;
-
-    // Securely delete the tempfile (zeroize + unlink).
-    // NamedTempFile::close() removes the file; we zeroize the initial_content separately.
-    // The tmpfile path will be cleaned up when the handle is dropped.
-    drop(tmpfile);
-    // Zeroize the in-memory copy of the original content.
-    // (initial_content is a plain String, but the plaintext secret only lives
-    //  transiently in this scope.)
-    drop(initial_content);
+    let edited = if let Some(cmd) = configured_editor {
+        super::editor::edit_text(&initial_content, Some(&cmd))?
+    } else {
+        if !super::is_interactive_stdin() {
+            return Err(CliError::InvalidArgs(
+                "secret edit needs a terminal: no $EDITOR/$VISUAL is set and stdin is not a TTY \
+                 (set EDITOR or pass --editor <cmd>)"
+                    .into(),
+            ));
+        }
+        if let Some(text) = super::tui_edit::edit_in_memory(&initial_content)? {
+            text
+        } else {
+            // Discarded by the user: leave the entry untouched.
+            eprintln!("secret edit discarded: '{name}' unchanged");
+            return Ok(());
+        }
+    };
 
     // Parse the edited content back into a SecretPayload.
     let new_payload = parse_edited_payload(&edited)?;
@@ -527,21 +702,32 @@ fn parse_edited_payload(text: &str) -> Result<SecretPayload, CliError> {
 }
 
 /// Convert a [`SecretStoreError`] into a [`CliError`].
+///
+/// Each variant maps to a distinct stable code (and therefore a distinct
+/// BSD sysexits status) so scripts can branch on the failure mode:
+/// `NotFound` -> 66, `AlreadyExists` -> 73, `InvalidName` /
+/// `GenerationMismatch` / `Tampered` -> 65. See `crate::exit`.
 pub(super) fn map_store_error(e: SecretStoreError) -> CliError {
     match e {
-        SecretStoreError::NotFound(name) => {
-            CliError::InvalidArgs(format!("secret not found: '{name}'"))
+        SecretStoreError::NotFound(name) => CliError::Coded {
+            code: "SECRET_NOT_FOUND",
+            message: format!("secret not found: '{name}'"),
+        },
+        SecretStoreError::AlreadyExists(name) => CliError::Coded {
+            code: "SECRET_EXISTS",
+            message: format!("secret already exists: '{name}'"),
+        },
+        SecretStoreError::InvalidName(msg) => {
+            CliError::Coded { code: "SECRET_NAME_INVALID", message: msg }
         }
-        SecretStoreError::AlreadyExists(name) => {
-            CliError::InvalidArgs(format!("secret already exists: '{name}'"))
-        }
-        SecretStoreError::InvalidName(msg) => CliError::InvalidArgs(msg),
-        SecretStoreError::GenerationMismatch { name, expected, got } => CliError::InvalidArgs(
-            format!("generation mismatch for '{name}': expected {expected}, got {got}"),
-        ),
-        SecretStoreError::Tampered { path, reason } => {
-            CliError::InvalidArgs(format!("tampered secret '{path}': {reason}"))
-        }
+        SecretStoreError::GenerationMismatch { name, expected, got } => CliError::Coded {
+            code: "SECRET_GENERATION_MISMATCH",
+            message: format!("generation mismatch for '{name}': expected {expected}, got {got}"),
+        },
+        SecretStoreError::Tampered { path, reason } => CliError::Coded {
+            code: "SECRET_TAMPERED",
+            message: format!("tampered secret '{path}': {reason}"),
+        },
         SecretStoreError::Io(e) => CliError::Io(e),
         SecretStoreError::Serde(e) => CliError::Json(e),
         SecretStoreError::Entry(e) => CliError::InvalidArgs(e.to_string()),

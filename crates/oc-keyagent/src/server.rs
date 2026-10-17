@@ -13,9 +13,10 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use crate::{
@@ -24,6 +25,7 @@ use crate::{
     handler::dispatch,
     request::KeyAgentRequest,
     response::KeyAgentResponse,
+    socket_guard::{current_uid, verify_socket_dir},
 };
 
 /// Default UDS path: `$XDG_RUNTIME_DIR/onecipher/key-agent.sock`.
@@ -35,21 +37,6 @@ use crate::{
 /// MUST still prefer `XDG_RUNTIME_DIR`.
 pub fn default_socket_path() -> String {
     socket_path_from(std::env::var("XDG_RUNTIME_DIR").ok().as_deref(), current_uid())
-}
-
-#[cfg(unix)]
-fn current_uid() -> u64 {
-    #[allow(unsafe_code)]
-    // SAFETY: `libc::getuid()` takes no arguments, cannot fail, and only
-    // reads the process's real user id.
-    unsafe {
-        u64::from(libc::getuid())
-    }
-}
-
-#[cfg(not(unix))]
-fn current_uid() -> u64 {
-    0
 }
 
 /// Tighten the file-mode creation mask around `f` so nodes it creates are
@@ -85,6 +72,47 @@ pub fn socket_path_from(xdg: Option<&str>, uid: u64) -> String {
 /// by opening UDS connections in a tight loop.
 const MAX_CONNECTIONS: usize = 64;
 
+/// Default inactivity lock: the server shuts down after this many seconds
+/// without a single accepted connection.
+///
+/// A long-lived daemon holding session keys and cached derived keys is a
+/// standing exposure on an unattended machine; the idle lock bounds it the
+/// same way `ssh-agent -t` / `gpg-agent` do. Override with
+/// `ONECIPHER_KEY_AGENT_IDLE_SECS`; `0` disables the lock entirely.
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
+
+/// Environment variable overriding [`DEFAULT_IDLE_TIMEOUT_SECS`].
+const IDLE_TIMEOUT_ENV: &str = "ONECIPHER_KEY_AGENT_IDLE_SECS";
+
+/// How often the idle watchdog samples the last-activity timestamp.
+const IDLE_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Current wall-clock time as whole seconds since the Unix epoch.
+///
+/// Saturates at 0 on platforms where the clock predates the epoch — the
+/// value only feeds elapsed-time comparisons, so a wrong absolute value is
+/// harmless.
+fn now_unix_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Parse an idle-timeout seconds value (pure; no env access).
+///
+/// Unset, empty, or unparseable input falls back to
+/// [`DEFAULT_IDLE_TIMEOUT_SECS`] — fail toward locking, never toward a
+/// silently immortal daemon. An explicit `0` disables the lock.
+fn parse_idle_timeout_secs(raw: Option<&str>) -> u64 {
+    match raw.map(str::trim) {
+        Some(s) if !s.is_empty() => s.parse().unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS),
+        _ => DEFAULT_IDLE_TIMEOUT_SECS,
+    }
+}
+
+/// Idle timeout in seconds read from [`IDLE_TIMEOUT_ENV`].
+fn idle_timeout_from_env() -> u64 {
+    parse_idle_timeout_secs(std::env::var(IDLE_TIMEOUT_ENV).ok().as_deref())
+}
+
 /// Run the Key-Agent server with a cooperative shutdown flag.
 ///
 /// The loop checks `stop` between accepts; when set, the listener is dropped
@@ -96,7 +124,28 @@ const MAX_CONNECTIONS: usize = 64;
 ///
 /// `socket_path` overrides `default_socket_path()` if set (used by tests and
 /// the `OC_KEYAGENT_SOCK` env var in `main.rs`).
+///
+/// The inactivity lock is configured from the environment; see
+/// [`run_with_idle_timeout`] for the injectable variant.
 pub fn run(socket_path: Option<&str>, stop: Option<Arc<AtomicBool>>) -> Result<(), KeyAgentError> {
+    run_with_idle_timeout(socket_path, stop, idle_timeout_from_env())
+}
+
+/// Run the Key-Agent server with an explicit inactivity lock.
+///
+/// Identical to [`run`], except the idle timeout is injected rather than
+/// read from the environment. `idle_timeout_secs == 0` disables the lock.
+/// The watchdog requires a `stop` flag to shut the accept loop down; when
+/// none is supplied the lock is skipped (an embedder without a shutdown
+/// handle owns the lifecycle itself).
+///
+/// Each accepted connection refreshes the activity timestamp, so the lock
+/// measures time since the last request rather than process age.
+pub fn run_with_idle_timeout(
+    socket_path: Option<&str>,
+    stop: Option<Arc<AtomicBool>>,
+    idle_timeout_secs: u64,
+) -> Result<(), KeyAgentError> {
     let path = socket_path.map_or_else(default_socket_path, String::from);
 
     // Ensure parent dir exists with mode 0700.
@@ -104,6 +153,11 @@ pub fn run(socket_path: Option<&str>, stop: Option<Arc<AtomicBool>>) -> Result<(
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            // R12: `create_dir_all` succeeds on a pre-existing directory and
+            // `chmod` cannot repair ownership — verify before binding so a
+            // co-resident user cannot squat the predictable socket path with
+            // a symlink or a directory they own.
+            verify_socket_dir(parent)?;
         }
     }
     // Remove stale socket file if present (best-effort).
@@ -119,27 +173,61 @@ pub fn run(socket_path: Option<&str>, stop: Option<Arc<AtomicBool>>) -> Result<(
     // R55: chmod 0600 on the socket file — belt-and-braces behind the umask.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
 
-    tracing::info!(path = %path, "oc-keyagent: listening");
+    tracing::info!(path = %path, idle_timeout_secs, "oc-keyagent: listening");
 
     // Live-connection counter enforcing MAX_CONNECTIONS.
     let live_connections = Arc::new(AtomicUsize::new(0));
 
-    // Cooperative shutdown. `UnixListener::accept` is blocking, so when `stop`
-    // is set we switch the listener to non-blocking and wake the accept loop
-    // with a `WouldBlock` error, which we treat purely as a poll point (rather
-    // than waiting for an unrelated incoming connection to unblock).
+    // Last-activity timestamp (unix seconds), refreshed on every accepted
+    // connection. The CLI opens one connection per request, so an accept is
+    // a faithful "the daemon is in use" signal.
+    let last_activity = Arc::new(AtomicU64::new(now_unix_secs()));
+
+    // Inactivity watchdog: set `stop` once no request has arrived for
+    // `idle_timeout_secs`. The accept loop observes the flag within one
+    // poll interval (50 ms) and performs the normal clean shutdown, which
+    // removes the socket file and zeroizes cached state via the daemon's
+    // shutdown path.
+    if idle_timeout_secs > 0 {
+        if let Some(stop_flag) = stop.clone() {
+            let activity = Arc::clone(&last_activity);
+            thread::spawn(move || {
+                loop {
+                    thread::sleep(IDLE_POLL_INTERVAL);
+                    if stop_flag.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let idle_for = now_unix_secs().saturating_sub(activity.load(Ordering::Relaxed));
+                    if idle_for >= idle_timeout_secs {
+                        tracing::info!(
+                            idle_for,
+                            idle_timeout_secs,
+                            "oc-keyagent: inactivity lock engaged; shutting down"
+                        );
+                        stop_flag.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            });
+        }
+    }
+
+    // Cooperative shutdown. The listener is kept non-blocking at all times:
+    // a blocking `accept()` would sit inside the syscall and never observe
+    // `stop` until an unrelated connection arrived (the daemon only escaped
+    // this via the EINTR from a signal, which the idle watchdog does not
+    // generate). The 50 ms poll bounds shutdown and idle-lock latency at
+    // one wakeup per interval — negligible for a local signing agent.
     loop {
         if stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
             break;
         }
 
-        // Refresh non-blocking mode: off during normal operation, on once a
-        // shutdown has been requested so accept() returns immediately.
-        let want_nonblocking = stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed));
-        let _ = listener.set_nonblocking(want_nonblocking);
+        let _ = listener.set_nonblocking(true);
 
         match listener.accept() {
             Ok((stream, _addr)) => {
+                last_activity.store(now_unix_secs(), Ordering::Relaxed);
                 if live_connections.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
                     tracing::warn!("connection limit {MAX_CONNECTIONS} reached; rejecting");
                     // Best-effort rejection notice so well-behaved clients see
@@ -245,6 +333,95 @@ mod tests {
     fn test_socket_path_from_no_xdg_fallback_includes_uid() {
         // Deviation: per-UID fallback prevents cross-user /tmp collisions.
         assert_eq!(socket_path_from(None, 42), "/tmp/onecipher-key-agent-42.sock");
+    }
+
+    #[test]
+    fn idle_timeout_defaults_when_unset_or_invalid() {
+        assert_eq!(parse_idle_timeout_secs(None), DEFAULT_IDLE_TIMEOUT_SECS);
+        assert_eq!(parse_idle_timeout_secs(Some("")), DEFAULT_IDLE_TIMEOUT_SECS);
+        assert_eq!(parse_idle_timeout_secs(Some("  ")), DEFAULT_IDLE_TIMEOUT_SECS);
+        // Unparseable values fail toward locking, never toward an immortal daemon.
+        assert_eq!(parse_idle_timeout_secs(Some("soon")), DEFAULT_IDLE_TIMEOUT_SECS);
+        assert_eq!(parse_idle_timeout_secs(Some("-1")), DEFAULT_IDLE_TIMEOUT_SECS);
+    }
+
+    #[test]
+    fn idle_timeout_explicit_zero_disables_lock() {
+        assert_eq!(parse_idle_timeout_secs(Some("0")), 0);
+    }
+
+    #[test]
+    fn idle_timeout_parses_positive_values() {
+        assert_eq!(parse_idle_timeout_secs(Some("60")), 60);
+        assert_eq!(parse_idle_timeout_secs(Some(" 30 ")), 30);
+    }
+
+    #[test]
+    fn idle_lock_shuts_server_down_and_removes_socket() {
+        // A unique socket path per test keeps parallel tests isolated; the
+        // name is short because macOS caps Unix socket paths at SUN_LEN.
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let sock = std::env::temp_dir().join(format!(
+            "oc-ka-il-{}-{}.sock",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let sock_str = sock.to_string_lossy().into_owned();
+        let _ = std::fs::remove_file(&sock);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let server = thread::spawn(move || {
+            // One-second idle lock; the watchdog samples once per second.
+            let _ = run_with_idle_timeout(Some(&sock_str), Some(stop_thread), 1);
+        });
+
+        // Wait for the socket to appear, then stay silent.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !sock.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(sock.exists(), "server must bind the socket");
+
+        // No request arrives: within a few seconds the watchdog must engage.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while sock.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(!sock.exists(), "idle lock must remove the socket file");
+        assert!(stop.load(Ordering::Relaxed), "idle lock must set the stop flag");
+        server.join().expect("server thread must exit cleanly");
+    }
+
+    #[test]
+    fn activity_keeps_server_alive_when_idle_lock_disabled() {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let sock = std::env::temp_dir().join(format!(
+            "oc-ka-al-{}-{}.sock",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let sock_str = sock.to_string_lossy().into_owned();
+        let _ = std::fs::remove_file(&sock);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_thread = Arc::clone(&stop);
+        let server = thread::spawn(move || {
+            let _ = run_with_idle_timeout(Some(&sock_str), Some(stop_thread), 0);
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !sock.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(sock.exists(), "server must bind the socket");
+
+        // Idle lock disabled: the socket must survive well past one second.
+        thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(sock.exists(), "a disabled idle lock must keep the server alive");
+
+        stop.store(true, Ordering::Relaxed);
+        server.join().expect("server thread must exit after stop");
     }
 
     #[test]

@@ -30,7 +30,7 @@ publish = false
 # external crates
 age = "0.12.1"
 alloy-dyn-abi = "1.7.3"
-arboard = "3.6.1"
+arboard = "3.7.0"
 axum = "0.8.9"
 backon = "1.6.0"
 base64 = "0.23.1"
@@ -65,8 +65,8 @@ bs58 = "0.5.1"
 chacha20poly1305 = "0.11.0"
 clap = "4.6.7"
 clap_complete = "4.6.11"
-coins-bip32 = "0.14.0"
-coins-bip39 = "0.14.0"
+coins-bip32 = "0.15.0"
+coins-bip39 = "0.15.0"
 criterion = "0.8.2"
 crossterm = "0.29.0"
 dashmap = "6.2.1"
@@ -81,8 +81,8 @@ hex = "0.4.3"
 hex-literal = "1.1.0"
 hkdf = "0.13.0"
 hmac = "0.13"
-hpx = { version = "2.5.28", default-features = false }
-hpx-yawc = "2.5.28"
+hpx = { version = "2.5.31", default-features = false }
+hpx-yawc = "2.5.31"
 # Pure RFC 3986 parser (zero dependencies, no I/O) for CAIP-122 URI /
 # authority validation in `oc-siwx`. R56-safe by construction.
 iri-string = "0.7.12"
@@ -126,7 +126,7 @@ subtle = { version = "2.6.1", default-features = false }
 tap-caip = "0.7.0"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
-tokio = "1.53.2"
+tokio = "1.53.3"
 toml = "1.1.8"
 totp-rs = { version = "6.0.0", default-features = false }
 tower = "0.5.3"

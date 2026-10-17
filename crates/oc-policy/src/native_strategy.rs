@@ -242,7 +242,7 @@ pub fn strategy_request_from_pay(req: &PayRequest, method: &str) -> StrategyEval
 
 /// Deprecated alias retained for callers migrating from the retired Wasm
 /// strategy system.
-#[deprecated(note = "renamed to `strategy_request_from_pay`")]
+#[deprecated(since = "0.1.0", note = "renamed to `strategy_request_from_pay`")]
 pub fn wasm_request_from_pay(req: &PayRequest, method: &str) -> StrategyEvalRequest {
     strategy_request_from_pay(req, method)
 }

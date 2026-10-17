@@ -78,11 +78,6 @@ ext-test:
 ext-e2e:
     cd extension && npm run test:e2e
 
-# OCWP conformance vectors — same JSON fixtures on both ends.
-ext-conformance:
-    cd extension && npx vitest run tests/conformance.test.ts
-    RUSTC_WRAPPER= cargo test -p oc-cli --bin onecipher vectors
-
 # OCWP conformance vectors — same JSON fixtures on both ends (design §9.4).
 ext-conformance:
     cd extension && npx vitest run tests/conformance.test.ts

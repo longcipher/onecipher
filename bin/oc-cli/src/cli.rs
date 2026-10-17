@@ -20,6 +20,12 @@ pub(crate) struct Cli {
     #[arg(long, hide = true)]
     pub(crate) enclave_child: bool,
 
+    /// Name of the secret store to operate on (default: the single
+    /// `~/.onecipher/store`). With `--store work` the store lives at
+    /// `~/.onecipher/stores/work`.
+    #[arg(short = 's', long, value_name = "NAME", env = "ONECIPHER_STORE")]
+    pub(crate) store: Option<String>,
+
     #[command(subcommand)]
     pub(crate) command: Option<Commands>,
 }
@@ -721,11 +727,65 @@ pub(crate) enum SecretCommands {
         /// New name
         new: String,
     },
-    /// Edit a secret in $EDITOR
+    /// Dump the decrypted contents of every secret (pipe to grep/fzf/less)
+    Cat {
+        /// Only dump secrets whose name starts with this prefix (e.g. "github")
+        #[arg(index = 1, default_value_t = String::from(""))]
+        prefix: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the directory of the active secret store (for scripting)
+    Dir {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List the available secret stores
+    Stores {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pick a secret and clip or type parts of it
+    ///
+    /// Actions are pairs, executed in order:
+    /// [clip <KEY> | type-content <KEY> | type-text <TEXT> | sleep <MS>]...
+    /// KEY is "secret" (the value), "notes", "otp" (generate a code from an
+    /// otpauth:// value), or a key of the entry's extra JSON.
+    Menu {
+        /// Use this entry without opening a picker (script-friendly)
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+        /// dmenu-like program used to select an entry
+        #[arg(long, value_name = "PROGRAM")]
+        menu_program: Option<String>,
+        /// Program used to type text
+        #[arg(long, value_name = "PROGRAM")]
+        typing_program: Option<String>,
+        /// Delay between keystrokes, passed to the typing program
+        #[arg(short = 'd', long, value_name = "MILLISECONDS")]
+        key_delay: Option<u16>,
+        /// Copy the value to the clipboard and clear it after N seconds
+        /// (0 disables clearing)
+        #[arg(long, value_name = "SECONDS", default_value_t = 45)]
+        clipboard_timeout: u64,
+        /// Actions, e.g.: type-content user type-text "\t" type-content secret
+        #[arg(
+            value_name = "ACTIONS",
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            required = true
+        )]
+        action_args: Vec<String>,
+    },
+    /// Edit a secret (built-in in-memory editor, or $EDITOR / --editor)
     Edit {
         /// Secret name
         name: String,
-        /// Editor to use (overrides $EDITOR)
+        /// External editor to use instead of the built-in editor (also
+        /// overrides $EDITOR/$VISUAL)
         #[arg(long)]
         editor: Option<String>,
     },
@@ -1404,6 +1464,15 @@ pub(crate) enum CliError {
     Migration(#[from] oc_secret::migrate::MigrationError),
     #[error("{0}")]
     InvalidArgs(String),
+    /// Pre-classified failure carrying its own stable SCREAMING_SNAKE code.
+    ///
+    /// Used where a library error deserves a more precise exit status than
+    /// its category default — e.g. `SecretStoreError::NotFound` must map to
+    /// `EX_NOINPUT` (66), not the generic `SECRET_STORE_ERROR` bucket. The
+    /// code also appears in the `--json` error envelope, so scripts can
+    /// branch on it.
+    #[error("{message}")]
+    Coded { code: &'static str, message: String },
     #[error("Network-Agent not available (Key-Agent daemon not reachable via UDS)")]
     NetAgentUnavailable,
     #[error("daemon init failed: {0}")]
@@ -1451,6 +1520,7 @@ impl CliError {
             Self::Recipient(_) => "RECIPIENT_ERROR",
             Self::Migration(_) => "MIGRATION_ERROR",
             Self::InvalidArgs(_) => "INVALID_ARGS",
+            Self::Coded { code, .. } => code,
             Self::NetAgentUnavailable => "NET_AGENT_UNAVAILABLE",
             Self::DaemonInit(_) => "DAEMON_INIT_FAILED",
             Self::KeyAgent(_) => "KEY_AGENT_ERROR",

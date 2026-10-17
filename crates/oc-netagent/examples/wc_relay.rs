@@ -189,8 +189,7 @@ async fn deliver(state: &Arc<RelayState>, topic: &str, message: &str, exclude: O
     let targets: Vec<u64> = {
         let subs = state.subs.lock().await;
         subs.get(topic)
-            .map(|v| v.iter().copied().filter(|c| Some(*c) != exclude).collect())
-            .unwrap_or_default()
+            .map_or_else(Vec::new, |v| v.iter().copied().filter(|c| Some(*c) != exclude).collect())
     };
 
     let sockets = state.sockets.lock().await;

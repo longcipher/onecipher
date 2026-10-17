@@ -109,6 +109,29 @@ pub(crate) fn run_daemon() -> Result<(), CliError> {
     let ka_stop_thread = ka_stop.clone();
     let (ka_err_tx, ka_err_rx) = std::sync::mpsc::channel::<String>();
     std::thread::spawn(move || {
+        // T13: process memory hardening (RLIMIT_CORE=0, mlockall,
+        // dumpable/debugger denial) before accepting any request. Under
+        // `OC_STRICT_HARDEN=1` an incomplete snapshot is fail-closed;
+        // otherwise it is recorded for `doctor`. The hardening module's
+        // contract is that daemon startup prefers the strict variant — the
+        // enclave child already did; the in-process Key-Agent did not.
+        match oc_keyagent::apply_hardening_strict() {
+            Ok(status) => {
+                if !status.complete() {
+                    eprintln!(
+                        "WARNING: process memory hardening incomplete \
+                         (coredump_disabled={} memory_locked={} debugger_denied={}); \
+                         set OC_STRICT_HARDEN=1 to fail closed",
+                        status.coredump_disabled, status.memory_locked, status.debugger_denied
+                    );
+                }
+            }
+            Err(e) => {
+                // Fail-closed: an unhardened signer must not serve.
+                let _ = ka_err_tx.send(format!("hardening: {e}"));
+                return;
+            }
+        }
         // R12d/R53: confine the signing core BEFORE accepting any request.
         // The Linux seccomp filter is per-thread, so this does not restrict
         // the tokio WSS/WebUI layers; on macOS Seatbelt is deliberately

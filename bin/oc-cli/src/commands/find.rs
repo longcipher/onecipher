@@ -251,7 +251,10 @@ fn interactive_select(entries: &[SecretIndexEntry]) -> Result<(), CliError> {
 }
 
 /// The core selector loop. Runs in raw mode with alternate screen.
-fn run_selector(
+///
+/// Exposed so `secret menu` can reuse the same picker instead of growing a
+/// second terminal UI.
+pub(crate) fn run_selector(
     entries: &[SecretIndexEntry],
     stdout: &mut io::Stdout,
 ) -> Result<Option<SecretIndexEntry>, CliError> {

@@ -61,6 +61,24 @@ fn main() {
 
     let cli = Cli::parse();
 
+    // Publish the selected store name so every command — and any child
+    // process, e.g. `onecipher env -- ...` — resolves the same store. The
+    // flag is validated here (usage error 64) rather than deep in the path
+    // code, so a bad name never reaches the filesystem.
+    if let Some(store) = cli.store.as_deref() {
+        if let Err(e) = commands::validate_store_name(store) {
+            eprintln!("error: {e}");
+            std::process::exit(crate::exit::EX_USAGE);
+        }
+        // SAFETY: `set_var` is `unsafe` because concurrent environment access
+        // is undefined behavior. This runs on the dispatch path before any
+        // child process or thread is spawned; no other thread reads the
+        // environment concurrently.
+        unsafe {
+            std::env::set_var(commands::STORE_ENV, store);
+        }
+    }
+
     // Per-request enclave child: decrypt→sign→wipe for exactly one piped
     // request, then exit. This branch runs before any daemon/client setup so
     // the child stays minimal (no tokio runtime, no UDS listeners). Stdout
@@ -419,6 +437,28 @@ fn dispatch_secret(subcommand: cli::SecretCommands) -> Result<(), CliError> {
         }
         cli::SecretCommands::Copy { src, dst, force } => commands::secret::copy(&src, &dst, force),
         cli::SecretCommands::Move { src, dst, force } => commands::secret::mv(&src, &dst, force),
+        cli::SecretCommands::Cat { prefix, json } => commands::secret::cat(&prefix, json),
+        cli::SecretCommands::Dir { json } => commands::secret::dir(json),
+        cli::SecretCommands::Stores { json } => commands::secret::stores(json),
+        cli::SecretCommands::Menu {
+            name,
+            menu_program,
+            typing_program,
+            key_delay,
+            clipboard_timeout,
+            action_args,
+        } => {
+            // The picker needs a terminal (or an external menu program).
+            output::reject_interactive_if_json("secret menu")?;
+            commands::secret_menu::run(
+                name.as_deref(),
+                menu_program.as_deref(),
+                typing_program.as_deref(),
+                key_delay,
+                clipboard_timeout,
+                &action_args,
+            )
+        }
     }
 }
 

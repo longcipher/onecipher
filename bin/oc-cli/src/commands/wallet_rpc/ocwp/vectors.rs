@@ -296,7 +296,7 @@ fn passkey_challenge_resolves_an_omitted_credential_id() {
     // `credential_ids_for_wallet` must not leak another wallet's credentials.
     let store = oc_keyagent::passkey::PasskeyPubkeyStore::open_default().expect("store");
     assert_eq!(store.credential_ids_for_wallet(&wallet_id), vec![credential_id.to_string()]);
-    assert!(store.credential_ids_for_wallet("a-different-wallet").is_empty());
+    assert_eq!(store.credential_ids_for_wallet("a-different-wallet"), Vec::<String>::new());
 }
 
 /// The P-256 generator point G, an uncompressed SEC1 encoding.

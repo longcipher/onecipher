@@ -50,11 +50,19 @@ pub(crate) fn exit_code_for(code: &str) -> i32 {
         "MNEMONIC_ERROR" |
         "HD_ERROR" |
         "JSON_ERROR" |
-        "AMBIGUOUS_WALLET" => EX_DATAERR,
+        "AMBIGUOUS_WALLET" |
+        // Secret-store data failures (D): a rejected name, tampered
+        // ciphertext, or a stale generation is incorrect input, not a
+        // missing input or an internal fault.
+        "SECRET_NAME_INVALID" |
+        "SECRET_TAMPERED" |
+        "SECRET_GENERATION_MISMATCH" => EX_DATAERR,
         // 66: the named input does not exist.
-        "WALLET_NOT_FOUND" | "API_KEY_NOT_FOUND" | "SECRET_STORE_ERROR" => EX_NOINPUT,
+        "WALLET_NOT_FOUND" | "API_KEY_NOT_FOUND" | "SECRET_NOT_FOUND" | "SECRET_STORE_ERROR" => {
+            EX_NOINPUT
+        }
         // 73: the requested output cannot be created.
-        "WALLET_NAME_EXISTS" => EX_CANTCREAT,
+        "WALLET_NAME_EXISTS" | "SECRET_EXISTS" => EX_CANTCREAT,
         // 77: the operation is not permitted.
         "POLICY_DENIED" | "API_KEY_EXPIRED" | "INVALID_PASSPHRASE" => EX_NOPERM,
         // 70: everything else is an internal failure.
@@ -88,9 +96,25 @@ mod tests {
 
     #[test]
     fn missing_inputs_map_to_66() {
-        for code in ["WALLET_NOT_FOUND", "API_KEY_NOT_FOUND", "SECRET_STORE_ERROR"] {
+        for code in
+            ["WALLET_NOT_FOUND", "API_KEY_NOT_FOUND", "SECRET_NOT_FOUND", "SECRET_STORE_ERROR"]
+        {
             assert_eq!(exit_code_for(code), 66, "code {code}");
         }
+    }
+
+    #[test]
+    fn secret_store_data_failures_map_to_65() {
+        // D: rejected names, tampered ciphertext, and stale generations are
+        // incorrect input data, not missing inputs.
+        for code in ["SECRET_NAME_INVALID", "SECRET_TAMPERED", "SECRET_GENERATION_MISMATCH"] {
+            assert_eq!(exit_code_for(code), 65, "code {code}");
+        }
+    }
+
+    #[test]
+    fn secret_exists_maps_to_73() {
+        assert_eq!(exit_code_for("SECRET_EXISTS"), 73);
     }
 
     #[test]
