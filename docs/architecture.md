@@ -173,7 +173,7 @@ bin/oc-cli (single binary)
 1. Request arrives (CLI command or WC v2 JSON-RPC)
 2. If daemon mode: forward to SigningEngine via spawn_blocking
 3. SigningEngine verifies unlock token (not expired)
-4. If agent token (ows_key_): evaluate all attached policies (AND semantics)
+4. If agent token (oc_key_): evaluate all attached policies (AND semantics)
 5. If owner passphrase: skip policy evaluation (sudo access)
 6. If denied → return POLICY_DENIED (key material never touched)
 7. Decrypt wallet secret into HardenedBytes (mlock'd, zeroized on drop)

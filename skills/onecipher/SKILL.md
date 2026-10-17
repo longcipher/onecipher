@@ -179,9 +179,14 @@ resolved), never a silent fallback to `/tmp` or `.`.
    `OC_WALLET_RPC_LISTEN` is set; non-loopback binds are rejected at
    startup; signing methods need per-request Passkey authorization.
    Never proxy it to a public interface.
-5. **`env` injects secrets into a child process.** Prefer `--exec` semantics
-   awareness, minimal `--name` scope, and never `set -x` / debug-log the
-   child environment.
+5. **`env` injects secrets into a child process.** Prefer minimal `--name`
+   scope, explicit `--reference KEY=oc://secret[?field=...]` bindings, or a
+   project `.onecipher/environments.toml` selected via `--environment`.
+   Never `set -x` / debug-log the child environment. `--print --format
+   dotenv|json` materializes plaintext on stdout for wrappers/plugins, so use
+   it only for short-lived handoffs and avoid writing the output to disk.
+   `--validate` is the safer hook path when a tool only needs to confirm that
+   references resolve.
 6. **`update` shells out to `curl`/`wget`.** Review the downloaded artifact
    via `sbom verify` before installing in sensitive environments.
 7. **Destructive commands need explicit confirmation**

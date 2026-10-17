@@ -403,7 +403,7 @@ onecipher key create --name "claude-agent" \
 | `--policy <ID>` | Policy ID to attach (repeatable) |
 | `--expires-at <TS>` | Optional expiry (ISO-8601) |
 
-Output includes the raw token (`ows_key_...`) — shown once. The agent uses this token in place of the passphrase.
+Output includes the raw token (`oc_key_...`) — shown once. The agent uses this token in place of the passphrase.
 
 ### `onecipher key list` / `key revoke`
 
@@ -605,9 +605,9 @@ against the key file, enforces per-key `SecretPermissions`
 SecretStore:
 
 ```bash
-ONECIPHER_PASSPHRASE="ows_key_..." onecipher agent-secret get --name api-keys/openai
-ONECIPHER_PASSPHRASE="ows_key_..." onecipher agent-secret list --json
-ONECIPHER_PASSPHRASE="ows_key_..." onecipher agent-secret totp --name github-2fa
+ONECIPHER_PASSPHRASE="oc_key_..." onecipher agent-secret get --name api-keys/openai
+ONECIPHER_PASSPHRASE="oc_key_..." onecipher agent-secret list --json
+ONECIPHER_PASSPHRASE="oc_key_..." onecipher agent-secret totp --name github-2fa
 ```
 
 ### Environment injection & search
@@ -616,6 +616,27 @@ ONECIPHER_PASSPHRASE="ows_key_..." onecipher agent-secret totp --name github-2fa
 # Run a command with secrets injected as environment variables
 onecipher env --name api-keys/openai --name db/prod -- ./deploy.sh
 onecipher env --name secrets/dir --keep-case --exec -- printenv   # exec(3) mode
+
+# Resolve explicit secret references (1Password-style runtime indirection)
+onecipher env \
+  --reference OPENAI_API_KEY=oc://api-keys/openai \
+  --reference GITHUB_OTP=oc://github-2fa?field=otp \
+  -- ./run-agent.sh
+
+# Load a named project environment from `.onecipher/environments.toml`
+onecipher env --manifest .onecipher/environments.toml --environment dev -- ./run-agent.sh
+onecipher env --environment dev -- ./run-agent.sh   # upward manifest discovery
+
+# Render an ephemeral dotenv/json payload for plugins, hooks, or wrappers
+onecipher env \
+  --reference OPENAI_API_KEY=oc://api-keys/openai \
+  --reference DATABASE_URL=oc://db/prod \
+  --print --format dotenv
+onecipher env --reference OPENAI_API_KEY=oc://api-keys/openai --print --format json
+
+# Validate manifest-backed or explicit references without printing secret values
+onecipher env --environment dev --validate
+onecipher env --environment dev --validate --format json
 
 # Search inside decrypted content (case-insensitive substring, or regex)
 onecipher grep "sk-" [--regex] [--json]
@@ -629,6 +650,30 @@ onecipher fsck [--fix] [--decrypt]
 # Version history (requires the `git` feature)
 onecipher history api-keys/openai [--password] [--limit 20] [--json]
 ```
+
+### Plugin / MCP bootstrap
+
+```bash
+# Generate project-local OneCipher plugin files for Claude Code, Cursor, and Codex
+onecipher plugin init \
+  --dir . \
+  --environment dev \
+  --reference OPENAI_API_KEY=oc://api-keys/openai \
+  --reference GITHUB_OTP=oc://github-2fa?field=otp
+
+# Run the local stdio MCP server (normally launched by the IDE/agent client)
+onecipher mcp serve --manifest .onecipher/environments.toml --environment dev
+```
+
+`plugin init` writes:
+
+- `.onecipher/environments.toml`
+- `.mcp.json`
+- `.cursor/mcp.json`
+- `.codex/config.toml`
+
+The MCP server intentionally exposes environment names, variable names, and
+validation results without returning secret values.
 
 ### Git sync (optional, `git` feature)
 

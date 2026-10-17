@@ -211,27 +211,16 @@ pub(crate) enum Commands {
         subcommand: AgentSecretCommands,
     },
     /// Run a command with secrets injected as environment variables
-    Env {
-        /// Secret names to inject (repeatable, or directory prefix for batch)
-        #[arg(long = "name")]
-        names: Vec<String>,
-        /// Direct `KEY=VALUE` pairs to inject (repeatable; full KEY kept as-is
-        /// to avoid collisions after case/`.` normalization)
-        #[arg(long = "set", short = 'e')]
-        set: Vec<String>,
-        /// Prompt for a value for KEY on stdin without echoing (repeatable;
-        /// value is `Zeroizing` and binary/NUL input is rejected)
-        #[arg(long = "prompt", short = 'p')]
-        prompt: Vec<String>,
-        /// Keep original key case (default: uppercase)
-        #[arg(long)]
-        keep_case: bool,
-        /// Use exec(3) to replace current process
-        #[arg(long)]
-        exec: bool,
-        /// Command to run
-        #[arg(trailing_var_arg = true, required = true)]
-        command: Vec<String>,
+    Env(EnvArgs),
+    /// Generate project plugin / MCP configuration for Claude, Cursor, and Codex
+    Plugin {
+        #[command(subcommand)]
+        subcommand: PluginCommands,
+    },
+    /// Run the OneCipher MCP server for AI clients
+    Mcp {
+        #[command(subcommand)]
+        subcommand: McpCommands,
     },
     /// Migrate legacy keystore v3 wallets to age-encrypted secrets
     Migrate {
@@ -353,6 +342,49 @@ pub(crate) enum Commands {
         #[arg(long)]
         json: bool,
     },
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct EnvArgs {
+    /// Secret names to inject (repeatable, or directory prefix for batch)
+    #[arg(long = "name")]
+    pub names: Vec<String>,
+    /// Explicit `KEY=oc://secret[?field=...]` bindings (repeatable)
+    #[arg(long = "reference")]
+    pub references: Vec<String>,
+    /// Environment manifest path (defaults to upward search for
+    /// `.onecipher/environments.toml`)
+    #[arg(long)]
+    pub manifest: Option<std::path::PathBuf>,
+    /// Named environment inside the manifest (default: manifest's `default_environment`)
+    #[arg(long)]
+    pub environment: Option<String>,
+    /// Direct `KEY=VALUE` pairs to inject (repeatable; full KEY kept as-is
+    /// to avoid collisions after case/`.` normalization)
+    #[arg(long = "set", short = 'e')]
+    pub set: Vec<String>,
+    /// Prompt for a value for KEY on stdin without echoing (repeatable;
+    /// value is `Zeroizing` and binary/NUL input is rejected)
+    #[arg(long = "prompt", short = 'p')]
+    pub prompt: Vec<String>,
+    /// Keep original key case (default: uppercase)
+    #[arg(long)]
+    pub keep_case: bool,
+    /// Use exec(3) to replace current process
+    #[arg(long)]
+    pub exec: bool,
+    /// Print the resolved environment instead of running a child command
+    #[arg(long)]
+    pub print: bool,
+    /// Validate reference-backed bindings without printing secret values
+    #[arg(long)]
+    pub validate: bool,
+    /// Output format for `--print` (`dotenv` or `json`)
+    #[arg(long, default_value = "dotenv")]
+    pub format: String,
+    /// Command to run
+    #[arg(trailing_var_arg = true)]
+    pub command: Vec<String>,
 }
 
 // ===========================================================================
@@ -1430,6 +1462,36 @@ pub(crate) enum ConfigCommands {
         key: String,
         /// Value to set
         value: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PluginCommands {
+    /// Initialize project-local environment + MCP configuration files
+    Init {
+        /// Project directory where config files should be written
+        #[arg(long, default_value = ".")]
+        dir: std::path::PathBuf,
+        /// Environment section name inside `.onecipher/environments.toml`
+        #[arg(long, default_value = "default")]
+        environment: String,
+        /// Explicit `KEY=oc://secret[?field=...]` bindings to seed into the manifest
+        #[arg(long = "reference")]
+        references: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum McpCommands {
+    /// Run a stdio MCP server exposing OneCipher environment metadata
+    Serve {
+        /// Environment manifest path (defaults to upward search for
+        /// `.onecipher/environments.toml`)
+        #[arg(long)]
+        manifest: Option<std::path::PathBuf>,
+        /// Named environment inside the manifest (default: manifest's `default_environment`)
+        #[arg(long)]
+        environment: Option<String>,
     },
 }
 

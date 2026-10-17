@@ -30,6 +30,7 @@
 - [Design](design.md) — staged architecture evolution (unified binary, unified secret vault, intent layer)
 - [Browser Extension Wallet Design](extension-wallet-design.md) — multi-end architecture (OCWP), MV3 extension, consent queue, security model
 - [Web UI Approval Design](webui-approval-design.md) — local browser approval flow (Leptos CSR + axum + WebAuthn)
+- [1Password Comparison](1password-comparison.md) — plugin/env/password-management gap analysis and roadmap
 - [x402/MPP Integration Gaps](x402-mpp-integration-gaps.md) — live-test findings and fixes applied to the wallet
 
 ## Specification

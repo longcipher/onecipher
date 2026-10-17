@@ -297,6 +297,44 @@ fn store_flag_selects_a_named_store() {
 }
 
 #[test]
+fn plugin_init_writes_project_configs() {
+    let home = HomeGuard::new("plugin-init");
+    let project = HomeGuard::new("plugin-project");
+
+    let run = run_cli(
+        home.path(),
+        &[
+            "plugin",
+            "init",
+            "--dir",
+            &project.path().to_string_lossy(),
+            "--environment",
+            "dev",
+            "--reference",
+            "OPENAI_API_KEY=oc://api/openai",
+            "--reference",
+            "GITHUB_OTP=oc://github-2fa?field=otp",
+        ],
+        "",
+    );
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+
+    let manifest = project.path().join(".onecipher/environments.toml");
+    let claude = project.path().join(".mcp.json");
+    let cursor = project.path().join(".cursor/mcp.json");
+    let codex = project.path().join(".codex/config.toml");
+
+    assert!(manifest.exists(), "manifest must exist");
+    assert!(claude.exists(), "Claude config must exist");
+    assert!(cursor.exists(), "Cursor config must exist");
+    assert!(codex.exists(), "Codex config must exist");
+
+    let claude_text = std::fs::read_to_string(&claude).expect("read Claude config");
+    assert!(claude_text.contains("\"--environment\""), "config: {claude_text}");
+    assert!(!claude_text.contains("--manifest"), "config: {claude_text}");
+}
+
+#[test]
 fn secret_cat_dumps_decrypted_contents() {
     let home = HomeGuard::new("cat");
     assert_eq!(age_init(home.path()).code, Some(0));
@@ -347,6 +385,144 @@ fn secret_get_field_otp_generates_a_code() {
         printed.len() == 6 && printed.chars().all(|c| c.is_ascii_digit()),
         "expected a 6-digit code, got: {printed}"
     );
+}
+
+#[test]
+fn env_validate_checks_manifest_without_printing_secret_values() {
+    let home = HomeGuard::new("env-validate");
+    assert_eq!(age_init(home.path()).code, Some(0));
+
+    let add = run_cli(
+        home.path(),
+        &["secret", "add", "api/openai", "--type", "password", "--stdin"],
+        r#"{"secret":"sk-e2e-value"}"#,
+    );
+    assert_eq!(add.code, Some(0), "{}", add.stderr);
+
+    let project = HomeGuard::new("env-validate-project");
+    let manifest_dir = project.path().join(".onecipher");
+    std::fs::create_dir_all(&manifest_dir).expect("create manifest dir");
+    let manifest = manifest_dir.join("environments.toml");
+    std::fs::write(
+        &manifest,
+        r#"
+version = 1
+default_environment = "default"
+
+[environments.default]
+OPENAI_API_KEY = "oc://api/openai"
+"#,
+    )
+    .expect("write manifest");
+
+    let run = run_cli(
+        home.path(),
+        &[
+            "env",
+            "--manifest",
+            &manifest.to_string_lossy(),
+            "--environment",
+            "default",
+            "--validate",
+        ],
+        "",
+    );
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(run.stdout.contains("ok   OPENAI_API_KEY"), "stdout: {}", run.stdout);
+    assert!(!run.stdout.contains("sk-e2e-value"), "stdout must not leak secrets: {}", run.stdout);
+}
+
+#[test]
+fn env_print_with_set_values_does_not_require_age_init() {
+    let home = HomeGuard::new("env-print-plain");
+
+    let run = run_cli(home.path(), &["env", "--set", "PLAIN_TEXT=hello", "--print"], "");
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(run.stdout.contains("PLAIN_TEXT=\"hello\""), "stdout: {}", run.stdout);
+}
+
+#[test]
+fn mcp_serve_rejects_tools_before_initialize() {
+    let home = HomeGuard::new("mcp-lifecycle");
+    let input = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list"
+    })
+    .to_string();
+
+    let run = run_cli(home.path(), &["mcp", "serve"], &input);
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(run.stdout.contains("\"code\":-32002"), "stdout: {}", run.stdout);
+}
+
+#[test]
+fn mcp_serve_initializes_and_validates_environment() {
+    let home = HomeGuard::new("mcp-happy-path");
+    assert_eq!(age_init(home.path()).code, Some(0));
+
+    let add = run_cli(
+        home.path(),
+        &["secret", "add", "api/openai", "--type", "password", "--stdin"],
+        r#"{"secret":"sk-mcp-value"}"#,
+    );
+    assert_eq!(add.code, Some(0), "{}", add.stderr);
+
+    let project = HomeGuard::new("mcp-project");
+    let manifest_dir = project.path().join(".onecipher");
+    std::fs::create_dir_all(&manifest_dir).expect("create manifest dir");
+    let manifest = manifest_dir.join("environments.toml");
+    std::fs::write(
+        &manifest,
+        r#"
+version = 1
+default_environment = "default"
+
+[environments.default]
+OPENAI_API_KEY = "oc://api/openai"
+"#,
+    )
+    .expect("write manifest");
+
+    let input = [
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "e2e", "version": "1.0.0" }
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "onecipher_validate_environment",
+                "arguments": { "environment": "default" }
+            }
+        }),
+    ]
+    .into_iter()
+    .map(|value| value.to_string())
+    .collect::<Vec<_>>()
+    .join("\n");
+
+    let run = run_cli(
+        home.path(),
+        &["mcp", "serve", "--manifest", &manifest.to_string_lossy(), "--environment", "default"],
+        &input,
+    );
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    assert!(run.stdout.contains("\"protocolVersion\":\"2025-06-18\""), "stdout: {}", run.stdout);
+    assert!(run.stdout.contains("\"ok\":true"), "stdout: {}", run.stdout);
+    assert!(!run.stdout.contains("sk-mcp-value"), "stdout must not leak secrets: {}", run.stdout);
 }
 
 #[test]

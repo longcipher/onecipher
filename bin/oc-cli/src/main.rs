@@ -573,15 +573,37 @@ fn dispatch_send(
     commands::send::run(&chain, &wallet, &to, &token, &amount, &rpc_url, index, gas_limit, json)
 }
 
-fn dispatch_env(
-    names: Vec<String>,
-    set: Vec<String>,
-    prompt: Vec<String>,
-    keep_case: bool,
-    exec: bool,
-    command: Vec<String>,
-) -> Result<(), CliError> {
-    commands::env_cmd::run(&names, &set, &prompt, keep_case, exec, &command)
+fn dispatch_env(args: cli::EnvArgs) -> Result<(), CliError> {
+    commands::env_cmd::run(commands::env_cmd::EnvRunOptions {
+        names: &args.names,
+        set: &args.set,
+        prompt: &args.prompt,
+        references: &args.references,
+        manifest: args.manifest.as_ref(),
+        environment: args.environment.as_deref(),
+        keep_case: args.keep_case,
+        exec: args.exec,
+        print: args.print,
+        validate: args.validate,
+        format: &args.format,
+        command: &args.command,
+    })
+}
+
+fn dispatch_plugin(subcommand: cli::PluginCommands) -> Result<(), CliError> {
+    match subcommand {
+        cli::PluginCommands::Init { dir, environment, references } => {
+            commands::plugin::run_init(&dir, &environment, &references)
+        }
+    }
+}
+
+fn dispatch_mcp(subcommand: cli::McpCommands) -> Result<(), CliError> {
+    match subcommand {
+        cli::McpCommands::Serve { manifest, environment } => {
+            commands::mcp::run(manifest.as_ref(), environment.as_deref())
+        }
+    }
 }
 
 /// TUI entry point that skips Key-Agent client setup entirely.
@@ -736,6 +758,8 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         Commands::Policy { subcommand } => dispatch_policy(subcommand),
         Commands::Key { subcommand } => dispatch_key(subcommand),
         Commands::Config { subcommand } => dispatch_config(subcommand),
+        Commands::Plugin { subcommand } => dispatch_plugin(subcommand),
+        Commands::Mcp { subcommand } => dispatch_mcp(subcommand),
         Commands::Audit { subcommand } => dispatch_audit(subcommand),
         Commands::SessionKey { subcommand } => dispatch_session_key(subcommand, client),
         Commands::Service { subcommand } => dispatch_service(subcommand),
@@ -791,9 +815,7 @@ fn run(cli: Cli, client: &dyn netagent::NetAgentClient) -> Result<(), CliError> 
         }
         Commands::Fsck { fix, decrypt } => commands::fsck::run(fix, decrypt),
         Commands::Completion { shell } => commands::completion::run(&shell),
-        Commands::Env { names, set, prompt, keep_case, exec, command } => {
-            dispatch_env(names, set, prompt, keep_case, exec, command)
-        }
+        Commands::Env(args) => dispatch_env(args),
         Commands::Send { chain, to, token, amount, wallet, rpc_url, index, gas_limit, json } => {
             dispatch_send(chain, to, token, amount, wallet, rpc_url, index, gas_limit, json)
         }

@@ -87,20 +87,20 @@ onecipher policy create --file policy.json
 
 ```bash
 onecipher key create --name "my-agent" --wallet agent-treasury --policy agent-limits
-# => ows_key_a1b2c3d4...  (save this — shown once)
+# => oc_key_a1b2c3d4...  (save this — shown once)
 ```
 
 ### 3. Use the token to sign
 
-The agent passes the API token where the passphrase would go. OneCipher detects the `ows_key_` prefix, evaluates all attached policies, and only signs if every policy allows it.
+The agent passes the API token where the passphrase would go. OneCipher detects the `oc_key_` prefix, evaluates all attached policies, and only signs if every policy allows it.
 
 ```bash
 # Agent signs on Base — policy allows it
-ONECIPHER_PASSPHRASE="ows_key_a1b2c3d4..." \
+ONECIPHER_PASSPHRASE="oc_key_a1b2c3d4..." \
   onecipher sign tx --wallet agent-treasury --chain base --tx 0x02f8...
 
 # Agent tries Ethereum mainnet — policy denies it
-ONECIPHER_PASSPHRASE="ows_key_a1b2c3d4..." \
+ONECIPHER_PASSPHRASE="oc_key_a1b2c3d4..." \
   onecipher sign tx --wallet agent-treasury --chain ethereum --tx 0x02f8...
 # error: policy denied: chain eip155:1 not in allowlist
 ```
@@ -110,7 +110,7 @@ Agents can also read secrets (with per-key read patterns) via
 variables:
 
 ```bash
-ONECIPHER_PASSPHRASE="ows_key_..." onecipher env --name api-keys/openai -- ./agent.sh
+ONECIPHER_PASSPHRASE="oc_key_..." onecipher env --name api-keys/openai -- ./agent.sh
 ```
 
 ### 4. Revoke access

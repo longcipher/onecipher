@@ -1418,6 +1418,196 @@ fn test_env_command_injects_secret() {
     assert_eq!(got, "envval", "env injection must expose secret as ENV_SEC");
 }
 
+#[test]
+fn test_env_command_injects_reference_secret() {
+    let _home = HomeGuard::new();
+    age_init();
+    set_env("ONECIPHER_SECRET", "ref-secret");
+    run_ok(&["onecipher", "secret", "add", "api/openai", "--type", "password"]);
+    remove_env("ONECIPHER_SECRET");
+
+    let out_file = _home.path().join("envref.txt");
+    run_ok(&[
+        "onecipher",
+        "env",
+        "--reference",
+        "OPENAI_API_KEY=oc://api/openai",
+        "--exec",
+        "--",
+        "sh",
+        "-c",
+        &format!("printf '%s' \"$OPENAI_API_KEY\" > {}", out_file.to_string_lossy()),
+    ]);
+    let got = std::fs::read_to_string(&out_file).unwrap_or_default();
+    assert_eq!(got, "ref-secret", "reference injection must resolve oc:// secrets");
+}
+
+#[test]
+fn test_env_command_injects_reference_otp() {
+    let _home = HomeGuard::new();
+    age_init();
+    run_ok(&[
+        "onecipher",
+        "totp",
+        "add",
+        "github-2fa",
+        "--secret",
+        "JBSWY3DPEHPK3PXP",
+        "--issuer",
+        "GitHub",
+        "--account",
+        "alice@example.com",
+    ]);
+
+    let out_file = _home.path().join("envotp.txt");
+    run_ok(&[
+        "onecipher",
+        "env",
+        "--reference",
+        "GITHUB_OTP=oc://github-2fa?field=otp",
+        "--exec",
+        "--",
+        "sh",
+        "-c",
+        &format!("printf '%s' \"$GITHUB_OTP\" > {}", out_file.to_string_lossy()),
+    ]);
+    let got = std::fs::read_to_string(&out_file).unwrap_or_default();
+    assert_eq!(got.len(), 6, "TOTP reference must resolve to a 6-digit code");
+    assert!(got.chars().all(|ch| ch.is_ascii_digit()), "got: {got}");
+}
+
+#[test]
+fn test_env_command_injects_manifest_environment() {
+    let _home = HomeGuard::new();
+    age_init();
+    set_env("ONECIPHER_SECRET", "manifest-secret");
+    run_ok(&["onecipher", "secret", "add", "api/openai", "--type", "password"]);
+    remove_env("ONECIPHER_SECRET");
+
+    let project = tempfile::tempdir().unwrap();
+    let cfg_dir = project.path().join(".onecipher");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let manifest = cfg_dir.join("environments.toml");
+    std::fs::write(
+        &manifest,
+        r#"
+version = 1
+default_environment = "default"
+
+[environments.default]
+OPENAI_API_KEY = "oc://api/openai"
+"#,
+    )
+    .unwrap();
+
+    let out_file = _home.path().join("envmanifest.txt");
+    run_ok(&[
+        "onecipher",
+        "env",
+        "--manifest",
+        &manifest.to_string_lossy(),
+        "--environment",
+        "default",
+        "--exec",
+        "--",
+        "sh",
+        "-c",
+        &format!("printf '%s' \"$OPENAI_API_KEY\" > {}", out_file.to_string_lossy()),
+    ]);
+    let got = std::fs::read_to_string(&out_file).unwrap_or_default();
+    assert_eq!(got, "manifest-secret");
+}
+
+#[test]
+fn test_env_command_validates_manifest_environment() {
+    let _home = HomeGuard::new();
+    age_init();
+    set_env("ONECIPHER_SECRET", "manifest-secret");
+    run_ok(&["onecipher", "secret", "add", "api/openai", "--type", "password"]);
+    remove_env("ONECIPHER_SECRET");
+
+    let project = tempfile::tempdir().unwrap();
+    let cfg_dir = project.path().join(".onecipher");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let manifest = cfg_dir.join("environments.toml");
+    std::fs::write(
+        &manifest,
+        r#"
+version = 1
+default_environment = "default"
+
+[environments.default]
+OPENAI_API_KEY = "oc://api/openai"
+"#,
+    )
+    .unwrap();
+
+    run_ok(&[
+        "onecipher",
+        "env",
+        "--manifest",
+        &manifest.to_string_lossy(),
+        "--environment",
+        "default",
+        "--validate",
+        "--format",
+        "json",
+    ]);
+}
+
+#[test]
+fn test_env_command_prints_set_values_without_age_init() {
+    let _home = HomeGuard::new();
+
+    run_ok(&["onecipher", "env", "--set", "PLAIN_TEXT=hello", "--print"]);
+}
+
+#[test]
+fn test_plugin_init_writes_project_configs() {
+    let _home = HomeGuard::new();
+    let project = tempfile::tempdir().unwrap();
+
+    run_ok(&[
+        "onecipher",
+        "plugin",
+        "init",
+        "--dir",
+        &project.path().to_string_lossy(),
+        "--environment",
+        "dev",
+        "--reference",
+        "OPENAI_API_KEY=oc://api/openai",
+        "--reference",
+        "GITHUB_OTP=oc://github-2fa?field=otp",
+    ]);
+
+    let manifest = project.path().join(".onecipher/environments.toml");
+    let claude = project.path().join(".mcp.json");
+    let cursor = project.path().join(".cursor/mcp.json");
+    let codex = project.path().join(".codex/config.toml");
+
+    assert!(manifest.exists(), "plugin init must write the environment manifest");
+    assert!(claude.exists(), "plugin init must write Claude MCP config");
+    assert!(cursor.exists(), "plugin init must write Cursor MCP config");
+    assert!(codex.exists(), "plugin init must write Codex MCP config");
+
+    let manifest_text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(manifest_text.contains("[environments.dev]"));
+    assert!(manifest_text.contains("OPENAI_API_KEY = \"oc://api/openai\""));
+
+    let claude_text = std::fs::read_to_string(&claude).unwrap();
+    assert!(claude_text.contains("\"onecipher\""));
+    assert!(claude_text.contains("\"mcp\""));
+    assert!(claude_text.contains("\"serve\""));
+
+    let cursor_text = std::fs::read_to_string(&cursor).unwrap();
+    assert!(cursor_text.contains("\"onecipher\""));
+
+    let codex_text = std::fs::read_to_string(&codex).unwrap();
+    assert!(codex_text.contains("[mcp_servers.onecipher]"));
+    assert!(codex_text.contains("command = \"onecipher\""));
+}
+
 // -----------------------------------------------------------------------
 // 58. agent-secret requires a valid API token (no token → error)
 // -----------------------------------------------------------------------
@@ -1543,6 +1733,42 @@ fn test_uninstall_parses() {
     assert!(matches!(cli.command, Some(Commands::Uninstall { purge: false, force: false })));
     let cli = Cli::parse_from(["onecipher", "uninstall", "--purge", "--force"]);
     assert!(matches!(cli.command, Some(Commands::Uninstall { purge: true, force: true })));
+}
+
+#[test]
+fn test_plugin_init_parses() {
+    let cli = Cli::parse_from([
+        "onecipher",
+        "plugin",
+        "init",
+        "--dir",
+        "/tmp/project",
+        "--environment",
+        "dev",
+        "--reference",
+        "OPENAI_API_KEY=oc://api/openai",
+    ]);
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Plugin { subcommand: crate::cli::PluginCommands::Init { .. } })
+    ));
+}
+
+#[test]
+fn test_mcp_serve_parses() {
+    let cli = Cli::parse_from([
+        "onecipher",
+        "mcp",
+        "serve",
+        "--manifest",
+        "/tmp/project/.onecipher/environments.toml",
+        "--environment",
+        "default",
+    ]);
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Mcp { subcommand: crate::cli::McpCommands::Serve { .. } })
+    ));
 }
 
 // -----------------------------------------------------------------------
