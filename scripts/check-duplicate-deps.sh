@@ -47,7 +47,20 @@ set -euo pipefail
 # by transitive dependencies entering the lockfile between the 68 baseline and
 # the current HEAD; no new direct dependencies were added on this branch.
 # Locked in at 70 so future increases are again caught by the ratchet.
-BASELINE=70
+#
+# Lowered 70 -> 63: verified against the committed Cargo.lock at HEAD (and
+# reproduced in a pristine clone of that commit, and across repeated runs), so
+# the count is a property of the lock rather than of any local build state.
+# Seven crates left the `--edges normal` duplicate set: ecdsa, k256, pkcs8,
+# rfc6979, ripemd, signature, spki — the whole elliptic-curve/signature subtree,
+# which collapsed together rather than piecemeal. Note the lockfile still
+# carries both versions of each (k256 0.13/0.14, ecdsa 0.16/0.17, signature
+# 2/3, ...); what changed is that the older copies are no longer reachable
+# through non-dev dependency edges, which is exactly what this ratchet counts
+# ("a duplicate that only affects test or proc-macro builds does not bloat the
+# shipped binary"). No crate became newly duplicated. The CI job runs on
+# ubuntu-latest against a fresh checkout, so 63 reproduces there.
+BASELINE=63
 
 cd "$(dirname "$0")/.."
 
