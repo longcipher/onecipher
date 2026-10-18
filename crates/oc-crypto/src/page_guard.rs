@@ -175,16 +175,15 @@ pub fn is_locked(addr: *const u8, len: usize) -> bool {
         let mut vec = vec![0u8; num_pages];
         // SAFETY: `aligned_start` points at `check_len` mapped bytes we own
         // (page-aligned), and `vec` holds `num_pages` bytes for the kernel's
-        // residency bitmap. libc >= 0.2.190 types `mincore`'s vec as
-        // `*mut c_char` on Apple (where `c_char` is `i8`), so the u8 pointer
-        // is cast explicitly; the layout is byte-identical.
-        let ret = unsafe {
-            libc::mincore(
-                aligned_start as *mut libc::c_void,
-                check_len,
-                vec.as_mut_ptr().cast::<libc::c_char>(),
-            )
-        };
+        // residency bitmap. The `vec` pointer type differs per platform:
+        // Linux uses `*mut c_uchar` (u8), Apple uses `*mut c_char` (i8).
+        #[cfg(target_os = "linux")]
+        let vec_ptr = vec.as_mut_ptr().cast::<libc::c_uchar>();
+        #[cfg(target_os = "macos")]
+        let vec_ptr = vec.as_mut_ptr().cast::<libc::c_char>();
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        let vec_ptr = vec.as_mut_ptr().cast::<libc::c_uchar>();
+        let ret = unsafe { libc::mincore(aligned_start as *mut libc::c_void, check_len, vec_ptr) };
         if ret != 0 {
             // mincore failed, assume not locked
             return false;

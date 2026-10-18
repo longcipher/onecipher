@@ -45,7 +45,22 @@ pub fn run_executable(path: &str, stdin_json: &[u8]) -> Result<Vec<u8>, String> 
         .spawn()
         .map_err(|e| format!("failed to start executable: {e}"))?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(stdin_json).map_err(|e| format!("failed to write stdin: {e}"))?;
+        // `BrokenPipe` means the child closed stdin (or exited) before we
+        // finished writing. That is NOT a policy failure: the program has
+        // already spoken, and its stdout verdict is authoritative. Treating
+        // EPIPE as an error here discarded a valid verdict and spuriously
+        // denied the request, which surfaced as a load-dependent flake
+        // because it depended on whether the payload outran the pipe buffer.
+        //
+        // Every other write error is still a hard failure (fail-closed), and
+        // the child's exit status / stdout are validated below regardless.
+        if let Err(e) = stdin.write_all(stdin_json) {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(format!("failed to write stdin: {e}"));
+            }
+        }
+        // Explicit close so the child observes EOF and can finish.
+        drop(stdin);
     }
     // Reader thread so the 5s cap covers hung children without tokio.
     let mut stdout = child.stdout.take();
@@ -104,6 +119,43 @@ mod tests {
         }
         let out = run_executable(script.to_str().unwrap(), b"{\"a\":1}").unwrap();
         assert_eq!(out, b"{\"a\":1}");
+    }
+
+    #[test]
+    fn verdict_survives_broken_pipe_on_stdin() {
+        // Regression: a policy program that emits its verdict without
+        // draining stdin closes the pipe, so the parent's `write_all` gets
+        // EPIPE once the payload outruns the pipe buffer. The verdict must
+        // still be returned rather than being turned into a hard error
+        // (which the caller maps to `denied`).
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("early-exit.sh");
+        std::fs::write(&script, "#!/bin/sh\necho '{\"allow\": true}'\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Far larger than the pipe buffer, so EPIPE is guaranteed.
+        let payload = vec![b'{'; 4 << 20];
+        let out = run_executable(script.to_str().unwrap(), &payload).unwrap();
+        assert_eq!(out, b"{\"allow\": true}\n");
+    }
+
+    #[test]
+    fn non_zero_exit_still_fails_closed_even_with_broken_pipe() {
+        // The EPIPE tolerance must not weaken the exit-status check.
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("deny-exit.sh");
+        std::fs::write(&script, "#!/bin/sh\necho '{\"allow\": true}'\nexit 3\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let payload = vec![b'{'; 4 << 20];
+        let err = run_executable(script.to_str().unwrap(), &payload).unwrap_err();
+        assert!(err.contains("exited with"), "got: {err}");
     }
 
     #[test]

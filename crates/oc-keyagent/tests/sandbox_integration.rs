@@ -79,9 +79,7 @@ fn test_seccomp_kills_inet_socket_linux() {
 
     // Fork the child process.
     let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        panic!("fork() failed: {}", std::io::Error::last_os_error());
-    }
+    assert!(pid >= 0, "fork() failed: {}", std::io::Error::last_os_error());
 
     if pid == 0 {
         // Child process: apply seccomp, then attempt to create an AF_INET socket.
@@ -91,7 +89,7 @@ fn test_seccomp_kills_inet_socket_linux() {
         // Apply the full sandbox (includes seccomp).
         // If this fails, the seccomp filter is not installed and the test
         // would be meaningless — exit with a distinct error code.
-        if let Err(e) = oc_keyagent::apply_sandbox() {
+        if let Err(_e) = oc_keyagent::apply_sandbox() {
             unsafe { libc::_exit(44) };
         }
 
@@ -106,7 +104,7 @@ fn test_seccomp_kills_inet_socket_linux() {
 
     // Parent process: wait for the child and verify it was killed by SIGSYS.
     let mut status: libc::c_int = 0;
-    let ret = unsafe { libc::waitpid(pid, &mut status, 0) };
+    let ret = unsafe { libc::waitpid(pid, &raw mut status, 0) };
     assert!(ret == pid, "waitpid() failed: {}", std::io::Error::last_os_error());
 
     // The child should have been killed by a signal (SIGSYS = 31 on x86_64 Linux).
@@ -136,9 +134,7 @@ fn test_seccomp_allows_uds_linux() {
 
     // Fork the child process.
     let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        panic!("fork() failed: {}", std::io::Error::last_os_error());
-    }
+    assert!(pid >= 0, "fork() failed: {}", std::io::Error::last_os_error());
 
     if pid == 0 {
         // Child process: apply seccomp, then create a UDS pair and send a byte.
@@ -147,7 +143,7 @@ fn test_seccomp_allows_uds_linux() {
         // Apply the full sandbox (includes seccomp).
         // If this fails, the seccomp filter is not installed and the test
         // would be meaningless — exit with a distinct error code.
-        if let Err(e) = oc_keyagent::apply_sandbox() {
+        if let Err(_e) = oc_keyagent::apply_sandbox() {
             unsafe { libc::_exit(44) };
         }
 
@@ -165,7 +161,7 @@ fn test_seccomp_allows_uds_linux() {
 
     // Parent process: wait for the child and verify it exited normally.
     let mut status: libc::c_int = 0;
-    let ret = unsafe { libc::waitpid(pid, &mut status, 0) };
+    let ret = unsafe { libc::waitpid(pid, &raw mut status, 0) };
     assert!(ret == pid, "waitpid() failed: {}", std::io::Error::last_os_error());
 
     // The child should have exited normally (not killed by a signal).

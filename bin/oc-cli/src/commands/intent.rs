@@ -18,6 +18,7 @@ use oc_netagent::intent::{
     Intent, IntentError, IntentKind, IntentResult, IntentStatus, IntentSummary, MessageEncoding,
     MockRpcClient, RpcClient, execute_intent, simulate_intent,
 };
+use oc_signer::ChainSigner;
 use serde_json::Value;
 
 use crate::CliError;
@@ -340,19 +341,92 @@ async fn run_execution(
     rpc: &dyn RpcClient,
     from_address: &str,
 ) -> Result<IntentResult, CliError> {
-    // TODO: wire the signer to the Key-Agent over UDS (see oc-netagent /
-    // oc-keyagent). For now we return the unsigned tx bytes unchanged so the
-    // build stays green and the MockRpcClient (which does not validate
-    // signatures) can exercise the full execute → broadcast → receipt path.
-    // Real signing is deferred to integration with the Key-Agent UDS channel.
-    let signer =
-        |_key: &oc_netagent::intent::SigningKeyRef,
-         tx_bytes: &[u8]|
-         -> Result<Vec<u8>, oc_netagent::intent::IntentError> { Ok(tx_bytes.to_vec()) };
+    // C13 trait boundary: the intent code sees opaque bytes only; the signer
+    // below routes decrypt→sign→wipe through the per-request subprocess enclave
+    // (the same owner path as `onecipher sign transaction`), so no key
+    // material is ever held by the intent layer itself.
+    let signer = |_key: &oc_netagent::intent::SigningKeyRef,
+                  unsigned_tx: &[u8]|
+     -> Result<Vec<u8>, oc_netagent::intent::IntentError> {
+        if crate::enclave_spawn::signing_enclave_enabled() {
+            // Wrap once so the credential is zeroized on drop without cloning
+            // a second copy out of `peek_passphrase`.
+            let credential: zeroize::Zeroizing<String> = match super::peek_passphrase() {
+                Some(p) => zeroize::Zeroizing::new(p),
+                None => zeroize::Zeroizing::new(super::read_passphrase().to_string()),
+            };
+            match crate::enclave_spawn::spawn_enclave(&enclave_sign_request(
+                unsigned_tx,
+                credential.as_str(),
+            )) {
+                Ok(resp) => decode_signed_tx(resp.signed_tx_hex.as_deref()),
+                // Wrong passphrase on an interactive terminal: prompt once and
+                // retry, mirroring `sign_transaction`'s prompt-and-retry.
+                Err(e) if e.contains("E_DECRYPT") && super::is_interactive_stdin() => {
+                    let retry: zeroize::Zeroizing<String> =
+                        zeroize::Zeroizing::new(super::read_passphrase().to_string());
+                    let resp = crate::enclave_spawn::spawn_enclave(&enclave_sign_request(
+                        unsigned_tx,
+                        retry.as_str(),
+                    ))
+                    .map_err(oc_netagent::intent::IntentError::Execution)?;
+                    decode_signed_tx(resp.signed_tx_hex.as_deref())
+                }
+                Err(e) => Err(oc_netagent::intent::IntentError::Execution(e)),
+            }
+        } else {
+            // In-process fallback (tests / `OC_ENCLAVE=off` only). With no vault
+            // present there is nothing to sign with; pass the bytes through so
+            // the MockRpcClient path can still exercise execute→broadcast.
+            match super::resolve_signing_key("", oc_core::ChainType::Evm, 0) {
+                Ok(key) => {
+                    let evm = oc_signer::chains::EvmSigner;
+                    let sig = evm
+                        .sign_transaction(key.expose(), unsigned_tx)
+                        .map_err(|e| oc_netagent::intent::IntentError::Execution(e.to_string()))?;
+                    evm.encode_signed_transaction(unsigned_tx, &sig)
+                        .map_err(|e| oc_netagent::intent::IntentError::Execution(e.to_string()))
+                }
+                Err(_) => Ok(unsigned_tx.to_vec()),
+            }
+        }
+    };
     // M-04a: `from_address` is required by execute_intent so the real pending
     // nonce can be fetched; an empty address fails closed for broadcastable
     // intents (Pay / CrossChainTransfer).
     execute_intent(intent, rpc, from_address, signer).await.map_err(map_intent_error)
+}
+
+/// Build the enclave `SignTransaction` request for `unsigned_tx`.
+///
+/// `wallet_id` is empty by design: the enclave resolves the default wallet
+/// itself, so the CLI never has to hold a wallet identifier to sign.
+fn enclave_sign_request(
+    unsigned_tx: &[u8],
+    credential: &str,
+) -> oc_keyagent::enclave::EnclaveRequest {
+    let mut req = crate::enclave_spawn::fresh_request(
+        oc_keyagent::enclave::OP_SIGN_TRANSACTION,
+        "",
+        "eip155:1",
+    );
+    req.payload_hex = hex::encode(unsigned_tx);
+    req.index = 0;
+    req.credential_hex = Some(crate::enclave_spawn::passphrase_credential_hex(credential));
+    req
+}
+
+/// Decode the enclave's `signed_tx_hex` field into raw transaction bytes.
+fn decode_signed_tx(
+    signed_tx_hex: Option<&str>,
+) -> Result<Vec<u8>, oc_netagent::intent::IntentError> {
+    let hex_str = signed_tx_hex.ok_or_else(|| {
+        oc_netagent::intent::IntentError::Execution(
+            "enclave returned no signed transaction".to_string(),
+        )
+    })?;
+    hex::decode(hex_str.trim_start_matches("0x"))
+        .map_err(|e| oc_netagent::intent::IntentError::Execution(format!("signed tx hex: {e}")))
 }
 
 /// Format a USD estimate for display. `None` renders as "unknown" (H-05/M-08):

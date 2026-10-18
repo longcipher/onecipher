@@ -358,14 +358,11 @@ mod tests {
 
     #[test]
     fn idle_lock_shuts_server_down_and_removes_socket() {
-        // A unique socket path per test keeps parallel tests isolated; the
-        // name is short because macOS caps Unix socket paths at SUN_LEN.
-        static SEQ: AtomicUsize = AtomicUsize::new(0);
-        let sock = std::env::temp_dir().join(format!(
-            "oc-ka-il-{}-{}.sock",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
+        // `verify_socket_dir` rejects any group/other-accessible directory, so
+        // the socket cannot live directly in `std::env::temp_dir()` (usually
+        // `/tmp` at 0755). `TempDir` is created 0700 and cleans up on drop.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
         let sock_str = sock.to_string_lossy().into_owned();
         let _ = std::fs::remove_file(&sock);
 
@@ -395,12 +392,10 @@ mod tests {
 
     #[test]
     fn activity_keeps_server_alive_when_idle_lock_disabled() {
-        static SEQ: AtomicUsize = AtomicUsize::new(0);
-        let sock = std::env::temp_dir().join(format!(
-            "oc-ka-al-{}-{}.sock",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
+        // See `idle_lock_shuts_server_down_and_removes_socket`: the socket
+        // needs a private 0700 parent directory.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("test.sock");
         let sock_str = sock.to_string_lossy().into_owned();
         let _ = std::fs::remove_file(&sock);
 
