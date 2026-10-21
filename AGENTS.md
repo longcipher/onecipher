@@ -1,381 +1,76 @@
 # OneCipher Agent Instructions
 
-> **TL;DR (30s):** Pre-1.0, `publish = false` — NO backward-compat guarantee.
-> Minimal implementation first: smallest correct change, no speculative APIs.
-> Grow layer by layer: core → crypto/signer → wallet/keyagent → netagent/webui/CLI.
-> Delete old paths when replacing them (retired crates leave no skeleton behind).
-> Secrets via `HardenedBytes`, never `String`/`Vec<u8>`; R56/R12 gates are non-negotiable.
-> Details: [layout](#workspace-layout) · [hard gates](#onecipher-hard-gates) · [workflow](#development-workflow).
-> Storage split: `oc-vault` = bytes, `oc-wallet` = ops, `oc-secret` = user secrets ([boundary](#storage-boundary-authoritative)).
+## Non-negotiables
+
+- Surgical edits only: every changed line must trace to the request. No drive-by refactors, no reformatting untouched code, no deleting pre-existing dead code (mention it instead).
+- Fix root causes. Never silence a warning, weaken a check, or patch a symptom to make a gate pass.
+- Never report completion while any `just` gate below fails. Report the failure verbatim and stop.
+- Stop and ask when a request is ambiguous, conflicts with existing conventions, or requires credentials, publishing, or destructive operations.
+- When a correction reveals a missing rule, add one specific rule here ("always X for Y", never "be careful with Y"); delete rules that never catch real errors.
 
 ## Scope
 
-This is the OneCipher workspace — a policy-gated, local-key-custody signing
-stack fully designed and implemented in accordance with the WalletConnect v2 protocol and the Open Wallet Standard (OWS).
+- OneCipher is a policy-gated, local-key-custody signing stack built to the WalletConnect v2 protocol and the Open Wallet Standard. It is pre-1.0: the workspace sets `publish = false`, so there is no backward-compatibility guarantee.
+- `crates/` holds the library crates: `oc-core` (types, CAIP, paths), `oc-crypto` (memory hardening), `oc-policy` (policy engine v1/v2/v3), `oc-keyagent` (Key-Agent), `oc-netagent` (Network-Agent, WalletConnect v2, intent layer), `oc-walletconnect` (WC v2 protocol wrapper), `oc-secret` (age-encrypted user secrets + TOTP), `oc-vault` (on-disk keyfile format), `oc-wallet` (wallet operations), `oc-session-key` (multi-chain session keys), `oc-signer` (multi-chain signing), `oc-siwx` (Sign-In With X), `oc-webui` (approval queue HTTP server). `bin/oc-cli` is the `onecipher` binary.
+- `extension/` is the WXT + React browser extension (OCWP client); `fuzz/` is a separate cargo-fuzz workspace; `reproducer/` builds the dual-target reproducer; `crates/oc-webui/frontend` is its own Leptos/WASM workspace and is NOT a member of the root workspace.
+- Storage boundary is authoritative and the three crates must not be merged or cross-called: `oc-vault` owns *how* bytes are stored on disk (0700 dir / 0600 file, `.ocbk` age bundle), `oc-wallet` owns *what* wallet operations do, `oc-secret` owns *user* secrets and never holds keys. `oc-wallet::key_store` API tokens are not user secrets and stay in `oc-wallet`.
+- The payment-protocol layer was removed from this workspace and is owned by the sibling project LedgerFlow. OneCipher is a pure wallet that exposes a loopback JSON-RPC 2.0 `WalletSigner` server (`onecipher wallet-rpc`, disabled unless `OC_WALLET_RPC_LISTEN` is set); signing methods on that surface require per-request Passkey authorization. The Intent types live in `crates/oc-netagent/src/intent`; the retired `oc-intent` crate is gone.
+- English only in code, comments, docs, and commit messages.
 
-- `bin/` contains binary crates (`oc-cli` → `onecipher`).
-- `crates/` contains reusable library crates (`oc-core`, `oc-crypto`, …).
+## Execution
 
-## Workspace Layout
+- Parallelize aggressively: dispatch subagents for independent research, exploration, and implementation.
+- NEVER run two `cargo` commands concurrently, and never overlap file edits with a running `cargo` command (`target/` file lock): finish edits, wait, then run.
+- NEVER use `git worktree`. Edit the current branch in place.
+- TDD for behavior changes: failing crate-local test first, smallest change to pass, then run `just mutants` and fix surviving mutants.
 
-```text
-.
-├── bin/                    # Binary crates
-│   └── oc-cli/             # `onecipher` CLI
-├── crates/                 # Library crates
-│   ├── oc-core/            # Core types, CAIP, error types
-│   ├── oc-crypto/          # Memory hardening (mlock, zeroize, page guards)
-│   ├── oc-keyagent/        # Key-Agent lib (sync std, NO tokio — R56)
-│   ├── oc-netagent/        # Network-Agent lib (tokio + WC v2 + intent layer)
-│   ├── oc-policy/          # Policy Engine v2/v3 (11-step evaluation)
-│   ├── oc-secret/          # Secret vault (age-encrypted secrets + TOTP)
-│   ├── oc-session-key/     # Multi-chain SessionKeyProvider (EVM/Solana)
-│   ├── oc-signer/          # Multi-chain signing
-│   ├── oc-vault/           # Wallet vault (filesystem 700/600, .ocbk backup)
-│   ├── oc-wallet/          # Wallet operations (key store, policy, migration)
-│   ├── oc-walletconnect/   # WalletConnect v2 protocol wrapper (relay, crypto)
-│   └── oc-webui/           # Web UI HTTP server (approval queue, WebAuthn auth, static dashboard)
-├── docs/                   # Specification documents
-└── Cargo.toml              # Workspace root (pure [workspace] declaration)
-```
+## Verification loop
 
-> **Note:** The payment protocol layer (`oc-pay`, x402/MPP) was removed from this
-> workspace; it is owned by the sister project `ledgerflow`. OneCipher now acts
-> as a pure wallet and exposes a loopback JSON-RPC 2.0 WalletSigner server
-> (`onecipher wallet-rpc`) for ledgerflow. The daemon keeps this endpoint
-> disabled by default unless `OC_WALLET_RPC_LISTEN` is set, and signing methods
-> on that surface require per-request Passkey authorization.
-
-### Storage Boundary (authoritative)
-
-Three crates deal with persisted secrets/state. Their responsibilities are
-deliberately disjoint — do NOT merge them and do NOT add cross-calls:
-
-| Crate | Owns | Format | Notes |
-|-------|------|--------|-------|
-| `oc-wallet::key_store` | API tokens (`oc_key_…`) | JSON, 0600 | Agent/CLI auth tokens; agent-mode tokens additionally carry age-X25519-encrypted wallet-key copies for the token recipient (intentional design — NOT user secrets). |
-| `oc-secret` | User secrets (age-encrypted) + TOTP | age ciphertext | Never holds keys; keys live in `oc-vault`. |
-| `oc-vault` | Wallet keyfiles (age-encrypted mnemonics/keys) | age/JSON, 0700 dir / 0600 file, `.ocbk` age bundle | The persistence *format*; `oc-wallet::ops` is the *operation* layer that reads/writes it. |
-| `oc-wallet::policy_store` | Signed policy docs | JSON, 0600 (+ `.sig` sidecar) | Policies are signed on save with a dedicated Ed25519 key (`policy_signing.key`); load verifies the sidecar `.sig` (fail-closed on mismatch; legacy unsigned files load with a loud warning). Counters live in `oc-policy` state. |
-
-Rule of thumb: `oc-vault` = *how* bytes are stored on disk; `oc-wallet` =
-*what* wallet operations do with them; `oc-secret` = *user* secrets (not
-keys). `oc-wallet::key_store` API tokens are NOT user secrets and stay in
-`oc-wallet`.
-
-### Intent Layer location
-
-The Intent types (`Intent`, `IntentKind`, `execute_intent`, `simulate_intent`)
-live in **`crates/oc-netagent/src/intent`** (the sole consumer is `oc-netagent`
-via `HpxRpcClient`). The retired `oc-intent` crate was removed from the
-workspace entirely; there is no directory to keep.
-
-## Execution Strategy
-
-- Maximize parallelism by dispatching subagents aggressively for independent
-  tasks. Consume tokens freely to complete tasks faster.
-- When fixing errors, edit files FIRST, wait for the edit to succeed, and
-  only THEN run cargo commands to verify. Do not parallelize file edits
-  with cargo builds.
-
-## Tool Usage & Commands
-
-- **NEVER execute `cargo` commands in parallel.** Rust's cargo uses strict
-  file locks on the `target/` directory — concurrent invocations will fail
-  with `Blocking waiting for file lock`.
-- ALWAYS run `cargo check`, `cargo build`, or `cargo test` sequentially.
-- If the local machine has a `rustc-wrapper` (sccache / kache) configured
-  globally but the wrapper binary is missing, prefix cargo commands with
-  `RUSTC_WRAPPER=` to disable the wrapper for that invocation.
-- Use `just <recipe>` for common tasks — see `Justfile`.
-
-## Cargo Workspace Rules (Critical)
-
-1. The root `Cargo.toml` is a **pure workspace declaration** — it has no
-   `[package]` section. All package metadata lives in `[workspace.package]`
-   and is inherited by sub-crates via `version.workspace = true`,
-   `edition.workspace = true`, etc.
-2. Sub-crates MUST use `workspace = true` for `version`, `edition`,
-   `license`, `repository`, `publish`, and `[lints]`.
-3. Shared dependencies are declared once in `[workspace.dependencies]` and
-   referenced in sub-crates via `dep = { workspace = true }`.
-4. Sub-crates MAY add features on top of the workspace dep:
-   `tokio = { workspace = true, features = ["full"] }`.
-5. When adding a new dependency used by 2+ crates, add it to
-   `[workspace.dependencies]` in the root `Cargo.toml` first.
-6. Single-crate dependencies may stay inline in the sub-crate's
-   `Cargo.toml` (e.g. `uuid`, `criterion`, `bs58`).
-7. Never manually type dependency versions for workspace deps; use
-   `cargo add <crate> --workspace -p <sub-crate>`.
-
-## OneCipher Hard Gates
-
-These are non-negotiable invariants verified by `cargo tree` inspection
-(R56) and binary symbol analysis (R12), verified by dev-dependency and source scans:
-
-- **R56 (dependency isolation):** `oc-crypto`, `oc-policy`, `oc-keyagent`,
-  `oc-session-key` MUST NOT depend on `tokio`,
-  `reqwest`, `tungstenite`, `hyper`, `async-std`, or `smol` — even as
-  dev-deps. Verified via `cargo tree -p <crate>` inspection.
-- **R12 (no TCP in isolated crates; loopback-only in daemon):** Revised from
-  the original `nm | grep -i tcp` check (which produces false negatives on
-  stripped binaries). Now verified via five sub-rules:
-  - **R12a (source isolation):** `oc-keyagent`, `oc-crypto`, `oc-policy`,
-    `oc-session-key` source MUST NOT contain `TcpListener` or `TcpStream`.
-    Verified via `rg -n 'TcpListener|TcpStream' crates/oc-keyagent/src/ ...`.
-  - **R12b (daemon may use TCP):** The `onecipher` daemon binary MAY contain
-    TCP symbols from axum/hyper for the Web UI HTTP server and WC relay.
-  - **R12c (loopback-only bind):** Any `TcpListener` in the daemon MUST bind
-    `127.0.0.1` exclusively. Verified via `lsof -iTCP -sTCP:LISTEN -P -n`.
-  - **R12d (T12 seccomp enforcement):** At runtime, the Key-Agent's seccomp
-    BPF filter denies `connect(2)` / `bind(2)` to non-UDS sockets.
-  - **R12e (non-loopback rejection):** If a non-loopback bind address is
-    configured for `[webui] listen`, the daemon MUST reject it and refuse
-    to start the Web UI server.
-- **R51/R52 (zero I/O in crypto):** `oc-crypto` MUST have zero I/O and zero
-  network dependencies.
-- **R55 (no tokio in Key-Agent):** The Key-Agent main loop uses sync
-  `std::os::unix::net` + `std::thread`, NOT tokio.
-
-## Build Commands
-
-```bash
-# Build entire workspace
-cargo build --workspace
-
-# Build a specific binary (use --bin, not -p, for bin crates)
-cargo build --release --bin onecipher
-
-# Build a specific library crate
-cargo build -p oc-crypto
-
-# Check without producing artifacts (faster)
-cargo check --workspace --all-targets
-```
-
-## Test Commands
-
-```bash
-# All unit + integration tests
-cargo test --workspace --all-features
-
-# Mutation testing (requires cargo-mutants)
-cargo mutants --workspace --all-features
-
-# Incremental mutation testing (only files changed vs main)
-cargo mutants --in-place --since main --all-features
-```
-
-## Lint Commands
-
-```bash
-# Format check (requires nightly rustfmt)
-cargo +nightly fmt --all -- --check
-
-# Clippy (workspace lints are pedantic + nursery)
-RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
-
-# R56 hard gate — verify no forbidden async/network deps in isolated crates
-cargo tree -p oc-crypto
-cargo tree -p oc-policy
-cargo tree -p oc-keyagent
-
-# R12 hard gate — source-level isolation (replaces broken `nm` check)
-rg -n 'TcpListener|TcpStream' crates/oc-keyagent/src/ crates/oc-crypto/src/ \
-                             crates/oc-policy/src/ crates/oc-session-key/src/
-# Expected: no matches (exit code 1)
-```
-
-## Justfile Recipes
-
-```bash
-just           # list recipes
-just format    # cargo sort + cargo +nightly fmt
-just fix       # auto-fix clippy warnings
-just lint      # fmt check + clippy + cargo sort check
-just test      # unit + integration tests
-just test-all  # alias for `test`
-just build     # cargo build --workspace
-just check     # cargo check --all-targets --all-features
-just ci        # full CI check (lint + test + build)
-just docs      # cargo doc --no-deps --open
-just setup     # install dev tools (cargo-sort, nightly toolchain)
-just mutants   # full mutation testing (cargo-mutants)
-just mutants-incremental  # incremental mutation testing
-```
-
-## Engineering Principles
-
-### Rust Implementation Guidelines
-
-1. **Error handling:**
-   - Library layer: `thiserror`.
-   - Application/CLI layer: `eyre` (currently `oc-cli` uses `thiserror`).
-2. **Concurrency:**
-   - Key-Agent: sync `std::thread` + `std::os::unix::net` (R55 — NO tokio).
-   - Network-Agent: `tokio` + WalletConnect v2 (WSS relay) + async UDS to
-     Key-Agent (length-prefixed prost frames — see `oc_keyagent::frame`).
-   - Prefer lock-free patterns where possible; `Mutex` is acceptable for
-     low-contention state.
-3. **Safety:**
-   - `unsafe` is confined to `oc-crypto/src/page_guard.rs` (mlock/madvise)
-     and `oc-keyagent/src/sandbox.rs` (seccomp/prctl on Linux).
-   - Every `unsafe` block MUST document the safety invariant.
-4. **Memory hardening:**
-   - Sensitive material (mnemonics, private keys) MUST go through
-     `oc_crypto::HardenedBytes` (mlock + MADV_DONTDUMP + zeroize on drop).
-   - Never hold sensitive material in `String` or `Vec<u8>` — use
-     `HardenedBytes` or `secrecy::SecretBox`.
-5. **Logging:**
-   - Libraries SHOULD use `tracing` (NOT `println!` / `eprintln!`).
-   - The workspace lints allow `print_stdout` / `print_stderr` because some
-     modules fully designed and implemented in accordance with the Open Wallet Standard (process_hardening, chain
-     deprecation warnings) use `eprintln!` for user-facing diagnostics.
-     New code should still prefer `tracing`.
-
-### Key Design Principles
-
-- **Modularity:** Each crate is a standalone library with clear boundaries.
-  `oc-crypto` has zero I/O; `oc-keyagent` has zero async runtime.
-- **Type Safety:** Strong static typing across interfaces. Newtypes for
-  distinguished types (e.g. `PasskeyPubkey`, `SessionKeyId`).
-- **Defense in Depth:** Policy engine (pre-signing) + sandbox (runtime) +
-  memory hardening (in-process) + audit log (post-hoc).
-
-### Testing Requirements
-
-- **Unit tests:** Colocate with implementation (`#[cfg(test)]`).
-- **Property tests:** Use `proptest` for invariant checking (colocated).
-- **Integration tests:** Place in crate-level `tests/`.
-- **Mutation tests:** Run `cargo-mutants` to verify test quality. Mutants
-  that survive indicate gaps in test coverage or insufficient assertions.
-  Target: zero surviving mutants in security-critical crates (`oc-crypto`,
-  `oc-policy`, `oc-keyagent`).
-- **Hard-gate tests:** R56 (dependency isolation) is verified via
-  `cargo tree` inspection; R12a (source-level isolation) via `rg` scan of
-  isolated crate sources; R12c (loopback-only) via `lsof` runtime check.
-
-### Common Pitfalls
-
-- Do NOT add `tokio` to `oc-keyagent`, `oc-crypto`, `oc-policy`, or
-  `oc-session-key` — R56 hard gate.
-- Do NOT hold sensitive material in `String` / `Vec<u8>` — use
-  `HardenedBytes`.
-- Do NOT use `cargo build -p oc-keyagent` expecting a binary — `oc-keyagent`
-  is a library crate only. The sole binary is `onecipher` (from `oc-cli`):
-  use `cargo build --bin onecipher`.
-- Do NOT introduce `unwrap()` / `expect()` / `panic!` in production code
-  paths — the workspace lints allow them (for test code), but code review
-  enforces this for non-test code.
-
-### Sharp edges
-
-Recurring failure shapes in this codebase.
-Walk the checklist when writing code that resembles them.
-
-**Atomic writes.**
-Anything that overwrites a secret-bearing file (keyfiles, secret entries,
-recipients, policies, index) goes through `oc_core::paths::write_atomic_private`.
-A crash between `create` and the final write would otherwise leave the file
-truncated and unrecoverable. Never `fs::write` a secret.
-
-**Symlinks.**
-`std::fs::metadata` and `Path::exists` follow symlinks.
-Use `symlink_metadata` (the `Lstat` equivalent) when verifying ownership or
-mode of a path that must not be a symlink.
-`oc_keyagent::socket_guard` is the reference pattern; `oc-secret`'s `get` /
-`delete` and `oc-vault`'s `delete_wallet_file` apply the same rule to entries.
-
-**Socket path verification.**
-The Key-Agent socket path is predictable.
-`create_dir_all` succeeds on a pre-existing directory and `chmod` cannot
-repair ownership, so creation alone proves nothing: verify the socket
-directory and node (type, owner, no group/other access) before binding
-(server) and before connecting (client).
-Do NOT weaken `oc_keyagent::socket_guard::verify_socket_file`.
-
-**Plaintext on disk.**
-Decrypted secret material must never be staged in the shared temp directory.
-`secret edit` prefers the built-in in-memory editor
-(`bin/oc-cli/src/commands/tui_edit.rs`); the external-editor path stages
-inside the 0700 state directory and zero-fills plus unlinks afterwards.
-New "edit a secret" flows must follow one of those two paths.
-
-**Error wrapping for exit codes.**
-Leaf failures carry a stable SCREAMING_SNAKE code so `main` can pick a
-distinct BSD sysexits status via `CliError::code` → `exit::exit_code_for`.
-Do NOT collapse distinguishable library variants into one bucket —
-`SecretStoreError::NotFound` (66) and `InvalidName` / `Tampered` (65) must
-stay separate so scripts can branch without parsing stderr.
-
-**Signal handling.**
-When entering a wait that may need a clean shutdown, register the handler
-*before* announcing the wait.
-A signal arriving in the window between the print and `signal::Notify` beats
-the cleanup.
-
-**Blocking accepts.**
-A blocking `accept()` ignores a cooperative stop flag until an unrelated
-connection arrives — the Key-Agent accept loop therefore keeps the listener
-non-blocking and polls (the daemon only escaped this via the EINTR from a
-signal, which the idle watchdog does not generate).
-Do NOT make that loop blocking again.
-
-**TTY assumptions.**
-Anything that prompts must check `is_interactive_stdin()` and either fall
-back to a non-interactive path or abort with a clear message.
-Raw mode on a non-TTY produces an obscure ioctl error.
-Under `cfg(test)` and with `OC_NONINTERACTIVE` set, `is_interactive_stdin()`
-returns `false` by design.
-
-**Agent staleness.**
-Operations that rotate recipients or identities must not leave a long-lived
-cache holding old material.
-The Key-Agent re-derives per request and its key cache has a 5s TTL, so no
-push is needed today — but any new in-memory identity cache needs the same
-refresh path pago implements with `pushIdentitiesToAgent`.
-
-**Store names.**
-`--store <NAME>` / `ONECIPHER_STORE` selects `<home>/stores/<NAME>`; with no
-store selected the root stays `<home>/store` (existing installs are
-untouched). The name is validated in `main` before it is exported to the
-environment, and `secret_store_root()` refuses to build a path from an
-invalid name — a store name must never reach the filesystem unvalidated.
-
-**Menu action sequences.**
-`secret menu` takes `(action, argument)` pairs and executes them against a
-focused window. A dangling or unknown action is a usage error (64): a
-half-typed sequence would otherwise type the wrong secret. Keys resolve
-through one helper (`secret_menu::resolve_key`) so `secret get --field otp`
-and `secret menu clip otp` never disagree about what `otp` means.
-
-**Threat model.**
-OneCipher does not protect against an attacker running code as the same UID.
-It does protect against co-resident users on a shared system: data dir, agent
-socket, and socket dir are `0o700` / `0o600` and verified before use.
-Do NOT add features that widen the latter without flagging it.
-
-## Development Workflow
-
-Use test-driven development for behavior changes:
-
-1. Start with a failing unit test expressing the expected behavior.
-2. Drive implementation until the test passes.
-3. Add `proptest` property tests for invariant checking.
-4. Run `just mutants` to verify test quality — any surviving mutant
-   indicates a gap that needs a new test or stronger assertion.
-
-After each feature or bug fix, run:
+After each feature or bug fix, in order; any failure means the task is not done:
 
 ```bash
 just format
 just lint
 just test
+just mutants
 ```
 
-If any command fails, report the failure and do not claim completion.
+`just mutants` is this repo's mutation-testing recipe. CI does not call `just`; it runs the same cargo commands job by job, so `just lint` must stay equivalent to those jobs.
 
-## Language Requirement
+## Workspace rules
 
-- Documentation, comments, and commit messages must be English only.
-- Code identifiers must be English.
+- Hard gates, all non-negotiable:
+  - **R56 (dependency isolation):** `oc-crypto`, `oc-policy`, `oc-keyagent` and `oc-session-key` must not depend on `tokio`, `reqwest`, `tungstenite`, `hyper`, `async-std` or `smol`, not even as dev-dependencies. Verified with `cargo tree`.
+  - **R12 (no TCP in isolated crates):** R12a forbids `TcpListener`/`TcpStream` in the isolated crates' sources (`just r12-check`). R12b allows TCP in the `onecipher` daemon (Web UI + WC relay). R12c requires every daemon bind to be `127.0.0.1` only. R12d enforces this at runtime with a seccomp BPF filter that denies `connect(2)`/`bind(2)` to non-UDS sockets. R12e makes the daemon refuse to start the Web UI on a non-loopback address.
+  - **R51/R52:** `oc-crypto` performs zero I/O and has zero network dependencies.
+  - **R55:** the Key-Agent main loop is sync `std::os::unix::net` + `std::thread`, never tokio.
+- The Justfile is a strict mirror of the `Makefile`: every recipe must have a `make` target with the same command body, and `scripts/check-makefile-mirror.sh` enforces it in CI. Change both files in the same PR; adding, renaming or editing a recipe without its Makefile twin breaks CI.
+- Changing the CLI surface means updating `SKILL.md` and `docs/cli-reference.md` in the same change (`just skill-check`).
+- Every `deny.toml` skip or ignore needs a dated rationale, an owner and an expiry; a bare waiver is a policy failure.
+- The duplicate-dependency gate is a ratchet, not a zero-duplicates rule: the baseline only ever moves down. Lower it in the same change that removes a duplicate.
+- `unsafe` is confined to the low-level modules: `oc-crypto/src/page_guard.rs` (mlock/madvise), `oc-keyagent/src/{sandbox,enclave,hardening,socket_guard,server}.rs` (seccomp, prctl, socket checks), `oc-core/src/{paths,config}.rs`, `oc-signer/src/{mnemonic,process_hardening}.rs` and `oc-netagent/src/{rpc_client,intent/hot_path}.rs`. Every `unsafe` block documents its safety invariant; the other crates keep `#![forbid(unsafe_code)]`.
+- Sensitive material must live in `oc_crypto::HardenedBytes` (mlock + `MADV_DONTDUMP` + zeroize on drop) or `secrecy::SecretBox`, never in `String` or `Vec<u8>`.
+
+## Dependency choices
+
+- Errors: `thiserror` in the library crates, `eyre` in the binaries. Never `anyhow`.
+- Observability: `tracing` for new code; the workspace allows `print_stdout`/`print_stderr` because some user-facing diagnostics still use `eprintln!`.
+- `hpx` is the HTTP client and it must use the pure-Rust rustls backend. Linking BoringSSL (hpx's `boring-tls`) together with OpenSSL (webauthn-rs) makes the linker resolve `-lcrypto` to the wrong library and breaks the build; that collision is why the TLS stack is fixed on rustls.
+- `dashmap` is used for the Web UI approval queue and session table and inside `oc-policy` v2; `std::sync::Mutex` is acceptable for low-contention state.
+- `prost` is the protobuf wire codec for the Key-Agent frame, the Network-Agent, the WalletSigner RPC and the CLI. There is no `tonic` in this tree.
+- `bitcoin` 0.32 is kept on purpose and its feature set is minimal (`base64` only): do not enable extra features without a security review.
+- `unsafe`-free crates should keep `#![forbid(unsafe_code)]` where the crate allows it.
+
+## Code conventions
+
+- Atomic writes: anything that overwrites a secret-bearing file goes through `oc_core::paths::write_atomic_private`. Never `fs::write` a secret.
+- Symlinks: `fs::metadata` and `Path::exists` follow symlinks. Use `symlink_metadata` when verifying ownership or mode of a path that must not be a symlink; `oc_keyagent::socket_guard` is the reference pattern.
+- Socket paths are predictable: verify the socket directory and node (type, owner, no group/other access) before binding and before connecting. Never weaken `oc_keyagent::socket_guard::verify_socket_file`.
+- Plaintext on disk: decrypted secrets must never be staged in the shared temp directory. `secret edit` uses the in-memory editor, or stages inside the 0700 state directory and zero-fills plus unlinks afterwards.
+- Exit codes: leaf failures carry a stable SCREAMING_SNAKE code so `main` can pick a distinct BSD sysexits status through `CliError::code` and `exit::exit_code_for`. Keep distinguishable variants separate (`NotFound` is 66, `InvalidName`/`Tampered` are 65).
+- Blocking accepts: a blocking `accept()` ignores a cooperative stop flag, so the Key-Agent accept loop keeps the listener non-blocking and polls. Do not make that loop blocking again.
+- Signal handling: register the handler *before* announcing the wait, otherwise a signal arriving in between beats the cleanup.
+- Anything that prompts must check `is_interactive_stdin()` and either fall back to a non-interactive path or abort with a clear message; `OC_NONINTERACTIVE` forces the non-interactive answer by design.
+- Store names: `--store <NAME>` / `ONECIPHER_STORE` selects `<home>/stores/<NAME>`. The name is validated by `validate_store_name` (which reuses `oc_core::paths::validate_wallet_id`) before it reaches the environment, so an invalid name never becomes a path.
+- Threat model: OneCipher does not protect against an attacker running code as the same UID. It does protect against co-resident users on a shared system (data dir, agent socket and socket dir are 0700/0600 and verified before use). Do not widen the latter without flagging it.
+- Fuzz targets live in `fuzz/` and cover the frame reader, CAIP parsing, prost decoding and SIWx parsing. Property tests use `proptest` and are colocated in the crate they exercise.
