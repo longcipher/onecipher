@@ -55,6 +55,10 @@ The mutation recipe is this repo's mutation-testing gate. CI does not call `just
 - The duplicate-dependency gate is a ratchet, not a zero-duplicates rule: the baseline only ever moves down. Lower it in the same change that removes a duplicate.
 - `unsafe` is confined to the low-level modules: `oc-crypto/src/page_guard.rs` (mlock/madvise), `oc-keyagent/src/{sandbox,enclave,hardening,socket_guard,server}.rs` (seccomp, prctl, socket checks), `oc-core/src/{paths,config}.rs`, `oc-signer/src/{mnemonic,process_hardening}.rs` and `oc-netagent/src/{rpc_client,intent/hot_path}.rs`. Every `unsafe` block documents its safety invariant; the other crates keep `#![forbid(unsafe_code)]`.
 - Sensitive material must live in `oc_crypto::HardenedBytes` (mlock + `MADV_DONTDUMP` + zeroize on drop) or `secrecy::SecretBox`, never in `String` or `Vec<u8>`.
+- Workspace MSRV is Rust 1.100. Prefer newly stabilized features and APIs over older workarounds; do not add feature gates for anything already stable in 1.100.
+- `[workspace.lints.cargo]` enables Cargo's native `unused_dependencies` lint, the only unused-dependency check; do not reintroduce a third-party checker. Its level is `warn`, and `.cargo/config.toml` sets `build.warnings = "deny"`, so a finding fails the gate.
+- `.cargo/config.toml` sets resolver `incompatible-rust-versions = "fallback"` (MSRV-aligned resolution) and `registry.global-min-publish-age = "5 days"` (Rust 1.100 dependency cooldown); keep both.
+
 
 ## Dependency choices
 

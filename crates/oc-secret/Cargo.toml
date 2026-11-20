@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Unified secret vault with age encryption for OneCipher"
+rust-version.workspace = true
 
 [features]
 default = []

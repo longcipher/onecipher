@@ -13,6 +13,7 @@ pipelining = true
 # Parallel jobs. Overridable via `--jobs` / `CARGO_BUILD_JOBS`.
 # Default to the number of logical CPUs.
 # jobs = 8
+warnings = "deny"
 
 [net]
 # Retry failed network fetches a few times before giving up.
@@ -43,3 +44,10 @@ retry = 3
 [registries.crates-io]
 # Use the sparse protocol (default in 1.68+) for faster index fetches.
 protocol = "sparse"
+
+[resolver]
+incompatible-rust-versions = "fallback"
+
+[registry]
+default = "crates-io"
+global-min-publish-age = "5 days"

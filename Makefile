@@ -17,7 +17,6 @@ format:
 	rumdl fmt .
 	cargo sort -w -g
 	cargo +nightly fmt --all
-	cargo shear --fix
 
 fix:
 	rumdl check --fix .
@@ -29,7 +28,6 @@ lint:
 	cargo +nightly fmt --all -- --check
 	RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
 	cargo sort -w -g -c
-	cargo shear
 	cargo workspace-inheritance-check
 	./scripts/check-duplicate-deps.sh
 
@@ -92,7 +90,6 @@ ci: lint test build ext-build ext-test ext-conformance ext-e2e ext-pack
 
 setup:
 	cargo install cargo-sort
-	cargo install cargo-shear
 	rustup toolchain install nightly --component rustfmt clippy
 
 audit:

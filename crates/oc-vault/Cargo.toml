@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Wallet vault (filesystem 700/600, age-encrypted wallets, age backup bundles) for OneCipher"
+rust-version.workspace = true
 
 [features]
 # Test-only low age scrypt work factor for fast unit tests. NEVER enable in

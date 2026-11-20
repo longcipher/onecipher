@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Network-Agent: WalletConnect v2 wallet-role server for OneCipher — relays to Key-Agent over UDS"
+rust-version.workspace = true
 
 [lib]
 name = "oc_netagent"

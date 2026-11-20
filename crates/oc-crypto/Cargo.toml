@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Post-quantum crypto, memory hardening, and PQC primitives for OneCipher (R51/R52: zero I/O, zero network deps)"
+rust-version.workspace = true
 
 [dependencies]
 getrandom = { workspace = true }

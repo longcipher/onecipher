@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Multi-chain SessionKeyProvider trait + EVM/Solana impls for OneCipher"
+rust-version.workspace = true
 
 [features]
 # Real on-chain RPC implementations (alloy / solana-rpc-client) live in

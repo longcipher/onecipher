@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "WalletConnect v2 protocol wrapper (wallet + dApp roles) — BSL-1.1 licensed"
+rust-version.workspace = true
 
 [features]
 default = []

@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Key-Agent main loop (sync std::os::unix::net + std::thread, NO tokio) for OneCipher"
+rust-version.workspace = true
 
 [lib]
 name = "oc_keyagent"

@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "Web UI approval surface for OneCipher daemon"
+rust-version.workspace = true
 
 [dependencies]
 axum = { workspace = true, features = ["ws", "macros"] }

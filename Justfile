@@ -24,7 +24,6 @@ format:
   rumdl fmt .
   cargo sort -w -g
   cargo +nightly fmt --all
-  cargo shear --fix
 
 # Auto-fix clippy warnings.
 fix:
@@ -38,7 +37,6 @@ lint:
   cargo +nightly fmt --all -- --check
   RUSTC_WRAPPER= cargo +nightly clippy --all -- -D warnings
   cargo sort -w -g -c
-  cargo shear
   cargo workspace-inheritance-check
   ./scripts/check-duplicate-deps.sh
   just check-mutation-scope
@@ -144,7 +142,6 @@ ci: lint test build ext-build ext-test ext-conformance ext-e2e ext-pack
 # Install all required development tools.
 setup:
   cargo install cargo-sort
-  cargo install cargo-shear
   rustup toolchain install nightly --component rustfmt clippy
 
 # Run cargo audit to check for known vulnerabilities.

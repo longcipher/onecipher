@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 description = "High-level wallet API for the OneCipher project"
+rust-version.workspace = true
 
 [features]
 default = ["rpc", "sui-grpc"]
