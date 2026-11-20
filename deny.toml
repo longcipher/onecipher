@@ -75,5 +75,5 @@ unknown-git = "deny"
 # allow-git = ["https://github.com/<org>/<repo>"]  # reason: <dated rationale + expiry>
 
 [features]
-# Intentionally empty: feature unification is enforced by `cargo shear` +
-# `scripts/check-duplicate-deps.sh`, not by cargo-deny.
+# Intentionally empty: feature unification is enforced by Cargo's native
+# `unused_dependencies` lint + `scripts/check-duplicate-deps.sh`, not by cargo-deny.

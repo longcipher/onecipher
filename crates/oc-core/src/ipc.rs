@@ -23,7 +23,8 @@
 //! This module intentionally contains no wire types yet — it is a boundary marker
 //! so `cargo check` and reviewers can see the intended direction.
 
-// Marker to keep the module non-empty for `cargo shear` (doc-only modules are
-// flagged as empty files). Reserved for future wire-type re-export.
+// Marker to keep the module non-empty for Cargo's native `unused_dependencies`
+// lint (doc-only modules are flagged as empty files). Reserved for future
+// wire-type re-export.
 #[allow(dead_code)]
 pub struct IpcBoundaryMarker(());

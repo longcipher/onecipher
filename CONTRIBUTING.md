@@ -5,7 +5,7 @@
 ```bash
 git clone https://github.com/longcipher/onecipher.git
 cd onecipher
-just setup    # install cargo-sort, cargo-shear, nightly toolchain
+just setup    # install cargo-sort, nightly toolchain
 just build    # build the workspace
 just test     # run unit + integration tests
 ```
@@ -23,7 +23,7 @@ just test     # run unit + integration tests
 - **Formatting**: `cargo +nightly fmt` (enforced in CI)
 - **Linting**: `cargo +nightly clippy -- -D warnings` (pedantic + nursery)
 - **Sorting**: `cargo sort -w -g` (workspace members sorted)
-- **No unused deps**: `cargo shear`
+- **No unused deps**: Cargo's native `unused_dependencies` lint
 
 ## Hard Gates (Non-Negotiable)
 
