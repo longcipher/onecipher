@@ -8,7 +8,6 @@
 # Enable pipelined compilation (cargo 1.40+). Cargo passes the rmeta files
 # to downstream crates before the upstream crate finishes codegen, so large
 # dependency graphs compile faster.
-pipelining = true
 
 # Parallel jobs. Overridable via `--jobs` / `CARGO_BUILD_JOBS`.
 # Default to the number of logical CPUs.
