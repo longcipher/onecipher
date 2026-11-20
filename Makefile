@@ -7,7 +7,7 @@
 # List targets:  make help
 # Run a target:  make <target>
 
-.PHONY: help format fix lint test test-all mutants mutants-incremental e2e ext-build ext-test ext-e2e ext-conformance ext-pack build release check clean docs ci setup audit r12-check deps-duplicates deps-check no-std no-std-thumbv7m skill-check makefile-check deny security
+.PHONY: help format fix lint test test-all mutants mutants-incremental check-mutation-scope e2e ext-build ext-test ext-e2e ext-conformance ext-pack build release check clean docs ci setup audit r12-check deps-duplicates deps-check no-std no-std-thumbv7m skill-check makefile-check deny security
 
 help:
 	@echo "OneCipher make targets (mirror of Justfile):"
@@ -39,10 +39,13 @@ test:
 test-all: test
 
 mutants:
-	cargo mutants --workspace --all-features
+	@bash scripts/mutation-diff.sh $(ARGS)
 
 mutants-incremental:
-	cargo mutants --in-place --since main --all-features
+	@bash scripts/mutation-diff.sh
+
+check-mutation-scope:
+	@bash scripts/check-mutation-scope.sh
 
 e2e:
 	cargo build --release --bin onecipher

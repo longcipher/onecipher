@@ -22,7 +22,7 @@
 - Parallelize aggressively: dispatch subagents for independent research, exploration, and implementation.
 - NEVER run two `cargo` commands concurrently, and never overlap file edits with a running `cargo` command (`target/` file lock): finish edits, wait, then run.
 - NEVER use `git worktree`. Edit the current branch in place.
-- TDD for behavior changes: failing crate-local test first, smallest change to pass, then run `just mutants` and fix surviving mutants.
+- TDD for behavior changes: failing crate-local test first, smallest change to pass, then run the mutation gate only when the current spec task declares `Mutation:`, and fix surviving mutants.
 
 ## Verification loop
 
@@ -32,10 +32,15 @@ After each feature or bug fix, in order; any failure means the task is not done:
 just format
 just lint
 just test
-just mutants
 ```
 
-`just mutants` is this repo's mutation-testing recipe. CI does not call `just`; it runs the same cargo commands job by job, so `just lint` must stay equivalent to those jobs.
+Mutation testing is intentionally absent from the default loop and from CI. When a spec task
+declares `Mutation: <src-glob>`, follow the `/pb-build` gate: write the changed file's diff to a
+temp file and run `cargo mutants --in-diff <diff-file>` for that file only, with at most 3 files /
+60 mutants / 300 s. Never add a whole-repo mutation recipe: `just check-mutation-scope` fails
+`just lint` when an unbounded mutation command appears in a build or CI file.
+
+The mutation recipe is this repo's mutation-testing gate. CI does not call `just`; it runs the same cargo commands job by job, so `just lint` must stay equivalent to those jobs.
 
 ## Workspace rules
 

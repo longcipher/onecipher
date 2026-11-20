@@ -41,6 +41,7 @@ lint:
   cargo shear
   cargo workspace-inheritance-check
   ./scripts/check-duplicate-deps.sh
+  just check-mutation-scope
 
 # ============================================================
 # Testing
@@ -53,13 +54,30 @@ test:
 # Run all tests (alias for `test`).
 test-all: test
 
-# Run mutation testing on the full workspace (requires cargo-mutants).
-mutants:
-  cargo mutants --workspace --all-features
+# Mutation testing is intentionally absent from the default loop and from CI.
+#
+# Whole-workspace mutation runs are prohibited: a `cargo mutants` run over the
+# whole workspace takes hours and rarely finishes, so it is never a gate and
+# never a completion check. Only the lines the current change touched are
+# mutated, within the /pb-build budget: at most 3 files, 60 mutants, 300 s.
+#
+#   just mutants                            # every changed .rs file
+#   just mutants crates/core/src/parser.rs  # one specific file
+#
+# The Justfile and the Makefile call the same script, so `just mutants` and
+# `make mutants` run exactly the same gate.
+#
+# Mutate the lines this change touched, within the /pb-build budget.
+mutants *args:
+  @bash scripts/mutation-diff.sh {{args}}
 
-# Run incremental mutation testing (only files changed vs main).
+# Check that no build or CI file regains an unbounded mutation command.
+check-mutation-scope:
+  @bash scripts/check-mutation-scope.sh
+
+# Alias of `mutants`: the same diff-scoped, budget-capped gate.
 mutants-incremental:
-  cargo mutants --in-place --since main --all-features
+  @bash scripts/mutation-diff.sh
 
 # Run the CLI end-to-end suite against a release build (isolated HOME/runtime dir).
 e2e bin="onecipher":
