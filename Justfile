@@ -45,6 +45,10 @@ lint:
 # Testing
 # ============================================================
 
+# Run the prek commit hooks on every tracked file (requires prek)
+hooks:
+  prek run --all-files
+
 # Run all unit + integration tests.
 test:
   cargo test --workspace --all-features
